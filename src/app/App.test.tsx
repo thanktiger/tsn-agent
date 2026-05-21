@@ -104,6 +104,13 @@ describe("App", () => {
     );
   });
 
+  it("shows a product empty state before the first interaction", () => {
+    render(<App />);
+
+    expect(screen.getByText("描述你的 TSN 需求后生成拓扑图")).toBeInTheDocument();
+    expect(screen.queryByText("等待 tsn-topology skill 输出拓扑")).not.toBeInTheDocument();
+  });
+
   it("generates a topology stage and waits for confirmation from a beginner request", async () => {
     const user = userEvent.setup();
 

@@ -149,6 +149,7 @@ export function App() {
   const workflow = currentSession.workflow;
   const scenarioConfig = getScenarioConfig(workflow.scenarioConfigId);
   const currentStage = workflow.stages[workflow.currentStep];
+  const hasUserInteraction = currentSession.messages.some((message) => message.role === "user");
   const canExport = Boolean(bundle && workflow.currentStep === "planning-export");
   const canRefreshBundle = Boolean(
     project
@@ -766,7 +767,13 @@ export function App() {
                   <Controls showInteractive={false} />
                 </ReactFlow>
               ) : (
-                <div className="topology-empty mono">等待 tsn-topology skill 输出拓扑</div>
+                <div className="topology-empty mono">
+                  {isAgentRunning
+                    ? "正在生成拓扑图"
+                    : hasUserInteraction
+                      ? "拓扑生成后在这里显示"
+                      : "描述你的 TSN 需求后生成拓扑图"}
+                </div>
               )}
             </div>
           </div>
