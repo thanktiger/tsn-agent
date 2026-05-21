@@ -2,6 +2,7 @@ import type { AgentEvent } from "../agent/fake-agent";
 import type { CanonicalTsnProjectV0 } from "../domain/canonical";
 import type { ArtifactBundle } from "../export/artifact-bundle";
 import { normalizeWorkflowState, type WorkflowState } from "../project/project-state";
+import { repairSessionTopologyFromMessages } from "./session-topology-repair";
 import { invoke } from "@tauri-apps/api/core";
 
 const STORAGE_KEY = "tsn-agent.sessions.v0";
@@ -234,7 +235,7 @@ export function createEmptySession(): TsnSession {
         id: createId("message"),
         role: "assistant",
         createdAt: now,
-        content: "告诉我你想搭建的 TSN 网络规模，我会按步骤给出拓扑、流模板和导出文件。",
+        content: "告诉我你想搭建的 TSN 网络规模，我会按步骤给出拓扑、时间同步、流量规划和模拟仿真准备。",
       },
     ],
     agentEvents: [],
@@ -291,11 +292,11 @@ function storedSessionToSession(session: StoredSession | undefined): TsnSession 
 }
 
 function normalizeSession(session: TsnSession): TsnSession {
-  return {
+  return repairSessionTopologyFromMessages({
     ...session,
     agentEvents: session.agentEvents ?? [],
     workflow: normalizeWorkflowState(session.workflow),
-  };
+  });
 }
 
 function isSession(session: TsnSession | undefined): session is TsnSession {

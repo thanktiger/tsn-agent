@@ -1,4 +1,5 @@
 import { redactSecrets } from "../sessions/session-repository";
+import { redactProviderNamesForDisplay, redactProviderNamesInValue } from "../ui/display-redaction";
 
 export type DiagnosticLogLevel = "debug" | "info" | "warn" | "error";
 export type DiagnosticLogCategory = "agent" | "session" | "artifact" | "system";
@@ -40,6 +41,7 @@ export function createDiagnosticLogEntry(input: DiagnosticLogInput): DiagnosticL
 export function sanitizeDiagnosticLogEntry(entry: DiagnosticLogEntry): DiagnosticLogEntry {
   return {
     ...entry,
+    runId: entry.runId ? redactProviderNamesForDisplay(entry.runId) : undefined,
     message: redactAndTruncate(entry.message),
     details: entry.details ? sanitizeDetails(entry.details) : undefined,
   };
@@ -56,7 +58,7 @@ export function summarizeText(value: string, maxLength = 160): string {
 }
 
 function sanitizeDetails(details: Record<string, unknown>): Record<string, unknown> {
-  return sanitizeValue(details, 0) as Record<string, unknown>;
+  return redactProviderNamesInValue(sanitizeValue(details, 0)) as Record<string, unknown>;
 }
 
 function sanitizeValue(value: unknown, depth: number): unknown {
@@ -95,7 +97,7 @@ function isSensitiveKey(key: string): boolean {
 }
 
 function redactAndTruncate(value: string): string {
-  const redacted = redactSecrets(value);
+  const redacted = redactProviderNamesForDisplay(redactSecrets(value));
 
   if (redacted.length <= MAX_DETAIL_STRING_LENGTH) {
     return redacted;

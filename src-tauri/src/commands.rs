@@ -20,6 +20,7 @@ pub struct ClaudeAgentRequest {
     app_session_id: Option<String>,
     resume_session_id: Option<String>,
     conversation_context: Option<String>,
+    stage_runner_input: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -27,6 +28,7 @@ pub struct ClaudeAgentRequest {
 pub struct ClaudeAgentResponse {
     assistant_text: String,
     session_id: Option<String>,
+    stage_results: Vec<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -34,6 +36,8 @@ pub struct ClaudeAgentResponse {
 struct ClaudeWorkerResponse {
     assistant_text: String,
     session_id: Option<String>,
+    #[serde(default)]
+    stage_results: Vec<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -44,6 +48,8 @@ struct ClaudeWorkerEvent {
     text: Option<String>,
     session_id: Option<String>,
     assistant_text: Option<String>,
+    #[serde(default)]
+    stage_results: Vec<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -62,7 +68,7 @@ pub async fn run_claude_agent(
 ) -> Result<ClaudeAgentResponse, String> {
     tauri::async_runtime::spawn_blocking(move || run_claude_agent_blocking(app, request))
         .await
-        .map_err(|error| format!("Claude task failed: {error}"))?
+        .map_err(|error| format!("智能助手任务失败：{error}"))?
 }
 
 fn run_claude_agent_blocking(
@@ -89,7 +95,7 @@ fn run_claude_agent_blocking(
         app_session_id.as_deref(),
         &run_id,
         "info",
-        "Claude worker 准备启动",
+        "Agent worker 准备启动",
         None,
         serde_json::json!({
             "hasResumeSession": request.resume_session_id.is_some(),
@@ -103,6 +109,7 @@ fn run_claude_agent_blocking(
         "runId": run_id,
         "resumeSessionId": request.resume_session_id,
         "conversationContext": request.conversation_context,
+        "stageRunnerInput": request.stage_runner_input,
     })
     .to_string();
 
@@ -119,12 +126,12 @@ fn run_claude_agent_blocking(
                 app_session_id.as_deref(),
                 &run_id,
                 "error",
-                "Claude worker 启动失败",
+                "Agent worker 启动失败",
                 None,
                 serde_json::json!({ "error": redact_error(&error.to_string()) }),
             );
             format!(
-                "无法启动 Claude Agent SDK worker。请确认 Node.js 可用。{}",
+                "无法启动智能助手运行时。请确认 Node.js 可用。{}",
                 redact_error(&error.to_string())
             )
         })?;
@@ -133,7 +140,7 @@ fn run_claude_agent_blocking(
         app_session_id.as_deref(),
         &run_id,
         "info",
-        "Claude worker 已启动",
+        "Agent worker 已启动",
         None,
         serde_json::json!({ "workerPath": worker_path.display().to_string() }),
     );
@@ -141,11 +148,11 @@ fn run_claude_agent_blocking(
     let stdout = child
         .stdout
         .take()
-        .ok_or_else(|| "Claude Agent SDK stdout 不可用。".to_string())?;
+        .ok_or_else(|| "智能助手运行时 stdout 不可用。".to_string())?;
     let stderr = child
         .stderr
         .take()
-        .ok_or_else(|| "Claude Agent SDK stderr 不可用。".to_string())?;
+        .ok_or_else(|| "智能助手运行时 stderr 不可用。".to_string())?;
     let (stdout_rx, stdout_thread) = spawn_line_reader(stdout, "stdout");
     let (stderr_rx, stderr_thread) = spawn_line_reader(stderr, "stderr");
     let mut stdout_lines = Vec::new();
@@ -173,16 +180,16 @@ fn run_claude_agent_blocking(
                     app_session_id.as_deref(),
                     &run_id,
                     "error",
-                    "Claude worker 执行超时",
+                    "Agent worker 执行超时",
                     Some(started_at.elapsed().as_millis() as i64),
                     serde_json::json!({ "timeoutMs": CLAUDE_BRIDGE_SYNC_TIMEOUT.as_millis() }),
                 );
-                return Err("Claude Agent SDK 执行超时，已取消本次请求。".to_string());
+                return Err("智能助手运行时执行超时，已取消本次请求。".to_string());
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(100)),
             Err(error) => {
                 return Err(format!(
-                    "Claude Agent SDK 状态检查失败：{}",
+                    "智能助手运行时状态检查失败：{}",
                     redact_error(&error.to_string())
                 ))
             }
@@ -204,38 +211,39 @@ fn run_claude_agent_blocking(
         .try_wait()
         .map_err(|error| {
             format!(
-                "Claude Agent SDK 输出读取失败：{}",
+                "智能助手运行时输出读取失败：{}",
                 redact_error(&error.to_string())
             )
         })?
-        .ok_or_else(|| "Claude Agent SDK 状态读取失败。".to_string())?;
+        .ok_or_else(|| "智能助手运行时状态读取失败。".to_string())?;
     let stderr = stderr_lines.join("\n");
     let stdout = stdout_lines.join("\n");
 
     if !output.success() {
+        let error_summary = redact_error(&first_non_empty(
+            &stderr,
+            "智能助手运行时未返回最终结果。",
+        ));
         log_worker_event(
             &app,
             app_session_id.as_deref(),
             &run_id,
             "error",
-            "Claude worker 执行失败",
+            "Agent worker 执行失败",
             Some(started_at.elapsed().as_millis() as i64),
             serde_json::json!({
                 "status": output.code(),
-                "error": redact_error(&first_non_empty(&stderr, &stdout)),
+                "error": error_summary.clone(),
             }),
         );
-        return Err(format!(
-            "Claude Agent SDK 执行失败：{}",
-            redact_error(&first_non_empty(&stderr, &stdout))
-        ));
+        return Err(format!("智能助手运行时执行失败：{}", error_summary));
     }
 
     let final_response = response
         .or_else(|| parse_worker_output(&stdout).ok())
         .ok_or_else(|| {
             format!(
-                "Claude Agent SDK 没有返回最终结果：{}",
+                "智能助手运行时没有返回最终结果：{}",
                 redact_error(&stdout)
             )
         })?;
@@ -245,7 +253,7 @@ fn run_claude_agent_blocking(
         app_session_id.as_deref(),
         &run_id,
         "info",
-        "Claude worker 执行完成",
+        "Agent worker 执行完成",
         Some(started_at.elapsed().as_millis() as i64),
         serde_json::json!({
             "claudeSessionId": final_response.session_id,
@@ -266,19 +274,20 @@ fn parse_worker_output(stdout: &str) -> Result<ClaudeAgentResponse, String> {
         .unwrap_or(stdout.trim());
     let parsed: ClaudeWorkerResponse = serde_json::from_str(final_line.trim()).map_err(|_| {
         format!(
-            "Claude Agent SDK 返回了非 JSON 输出：{}",
+            "智能助手运行时返回了非 JSON 输出：{}",
             redact_error(stdout)
         )
     })?;
     let assistant_text = parsed.assistant_text.trim().to_string();
 
     if assistant_text.is_empty() {
-        return Err("Claude Agent SDK 没有返回可展示内容。".to_string());
+        return Err("智能助手运行时没有返回可展示内容。".to_string());
     }
 
     Ok(ClaudeAgentResponse {
         assistant_text,
         session_id: parsed.session_id,
+        stage_results: parsed.stage_results,
     })
 }
 
@@ -305,7 +314,7 @@ where
                 }
                 Err(error) => {
                     let _ = tx.send(Err(format!(
-                        "Claude Agent SDK {stream_name} 读取失败：{}",
+                        "智能助手运行时 {stream_name} 读取失败：{}",
                         redact_error(&error.to_string())
                     )));
                     break;
@@ -374,7 +383,7 @@ fn handle_worker_line(
 ) -> Result<(), String> {
     let parsed: ClaudeWorkerEvent = serde_json::from_str(line).map_err(|_| {
         format!(
-            "Claude Agent SDK 返回了非 JSON 输出：{}",
+            "智能助手运行时返回了非 JSON 输出：{}",
             redact_error(line)
         )
     })?;
@@ -393,7 +402,7 @@ fn handle_worker_line(
                 app_session_id,
                 &run_id,
                 "info",
-                "Claude worker 返回 session id",
+                "Agent worker 返回 session id",
                 None,
                 serde_json::json!({ "claudeSessionId": parsed.session_id }),
             );
@@ -403,12 +412,13 @@ fn handle_worker_line(
             let assistant_text = parsed.assistant_text.unwrap_or_default().trim().to_string();
 
             if assistant_text.is_empty() {
-                return Err("Claude Agent SDK 没有返回可展示内容。".to_string());
+                return Err("智能助手运行时没有返回可展示内容。".to_string());
             }
 
             *response = Some(ClaudeAgentResponse {
                 assistant_text,
                 session_id: parsed.session_id,
+                stage_results: parsed.stage_results,
             });
         }
         _ => {}
@@ -513,12 +523,23 @@ fn find_worker_path(app: Option<&tauri::AppHandle>) -> Result<PathBuf, String> {
     }
 
     Err(format!(
-        "未找到 Claude Agent SDK worker：{}。请先运行 npm run build:worker。",
+        "未找到智能助手运行时 worker：{}。请先运行 npm run build:worker。",
         worker_path.display()
     ))
 }
 
 fn repo_root_from_worker(worker_path: &Path) -> PathBuf {
+    if worker_path
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str())
+        == Some("dist")
+    {
+        if let Some(repo_root) = worker_path.parent().and_then(Path::parent).and_then(Path::parent) {
+            return repo_root.to_path_buf();
+        }
+    }
+
     worker_path
         .parent()
         .and_then(Path::parent)
@@ -536,6 +557,14 @@ fn first_non_empty<'a>(left: &'a str, right: &'a str) -> &'a str {
 
 fn redact_error(value: &str) -> String {
     value
+        .replace("claude-run-", "agent-run-")
+        .replace("Claude Code", "智能助手工具")
+        .replace("Claude Agent SDK", "智能助手运行时")
+        .replace("Claude Agent", "智能助手")
+        .replace("Claude SDK", "智能助手运行时")
+        .replace("Claude", "智能助手")
+        .replace("智能助手-run-", "agent-run-")
+        .replace("claude_api_key", "agent_api_key")
         .replace("sk-ant-", "sk-ant-[redacted]-")
         .split_whitespace()
         .map(redact_token_like_word)
@@ -594,7 +623,7 @@ fn validate_context(context: Option<&str>) -> Result<(), String> {
 
 fn create_run_id() -> String {
     format!(
-        "claude-run-{}",
+        "agent-run-{}",
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|duration| duration.as_nanos())
@@ -610,7 +639,7 @@ impl ClaudeAgentRunGuard {
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
             .is_err()
         {
-            return Err("Claude Agent 正在处理上一条请求，请稍后再试。".to_string());
+            return Err("智能助手正在处理上一条请求，请稍后再试。".to_string());
         }
 
         Ok(Self)
@@ -629,12 +658,14 @@ mod tests {
 
     #[test]
     fn parses_worker_json_output() {
-        let output = r#"{"assistantText":" 已生成规划说明 ","sessionId":"abc"}"#;
+        let output = r#"{"assistantText":" 已生成规划说明 ","sessionId":"abc","stageResults":[{"stage":"topology"}]}"#;
 
         let parsed = parse_worker_output(output).expect("valid response");
 
         assert_eq!(parsed.assistant_text, "已生成规划说明");
         assert_eq!(parsed.session_id.as_deref(), Some("abc"));
+        assert_eq!(parsed.stage_results.len(), 1);
+        assert_eq!(parsed.stage_results[0]["stage"], "topology");
     }
 
     #[test]
@@ -650,6 +681,25 @@ mod tests {
         let worker_path = find_worker_path(None).expect("worker exists in source tree");
 
         assert!(worker_path.ends_with("src-node/dist/claude-agent-worker.mjs"));
+    }
+
+    #[test]
+    fn resolves_repo_root_for_development_dist_worker() {
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let repo_root = manifest_dir.parent().expect("repo root");
+        let worker_path = repo_root.join("src-node/dist/claude-agent-worker.mjs");
+
+        assert_eq!(repo_root_from_worker(&worker_path), repo_root);
+    }
+
+    #[test]
+    fn tauri_bundle_includes_all_stage_skill_resources() {
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let tauri_config_path = manifest_dir.join("tauri.conf.json");
+        let tauri_config = std::fs::read_to_string(tauri_config_path).expect("tauri config");
+
+        assert!(tauri_config.contains("../.claude/skills/tsn-topology/SKILL.md"));
+        assert!(tauri_config.contains("../.claude/skills/tsn-flow-planning/SKILL.md"));
     }
 
     #[test]

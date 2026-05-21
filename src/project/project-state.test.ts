@@ -2,6 +2,10 @@ import { describe, expect, it } from "vitest";
 import { createProjectFromIntent } from "../domain/topology-factory";
 import { createArtifactBundle } from "../export/artifact-bundle";
 import {
+  STAGE_SKILL_SCHEMA_VERSION,
+  type StageSkillSummary,
+} from "../agent/stage-skill-contract";
+import {
   confirmCurrentStage,
   createInitialWorkflowState,
   createProjectState,
@@ -57,14 +61,24 @@ describe("project state snapshots", () => {
   });
 
   it("records stage results and advances only after confirmation", () => {
+    const skillResult: StageSkillSummary = {
+      schemaVersion: STAGE_SKILL_SCHEMA_VERSION,
+      stage: "topology",
+      skillName: "tsn-topology",
+      status: "success",
+      summary: "拓扑已生成",
+      validation: { ok: true, errors: [] },
+    };
     const topologyWaiting = recordStageResult(createInitialWorkflowState(), {
       step: "topology",
       summary: "拓扑已生成",
+      skillResult,
       createdAt: "2026-05-20T00:00:00.000Z",
     });
 
     expect(topologyWaiting.currentStep).toBe("topology");
     expect(topologyWaiting.stages.topology.status).toBe("waiting_confirmation");
+    expect(topologyWaiting.stages.topology.skillResult).toEqual(skillResult);
     expect(topologyWaiting.availableActions).toContain("confirm-stage");
 
     const next = confirmCurrentStage(topologyWaiting, "2026-05-20T00:01:00.000Z");

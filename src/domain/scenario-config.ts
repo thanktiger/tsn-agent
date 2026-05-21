@@ -8,7 +8,7 @@ export interface ScenarioFlowTemplate {
   id: string;
   name: string;
   description: string;
-  flowType: "ST";
+  flowType: "ST" | "BE";
   periodUs: number;
   frameSizeBytes: number;
   pcp: number;
@@ -48,8 +48,8 @@ export const SCENARIO_CONFIGS: Record<ScenarioConfigId, ScenarioConfig> = {
     stageLabels: {
       topology: "拓扑",
       "time-sync": "时间同步",
-      "flow-template": "建立流",
-      "planning-export": "发送规划",
+      "flow-template": "流量规划",
+      "planning-export": "模拟仿真",
     },
     defaults: {
       topology: {
@@ -84,8 +84,8 @@ export const SCENARIO_CONFIGS: Record<ScenarioConfigId, ScenarioConfig> = {
     stageLabels: {
       topology: "载荷网络拓扑",
       "time-sync": "统一时钟",
-      "flow-template": "关键业务流",
-      "planning-export": "发送规划",
+      "flow-template": "关键流量规划",
+      "planning-export": "模拟仿真",
     },
     defaults: {
       topology: {
@@ -98,14 +98,14 @@ export const SCENARIO_CONFIGS: Record<ScenarioConfigId, ScenarioConfig> = {
     flowTemplates: [
       {
         id: "flight-control-st",
-        name: "飞控控制流-1",
-        description: "面向载荷/飞控链路的 ST 关键控制流模板。",
+        name: "时序控制消息-1",
+        description: "面向箭载双冗余链路的 1ms ST 时序控制消息模板。",
         flowType: "ST",
-        periodUs: 250,
-        frameSizeBytes: 512,
-        pcp: 6,
+        periodUs: 1_000,
+        frameSizeBytes: 10,
+        pcp: 7,
         latencyRequirementUs: 1_000,
-        jitterRequirementUs: 10,
+        jitterRequirementUs: 0.5,
       },
     ],
     terminology: {

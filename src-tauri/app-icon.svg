@@ -1,14 +1,14 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
-  <rect width="1024" height="1024" rx="220" fill="#ffffff"/>
-  <rect x="292" y="286" width="440" height="56" rx="28" fill="#0b2540"/>
-  <rect x="292" y="484" width="440" height="56" rx="28" fill="#0b2540"/>
-  <rect x="292" y="682" width="440" height="56" rx="28" fill="#0b2540"/>
-  <circle cx="292" cy="314" r="82" fill="#0b2540"/>
-  <circle cx="732" cy="314" r="82" fill="#0b2540"/>
-  <circle cx="292" cy="512" r="82" fill="#0ea5b7"/>
-  <circle cx="732" cy="512" r="82" fill="#0b2540"/>
-  <circle cx="292" cy="710" r="82" fill="#0b2540"/>
-  <circle cx="732" cy="710" r="82" fill="#0ea5b7"/>
-  <rect x="424" y="476" width="158" height="72" rx="36" fill="#f97316"/>
-  <polygon points="582,410 714,512 582,614" fill="#f97316"/>
+  <circle cx="512" cy="512" r="456" fill="#fa541c"/>
+  <path
+    fill="#ffffff"
+    d="M727 276c27-10 52 17 40 44L608 694c-12 29-54 29-65-1l-64-169-180-45c-31-8-35-50-6-63l434-140Z"
+  />
+  <path fill="#fa541c" d="M470 522 701 329c8-7 18 4 11 12L534 585l17 82-81-145Z"/>
+  <g fill="none" stroke="#ffffff" stroke-linecap="round" stroke-width="38">
+    <path d="M279 596 231 644"/>
+    <path d="M347 600 270 677"/>
+    <path d="M263 695 216 742"/>
+    <path d="M337 696 289 744"/>
+  </g>
 </svg>

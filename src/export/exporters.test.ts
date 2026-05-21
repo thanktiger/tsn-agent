@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createProjectFromIntent } from "../domain/topology-factory";
+import { createProjectFromIntent, withFlowsFromIntent } from "../domain/topology-factory";
 import { createArtifactBundle } from "./artifact-bundle";
 import { exportOmnetppIni } from "./ini-exporter";
 import { exportNed } from "./ned-exporter";
@@ -50,6 +50,33 @@ describe("exporters", () => {
       flow_type: "ST",
       ip_protocol: 17,
       pcp: "6",
+    });
+  });
+
+  it("exports requested video flow in planner input", () => {
+    const projectWithVideo = withFlowsFromIntent(
+      createProjectFromIntent("我需要2个交换机，每个交换机连接3个端系统", undefined, {
+        includeControlFlow: false,
+      }),
+      "两条流，一条视频流，一条控制流",
+    );
+
+    const plannerInput = exportPlannerInput(projectWithVideo);
+
+    expect(plannerInput.stream_info).toHaveLength(2);
+    expect(plannerInput.stream_info.map((stream) => stream.stream_name)).toEqual(["控制流-1", "视频流-1"]);
+    expect(plannerInput.stream_info[1]).toMatchObject({
+      stream_id: 2,
+      stream_name: "视频流-1",
+      size: String(50 * 1024),
+      period: "33333",
+    });
+    expect(plannerInput.stream_info[1].path[0]).toMatchObject({
+      src_ip: "10.0.1.2",
+      dst_ip: "10.0.2.2",
+      src_port: "25564",
+      dst_port: "26029",
+      pcp: "5",
     });
   });
 

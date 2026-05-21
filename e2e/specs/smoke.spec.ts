@@ -14,19 +14,24 @@ test("beginner request moves through staged workflow and exports files", async (
   await expect(page.getByTestId("topology-canvas").getByText("SW-1")).toBeVisible();
   await expect(page.getByTestId("topology-canvas").getByText("ES-1-1")).toBeVisible();
   await expect(page.getByText("等待 tsn-topology skill 输出拓扑")).toHaveCount(0);
-  await expect(page.getByLabel("导出文件列表").getByText("完成“发送规划”阶段后显示导出文件")).toBeVisible();
+  await page.getByRole("tab", { name: "导出文件" }).click();
+  await expect(page.getByLabel("导出文件列表").getByText("完成“模拟仿真”阶段后显示仿真输入文件")).toBeVisible();
+  await page.getByRole("tab", { name: "流量列表" }).click();
 
   await page.getByRole("button", { name: "确认并继续" }).click();
   await expect(page.getByText("时间同步等待确认")).toBeVisible();
   await page.getByRole("button", { name: "确认并继续" }).click();
-  await expect(page.getByText("建立流等待确认")).toBeVisible();
+  await expect(page.getByText("流量规划等待确认")).toBeVisible();
   await page.getByRole("button", { name: "确认并继续" }).click();
-  await expect(page.getByText("发送规划等待确认")).toBeVisible();
+  await expect(page.getByText("模拟仿真等待确认")).toBeVisible();
 
+  await page.getByRole("tab", { name: "导出文件" }).click();
   await expect(page.getByLabel("导出文件列表").getByText("tsnagent/generated/network.ned", { exact: true })).toBeVisible();
   await expect(page.getByLabel("导出文件列表").getByText("omnetpp.ini", { exact: true })).toBeVisible();
   await expect(page.getByText("INET/OMNeT++ 最小运行配置")).toBeVisible();
+  await page.getByRole("tab", { name: "执行步骤" }).click();
   await expect(page.getByLabel("执行步骤").getByText("工具状态").first()).toBeVisible();
+  await page.getByRole("tab", { name: "导出文件" }).click();
   await page.getByRole("button", { name: "保存" }).click();
   await expect(page.getByText("已导出 5 个文件：browser-preview")).toBeVisible();
   await page.getByRole("button", { name: "日志" }).click();

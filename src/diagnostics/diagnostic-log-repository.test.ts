@@ -12,7 +12,7 @@ describe("BrowserDiagnosticLogRepository", () => {
     await repository.append({
       sessionId: "session-a",
       category: "agent",
-      message: "Claude 请求开始",
+      message: "智能助手请求开始",
       details: { runId: "run-a" },
     });
     await repository.append({
@@ -22,7 +22,7 @@ describe("BrowserDiagnosticLogRepository", () => {
     });
 
     expect(await repository.list("session-a")).toHaveLength(1);
-    expect((await repository.list("session-a"))[0].message).toBe("Claude 请求开始");
+    expect((await repository.list("session-a"))[0].message).toBe("智能助手请求开始");
     expect(await repository.list("session-b")).toHaveLength(1);
   });
 

@@ -33,7 +33,10 @@
       "icons/icon.ico"
     ],
     "resources": {
-      "../src-node/dist/claude-agent-worker.mjs": "src-node/claude-agent-worker.mjs"
+      "../.claude/skills/tsn-topology/SKILL.md": ".claude/skills/tsn-topology/SKILL.md",
+      "../.claude/skills/tsn-flow-planning/SKILL.md": ".claude/skills/tsn-flow-planning/SKILL.md",
+      "../src-node/dist/claude-agent-worker.mjs": "src-node/claude-agent-worker.mjs",
+      "../src-node/dist/tsn-stage-runner.mjs": "src-node/tsn-stage-runner.mjs"
     },
     "targets": "all"
   }

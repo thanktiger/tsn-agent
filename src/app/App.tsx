@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useMemo, useState } from "react";
-import { Background, Controls, Handle, Position, ReactFlow, type NodeProps } from "@xyflow/react";
+import { Background, Controls, Handle, Position, ReactFlow, type Edge, type Node, type NodeProps } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import {
   Copy,
@@ -10,7 +10,6 @@ import {
   ScrollText,
   Plus,
   RefreshCw,
-  Send,
   Trash2,
   X,
 } from "lucide-react";
@@ -26,6 +25,7 @@ import {
   type DiagnosticLogRepository,
 } from "../diagnostics/diagnostic-log-repository";
 import { DiagnosticsLogView } from "../ui/diagnostics/DiagnosticsDrawer";
+import { redactProviderNamesForDisplay } from "../ui/display-redaction";
 import { isEndSystem, isSwitch } from "../domain/canonical";
 import { createArtifactBundle } from "../export/artifact-bundle";
 import { exportReactFlowTopology } from "../export/react-flow-exporter";
@@ -49,10 +49,25 @@ import tsnAgentMark from "../assets/tsn-agent-mark.svg";
 
 const repository: SessionRepository = createSessionRepository();
 const diagnosticsRepository: DiagnosticLogRepository = createDiagnosticLogRepository();
+const ASSISTANT_CONNECTING_MESSAGE = "正在连接智能助手，并结合当前会话上下文生成下一步规划...";
 
 const nodeTypes = {
   tsnNode: TsnTopologyNode,
 };
+
+type ConfigTabId = "flows" | "node-detail" | "link-detail" | "artifacts" | "steps";
+
+type SelectedTopologyItem =
+  | { kind: "node"; id: string }
+  | { kind: "link"; id: string };
+
+const CONFIG_TABS: Array<{ id: ConfigTabId; label: string }> = [
+  { id: "flows", label: "流量列表" },
+  { id: "node-detail", label: "节点详情" },
+  { id: "link-detail", label: "链路详情" },
+  { id: "artifacts", label: "导出文件" },
+  { id: "steps", label: "执行步骤" },
+];
 
 export function App() {
   const initialSession = useMemo(() => createEmptySession(), []);
@@ -62,9 +77,13 @@ export function App() {
   const [isSessionOpen, setIsSessionOpen] = useState(false);
   const [isDiagnosticsOpen, setIsDiagnosticsOpen] = useState(false);
   const [isAgentRunning, setIsAgentRunning] = useState(false);
+  const [pendingAssistantMessageId, setPendingAssistantMessageId] = useState<string | undefined>();
   const [exportResult, setExportResult] = useState<ProjectExportResult | undefined>();
   const [exportError, setExportError] = useState<string | undefined>();
   const [exportDirectory, setExportDirectory] = useState("");
+  const [activeConfigTab, setActiveConfigTab] = useState<ConfigTabId>("flows");
+  const [selectedTopologyItem, setSelectedTopologyItem] = useState<SelectedTopologyItem | undefined>();
+  const [selectedFlowId, setSelectedFlowId] = useState<string | undefined>();
 
   useEffect(() => {
     let cancelled = false;
@@ -119,6 +138,12 @@ export function App() {
     };
   }, [currentSession.id]);
 
+  useEffect(() => {
+    setActiveConfigTab("flows");
+    setSelectedTopologyItem(undefined);
+    setSelectedFlowId(undefined);
+  }, [currentSession.id]);
+
   const project = currentSession.project;
   const bundle = currentSession.bundle;
   const workflow = currentSession.workflow;
@@ -133,11 +158,86 @@ export function App() {
   const isFlowStageVisible = workflow.stages["flow-template"].status === "waiting_confirmation"
     || workflow.stages["flow-template"].status === "confirmed";
   const visibleFlows = isFlowStageVisible ? project?.flows ?? [] : [];
-  const flowTopology = useMemo(() => (project ? exportReactFlowTopology(project) : undefined), [project]);
+  const selectedFlow = visibleFlows.find((flow) => flow.id === selectedFlowId);
+  const flowTopology = useMemo(() => {
+    if (!project) {
+      return undefined;
+    }
+
+    const topology = exportReactFlowTopology(project);
+
+    if (!selectedFlow) {
+      return topology;
+    }
+
+    const routeNodeIds = new Set(selectedFlow.routeNodeIds);
+    const routeLinkIds = new Set(selectedFlow.routeLinkIds);
+    const routeEdgeDirections = new Map(
+      selectedFlow.routeLinkIds.map((linkId, index) => [
+        linkId,
+        {
+          source: selectedFlow.routeNodeIds[index],
+          target: selectedFlow.routeNodeIds[index + 1],
+        },
+      ]),
+    );
+
+    return {
+      ...topology,
+      nodes: topology.nodes.map((node) => ({
+        ...node,
+        className: routeNodeIds.has(node.id) ? "flow-highlighted" : "flow-muted",
+        data: {
+          ...node.data,
+          highlightedByFlow: routeNodeIds.has(node.id),
+        },
+      })),
+      edges: topology.edges.map((edge) => ({
+        ...edge,
+        ...(routeEdgeDirections.get(edge.id) ?? {}),
+        animated: routeLinkIds.has(edge.id),
+        className: routeLinkIds.has(edge.id) ? "flow-highlighted" : "flow-muted",
+      })),
+    };
+  }, [project, selectedFlow]);
+  const selectedNode = selectedTopologyItem?.kind === "node"
+    ? project?.topology.nodes.find((node) => node.id === selectedTopologyItem.id)
+    : undefined;
+  const selectedLink = selectedTopologyItem?.kind === "link"
+    ? project?.topology.links.find((link) => link.id === selectedTopologyItem.id)
+    : undefined;
+  const selectedLinkSourceNode = selectedLink
+    ? project?.topology.nodes.find((node) => node.id === selectedLink.source.nodeId)
+    : undefined;
+  const selectedLinkTargetNode = selectedLink
+    ? project?.topology.nodes.find((node) => node.id === selectedLink.target.nodeId)
+    : undefined;
   const switchCount = project?.topology.nodes.filter(isSwitch).length ?? 0;
   const endSystemCount = project?.topology.nodes.filter(isEndSystem).length ?? 0;
   const linkCount = project?.topology.links.length ?? 0;
   const flowCount = visibleFlows.length;
+
+  useEffect(() => {
+    if (!project || !selectedTopologyItem) {
+      return;
+    }
+
+    const stillExists = selectedTopologyItem.kind === "node"
+      ? project.topology.nodes.some((node) => node.id === selectedTopologyItem.id)
+      : project.topology.links.some((link) => link.id === selectedTopologyItem.id);
+
+    if (!stillExists) {
+      setSelectedTopologyItem(undefined);
+    }
+  }, [project, selectedTopologyItem]);
+
+  useEffect(() => {
+    if (!selectedFlowId || visibleFlows.some((flow) => flow.id === selectedFlowId)) {
+      return;
+    }
+
+    setSelectedFlowId(undefined);
+  }, [selectedFlowId, visibleFlows]);
 
   async function persistSession(nextSession: TsnSession) {
     await repository.save(nextSession);
@@ -173,7 +273,7 @@ export function App() {
       id: createId("message"),
       role: "assistant",
       createdAt: now,
-      content: "正在连接 Claude，并结合当前会话上下文生成下一步规划...",
+      content: ASSISTANT_CONNECTING_MESSAGE,
     };
     const contextSession = currentSession;
     const pendingSession: TsnSession = {
@@ -185,6 +285,7 @@ export function App() {
 
     setInput((value) => (value.trim() === trimmedInput ? "" : value));
     setIsAgentRunning(true);
+    setPendingAssistantMessageId(assistantMessage.id);
     setExportResult(undefined);
     setExportError(undefined);
     setCurrentSession(pendingSession);
@@ -211,7 +312,8 @@ export function App() {
         diagnostics: diagnosticsRepository,
         onChunk: (chunk) => {
           streamedText += chunk;
-          updateAssistantMessage(pendingSession.id, assistantMessage.id, streamedText);
+          setPendingAssistantMessageId(undefined);
+          updateAssistantMessage(pendingSession.id, assistantMessage.id, redactProviderNamesForDisplay(streamedText));
         },
       });
       const completedAt = new Date().toISOString();
@@ -220,7 +322,9 @@ export function App() {
         title: result.project.name,
         updatedAt: completedAt,
         messages: pendingSession.messages.map((message) =>
-          message.id === assistantMessage.id ? { ...message, content: result.assistantText } : message,
+          message.id === assistantMessage.id
+            ? { ...message, content: redactProviderNamesForDisplay(result.assistantText) }
+            : message,
         ),
         claudeSessionId: result.claudeSessionId ?? pendingSession.claudeSessionId,
         agentEvents: [...pendingSession.agentEvents, ...stampAgentEvents(result.events, completedAt)],
@@ -254,6 +358,7 @@ export function App() {
       setCurrentSession((session) => (session.id === nextSession.id ? nextSession : session));
       setSessions(await repository.list());
     } catch (error) {
+      setPendingAssistantMessageId(undefined);
       logDiagnostic(diagnosticsRepository, {
         sessionId: pendingSession.id,
         category: "session",
@@ -272,12 +377,13 @@ export function App() {
           ...pendingSession,
           messages: pendingSession.messages.map((message) =>
             message.id === assistantMessage.id
-              ? { ...message, content: `本次生成失败：${normalizeError(error)}` }
+              ? { ...message, content: `本次生成失败：${redactProviderNamesForDisplay(normalizeError(error))}` }
               : message,
           ),
         };
       });
     } finally {
+      setPendingAssistantMessageId(undefined);
       setIsAgentRunning(false);
     }
   }
@@ -454,6 +560,20 @@ export function App() {
     }
   }
 
+  function handleNodeSelect(_event: unknown, node: Node) {
+    setSelectedTopologyItem({ kind: "node", id: node.id });
+    setActiveConfigTab("node-detail");
+  }
+
+  function handleLinkSelect(_event: unknown, edge: Edge) {
+    setSelectedTopologyItem({ kind: "link", id: edge.id });
+    setActiveConfigTab("link-detail");
+  }
+
+  function handleFlowSelect(flowId: string) {
+    setSelectedFlowId((currentFlowId) => (currentFlowId === flowId ? undefined : flowId));
+  }
+
   return (
     <div className="app-shell">
       <header className="brand-header">
@@ -577,9 +697,19 @@ export function App() {
 
           <div className="messages" aria-live="polite">
             {currentSession.messages.map((message) => (
-              <article className={message.role === "user" ? "msg-user" : "msg-agent"} key={message.id}>
+              <article
+                className={[
+                  message.role === "user" ? "msg-user" : "msg-agent",
+                  message.id === pendingAssistantMessageId ? "pending" : "",
+                ].filter(Boolean).join(" ")}
+                key={message.id}
+              >
                 <span className="message-role">{message.role === "user" ? "USER" : "AGENT"}</span>
-                <p>{message.content}</p>
+                {message.id === pendingAssistantMessageId ? (
+                  <AgentWaitingIndicator />
+                ) : (
+                  <p>{message.role === "assistant" ? redactProviderNamesForDisplay(message.content) : message.content}</p>
+                )}
               </article>
             ))}
           </div>
@@ -606,7 +736,7 @@ export function App() {
                 rows={3}
               />
               <button type="button" aria-label="生成规划草案" onClick={handleSubmit} disabled={isAgentRunning}>
-                <Send size={17} aria-hidden="true" />
+                <TelegramSendIcon />
               </button>
             </div>
           </div>
@@ -619,7 +749,7 @@ export function App() {
               <Stat label="交换机" value={switchCount} />
               <Stat label="端系统" value={endSystemCount} />
               <Stat label="链路" value={linkCount} />
-              <Stat label="控制流" value={flowCount} />
+              <Stat label="流量" value={flowCount} />
             </div>
             <div className="topology-canvas" aria-label="拓扑画布" data-testid="topology-canvas">
               {flowTopology ? (
@@ -629,6 +759,8 @@ export function App() {
                   nodeTypes={nodeTypes}
                   fitView
                   nodesDraggable={false}
+                  onNodeClick={handleNodeSelect}
+                  onEdgeClick={handleLinkSelect}
                 >
                   <Background />
                   <Controls showInteractive={false} />
@@ -640,59 +772,164 @@ export function App() {
           </div>
 
           <div className="config-panel">
-            <div className="config-tabs">
-              <button className="config-tab active" type="button">流量列表</button>
-              <button className="config-tab" type="button">导出文件</button>
-              <button className="config-tab" type="button">执行步骤</button>
-              <button className="config-tab" type="button" disabled>节点详情</button>
-              <button className="config-tab" type="button" disabled>链路详情</button>
+            <div className="config-tabs" role="tablist" aria-label="工程详情">
+              {CONFIG_TABS.map((tab) => (
+                <button
+                  className={activeConfigTab === tab.id ? "config-tab active" : "config-tab"}
+                  key={tab.id}
+                  type="button"
+                  role="tab"
+                  aria-selected={activeConfigTab === tab.id}
+                  aria-controls={`config-panel-${tab.id}`}
+                  id={`config-tab-${tab.id}`}
+                  onClick={() => setActiveConfigTab(tab.id)}
+                >
+                  {tab.label}
+                </button>
+              ))}
               <div className="config-spacer" />
               <span className="config-state mono">配置 · {project ? "草案" : "未生成"}</span>
             </div>
 
             <div className="config-body">
-              <section className="flow-panel" aria-label="流量列表">
+              {activeConfigTab === "flows" && (
+                <section
+                  className="flow-panel"
+                  id="config-panel-flows"
+                  role="tabpanel"
+                  aria-label="流量列表"
+                >
+                  <div className="panel-heading">
+                    <div>
+                      <h2>流量规划</h2>
+                      <p>记录当前 TSN 流、路径和关键时延参数，用于生成后续仿真输入。</p>
+                    </div>
+                    {selectedFlow && (
+                      <button className="btn" type="button" onClick={() => setSelectedFlowId(undefined)}>
+                        清除高亮
+                      </button>
+                    )}
+                  </div>
+                  <table className="eng-table">
+                    <thead>
+                      <tr>
+                        <th>ID</th>
+                        <th>Path</th>
+                        <th>Period</th>
+                        <th>PCP</th>
+                        <th>Deadline</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {visibleFlows.length > 0 ? (
+                        visibleFlows.map((flow) => (
+                          <tr
+                            aria-selected={flow.id === selectedFlowId}
+                            className={flow.id === selectedFlowId ? "flow-row selected" : "flow-row"}
+                            data-testid={`flow-row-${flow.id}`}
+                            key={flow.id}
+                            onClick={() => handleFlowSelect(flow.id)}
+                            onKeyDown={(event) => {
+                              if (event.key === "Enter" || event.key === " ") {
+                                event.preventDefault();
+                                handleFlowSelect(flow.id);
+                              }
+                            }}
+                            tabIndex={0}
+                            title="点击后在拓扑图中高亮该流的路径"
+                          >
+                            <td>{flow.name}</td>
+                            <td>{flow.routeNodeIds.join(" -> ")}</td>
+                            <td>{flow.periodUs} us</td>
+                            <td>{flow.pcp}</td>
+                            <td>{flow.latencyRequirementUs} us</td>
+                          </tr>
+                        ))
+                      ) : (
+                        <tr>
+                          <td colSpan={5}>等待 Agent 生成流量规划</td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </section>
+              )}
+
+              {activeConfigTab === "node-detail" && (
+                <section
+                  className="detail-panel"
+                  id="config-panel-node-detail"
+                  role="tabpanel"
+                  aria-label="节点详情"
+                >
                 <div className="panel-heading">
                   <div>
-                    <h2>控制流模板</h2>
-                    <p>先生成 1 条 ST 控制流，用于验证规划器输入链路。</p>
+                    <h2>节点详情</h2>
+                    <p>{selectedNode ? selectedNode.name : "在拓扑画布选择一个节点查看端口、地址和位置。"}</p>
                   </div>
                 </div>
-                <table className="eng-table">
-                  <thead>
-                    <tr>
-                      <th>ID</th>
-                      <th>Path</th>
-                      <th>Period</th>
-                      <th>PCP</th>
-                      <th>Deadline</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {visibleFlows.length > 0 ? (
-                      visibleFlows.map((flow) => (
-                        <tr key={flow.id}>
-                          <td>{flow.name}</td>
-                          <td>{flow.routeNodeIds.join(" -> ")}</td>
-                          <td>{flow.periodUs} us</td>
-                          <td>{flow.pcp}</td>
-                          <td>{flow.latencyRequirementUs} us</td>
-                        </tr>
-                      ))
-                    ) : (
-                      <tr>
-                        <td colSpan={5}>等待 Agent 生成流模板</td>
-                      </tr>
-                    )}
-                  </tbody>
-                </table>
+                {selectedNode ? (
+                  <div className="detail-grid">
+                    <DetailRow label="节点 ID" value={selectedNode.id} />
+                    <DetailRow label="名称" value={selectedNode.name} />
+                    <DetailRow label="类型" value={selectedNode.type === "switch" ? "交换机" : "端系统"} />
+                    <DetailRow label="数字 ID" value={selectedNode.numericId} />
+                    <DetailRow label="端口数" value={selectedNode.ports.length} />
+                    <DetailRow label="IP 地址" value={selectedNode.ipAddress ?? "无"} />
+                    <DetailRow label="MAC 地址" value={selectedNode.macAddress ?? "无"} />
+                    <DetailRow label="坐标" value={`${selectedNode.position.x}, ${selectedNode.position.y}`} />
+                  </div>
+                ) : (
+                  <div className="empty-panel mono">请选择拓扑画布中的节点</div>
+                )}
               </section>
+              )}
 
-              <section className="artifact-panel" aria-label="导出文件列表">
+              {activeConfigTab === "link-detail" && (
+                <section
+                  className="detail-panel"
+                  id="config-panel-link-detail"
+                  role="tabpanel"
+                  aria-label="链路详情"
+                >
+                <div className="panel-heading">
+                  <div>
+                    <h2>链路详情</h2>
+                    <p>{selectedLink ? selectedLink.id : "在拓扑画布选择一条链路查看端点、端口和速率。"}</p>
+                  </div>
+                </div>
+                {selectedLink ? (
+                  <div className="detail-grid">
+                    <DetailRow label="链路 ID" value={selectedLink.id} />
+                    <DetailRow label="数字 ID" value={selectedLink.numericId} />
+                    <DetailRow
+                      label="源端点"
+                      value={`${selectedLinkSourceNode?.name ?? selectedLink.source.nodeId} / ${selectedLink.source.portId}`}
+                    />
+                    <DetailRow
+                      label="目标端点"
+                      value={`${selectedLinkTargetNode?.name ?? selectedLink.target.nodeId} / ${selectedLink.target.portId}`}
+                    />
+                    <DetailRow label="介质" value={selectedLink.medium} />
+                    <DetailRow label="速率" value={`${selectedLink.dataRateMbps} Mbps`} />
+                  </div>
+                ) : (
+                  <div className="empty-panel mono">请选择拓扑画布中的链路</div>
+                )}
+              </section>
+              )}
+
+              {activeConfigTab === "artifacts" && (
+                <section
+                  className="artifact-panel"
+                  id="config-panel-artifacts"
+                  role="tabpanel"
+                  aria-label="导出文件列表"
+                >
                 <div className="panel-heading inline">
                   <div>
-                    <h2>导出文件</h2>
-                    <p>NED、最小 INET ini、React Flow JSON、规划器输入和 manifest。</p>
+                    <h2>仿真输入文件</h2>
+                    <p>NED、最小 INET ini、React Flow JSON、规划器输入和 manifest；当前不会执行 OMNeT++。</p>
                   </div>
                   <button className="btn" type="button" onClick={refreshBundle} disabled={!canRefreshBundle}>
                     <RefreshCw size={14} aria-hidden="true" />
@@ -730,7 +967,7 @@ export function App() {
                       </div>
                     </article>
                   ))}
-                  {!bundle && <div className="empty-panel mono">完成“发送规划”阶段后显示导出文件</div>}
+                  {!bundle && <div className="empty-panel mono">完成“模拟仿真”阶段后显示仿真输入文件</div>}
                 </div>
                 {exportResult && (
                   <p className="export-status mono" role="status">
@@ -749,21 +986,29 @@ export function App() {
                   </p>
                 )}
               </section>
+              )}
 
-              <section className="steps-panel" aria-label="执行步骤">
+              {activeConfigTab === "steps" && (
+                <section
+                  className="steps-panel"
+                  id="config-panel-steps"
+                  role="tabpanel"
+                  aria-label="执行步骤"
+                >
                 <div className="panel-heading">
                   <h2>执行步骤</h2>
                 </div>
                 <ol className="event-list">
                   {currentSession.agentEvents.map((event, index) => (
                     <li className={event.kind} key={`${event.id}-${index}`}>
-                      <span>{event.skillName ?? event.title}</span>
-                      <p>{event.content}</p>
+                      <span>{redactProviderNamesForDisplay(event.skillName ?? event.title)}</span>
+                      <p>{redactProviderNamesForDisplay(event.content)}</p>
                     </li>
                   ))}
                   {currentSession.agentEvents.length === 0 && <li className="empty-step">等待 Agent 输出</li>}
                 </ol>
               </section>
+              )}
             </div>
           </div>
         </section>
@@ -813,6 +1058,41 @@ function TsnTopologyNode({ data }: NodeProps) {
   );
 }
 
+function AgentWaitingIndicator() {
+  return (
+    <div className="agent-waiting" role="status" aria-live="polite">
+      <span className="agent-waiting-dots" aria-hidden="true">
+        <span />
+        <span />
+        <span />
+      </span>
+      <span>正在连接智能助手，并结合当前会话上下文生成下一步规划</span>
+    </div>
+  );
+}
+
+function TelegramSendIcon() {
+  return (
+    <svg
+      width="18"
+      height="18"
+      viewBox="0 0 24 24"
+      aria-hidden="true"
+      focusable="false"
+      className="telegram-send-icon"
+    >
+      <path
+        fill="currentColor"
+        d="M20.68 4.44c.42-.18.85.18.73.62l-3.78 14.18c-.11.41-.61.57-.95.31l-5.38-4.02-2.76 2.66c-.29.28-.78.13-.86-.27l-.95-4.73-4.36-1.36c-.44-.14-.48-.76-.06-.96L20.68 4.44Z"
+      />
+      <path
+        fill="var(--accent)"
+        d="M8.92 12.95 17.8 7.4c.18-.11.36.13.21.28l-7.32 7.04-.29 2.73-1.48-4.5Z"
+      />
+    </svg>
+  );
+}
+
 function Stat({ label, value }: { label: string; value: number }) {
   return (
     <span className="stat-pill">
@@ -821,6 +1101,15 @@ function Stat({ label, value }: { label: string; value: number }) {
         {label} {value}
       </strong>
     </span>
+  );
+}
+
+function DetailRow({ label, value }: { label: string; value: string | number }) {
+  return (
+    <div className="detail-row">
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
   );
 }
 

@@ -1,6 +1,11 @@
-import type { CanonicalTsnProjectV0 } from "../domain/canonical";
+import type { CanonicalTsnProjectV0, TopologyIntent } from "../domain/canonical";
 import { getScenarioConfig } from "../domain/scenario-config";
-import { createProjectFromIntent, parseTopologyIntent } from "../domain/topology-factory";
+import {
+  createProjectFromIntent,
+  parseTopologyIntent,
+  withDefaultControlFlow,
+  withFlowsFromIntent,
+} from "../domain/topology-factory";
 import type { ArtifactBundle } from "../export/artifact-bundle";
 import { createArtifactBundle } from "../export/artifact-bundle";
 import {
@@ -48,30 +53,57 @@ export function runFakeTsnAgent(
   previousWorkflow?: WorkflowState,
 ): FakeAgentResult {
   const baseWorkflow = normalizeWorkflowState(previousWorkflow);
-  const fallbackIntent = previousProject ? inferIntentFromProject(previousProject) : undefined;
+  const projectWithUserFlows = applyUserFlowIntent(previousProject, userIntent, baseWorkflow);
+
+  if (isSimulationExecutionIntent(userIntent)) {
+    return runUnsupportedSimulationRequest(userIntent, projectWithUserFlows, baseWorkflow);
+  }
 
   if (isQuickGenerateIntent(userIntent)) {
-    return runQuickGenerate(userIntent, previousProject, baseWorkflow);
+    return runQuickGenerate(userIntent, projectWithUserFlows, baseWorkflow);
   }
 
   if (hasTopologyChangeIntent(userIntent, baseWorkflow)) {
-    return runTopologyStage(userIntent, previousProject, requestStageChanges(baseWorkflow, "topology"));
+    return runTopologyStage(userIntent, projectWithUserFlows, requestStageChanges(baseWorkflow, "topology"));
+  }
+
+  if (baseWorkflow.currentStep === "flow-template" && hasFlowConfigurationIntent(userIntent)) {
+    return runCurrentStage(projectWithUserFlows, baseWorkflow, userIntent);
+  }
+
+  if (isStageAdvanceIntent(userIntent, "time-sync") && baseWorkflow.stages[baseWorkflow.currentStep].status === "waiting_confirmation") {
+    return runAfterConfirmation(userIntent, projectWithUserFlows, baseWorkflow);
+  }
+
+  if (isStageAdvanceIntent(userIntent, "flow-template") && baseWorkflow.stages[baseWorkflow.currentStep].status === "waiting_confirmation") {
+    return runAfterConfirmation(userIntent, projectWithUserFlows, baseWorkflow);
+  }
+
+  if (isStageAdvanceIntent(userIntent, "planning-export") && baseWorkflow.stages[baseWorkflow.currentStep].status === "waiting_confirmation") {
+    return runAfterConfirmation(userIntent, projectWithUserFlows, baseWorkflow);
+  }
+
+  if (isStageConfirmationIntent(userIntent) && baseWorkflow.stages[baseWorkflow.currentStep].status === "waiting_confirmation") {
+    return runAfterConfirmation(userIntent, projectWithUserFlows, baseWorkflow);
   }
 
   if (isContinuationIntent(userIntent) && baseWorkflow.stages[baseWorkflow.currentStep].status === "waiting_confirmation") {
-    return runAfterConfirmation(userIntent, previousProject, baseWorkflow);
+    return runAfterConfirmation(userIntent, projectWithUserFlows, baseWorkflow);
   }
 
   if (baseWorkflow.currentStep === "topology") {
-    return runTopologyStage(userIntent, previousProject, baseWorkflow);
+    return runTopologyStage(userIntent, projectWithUserFlows, baseWorkflow);
   }
 
-  return runCurrentStage(previousProject, baseWorkflow);
+  return runCurrentStage(projectWithUserFlows, baseWorkflow, userIntent);
 }
 
 export function hasExplicitTopologyIntent(text: string): boolean {
   return /(\d+)\s*(?:个|台)?\s*(?:交换机|switch)/i.test(text)
-    || /(?:每个|each).*?(\d+)\s*(?:个|台)?\s*(?:端系统|终端|端|host|end)/i.test(text);
+    || /(?:每个|每台|each).*?(\d+)\s*(?:个|台)?\s*(?:网卡|端系统|终端|端(?!口)|host|end)/i.test(text)
+    || /双冗余|双平面|系统交换机|网卡[1-7]/i.test(text)
+    || /箭载.*拓扑|拓扑.*箭载/i.test(text)
+    || hasSwitchInterconnectIntent(text);
 }
 
 function runAfterConfirmation(
@@ -99,7 +131,10 @@ function completeFinalStage(
     : createProjectFromIntent(userIntent || "请生成默认拓扑", undefined, {
         scenarioConfigId: confirmedWorkflow.scenarioConfigId,
       });
-  const bundle = createArtifactBundle(project);
+  const projectWithFlow = withDefaultControlFlow(project, {
+    scenarioConfigId: confirmedWorkflow.scenarioConfigId,
+  });
+  const bundle = createArtifactBundle(projectWithFlow);
   const summary = previousWorkflow.stages[previousWorkflow.currentStep].summary ?? "当前阶段已确认完成。";
   const events = [
     createToolAvailabilityEvent(),
@@ -107,7 +142,7 @@ function completeFinalStage(
   ] satisfies AgentEvent[];
 
   return {
-    project,
+    project: projectWithFlow,
     bundle,
     workflow: confirmedWorkflow,
     events,
@@ -125,7 +160,7 @@ function runCurrentStage(
   }
 
   if (workflow.currentStep === "time-sync") {
-    return runTimeSyncStage(previousProject, workflow);
+    return runTimeSyncStage(previousProject, workflow, userIntent);
   }
 
   if (workflow.currentStep === "flow-template") {
@@ -143,14 +178,16 @@ function runTopologyStage(
   const fallbackIntent = previousProject ? inferIntentFromProject(previousProject) : undefined;
   const project = createProjectFromIntent(userIntent, fallbackIntent, {
     scenarioConfigId: workflow.scenarioConfigId,
+    includeControlFlow: false,
   });
   const intent = parseTopologyIntent(userIntent, fallbackIntent, {
     scenarioConfigId: workflow.scenarioConfigId,
   });
-  const summary = `识别到 ${intent.switchCount} 个交换机，每个交换机连接 ${intent.endSystemsPerSwitch} 个端系统。`;
+  const summary = describeTopologyIntent(intent);
+  const interconnectSummary = describeTopologyInterconnect(intent);
   const nextWorkflow = recordStageResult(workflow, {
     step: "topology",
-    summary,
+    summary: `${summary}${interconnectSummary}`,
   });
   const events = [
     createToolAvailabilityEvent(),
@@ -160,7 +197,7 @@ function runTopologyStage(
       kind: "thought",
       stage: "topology",
       title: "需求识别",
-      content: summary,
+      content: `${summary}${interconnectSummary}`,
       status: "info",
     },
     {
@@ -172,7 +209,7 @@ function runTopologyStage(
       content: `已生成 ${project.topology.nodes.length} 个节点和 ${project.topology.links.length} 条链路。`,
       status: "success",
     },
-    createStageResultEvent("topology", "拓扑摘要", summary),
+    createStageResultEvent("topology", "拓扑摘要", `${summary}${interconnectSummary}`),
     createConfirmationEvent("topology", "确认拓扑后进入时间同步阶段，或继续描述需要修改的拓扑规模。"),
   ] satisfies AgentEvent[];
 
@@ -184,18 +221,33 @@ function runTopologyStage(
   };
 }
 
-function runTimeSyncStage(project: CanonicalTsnProjectV0, workflow: WorkflowState): FakeAgentResult {
+function runTimeSyncStage(project: CanonicalTsnProjectV0, workflow: WorkflowState, userIntent = ""): FakeAgentResult {
   const scenarioConfig = getScenarioConfig(workflow.scenarioConfigId);
   const summary = scenarioConfig.defaults.timeSyncSummary;
+  const capturedFlowSummary = hasFlowConfigurationIntent(userIntent) && project.flows.length > 0
+    ? `已记录 ${project.flows.length} 条流需求，当前仍先完成时间同步确认；确认后进入流量规划阶段会展示这些流。`
+    : undefined;
   const nextWorkflow = recordStageResult(workflow, {
     step: "time-sync",
-    summary,
+    summary: capturedFlowSummary ? `${summary}${capturedFlowSummary}` : summary,
   });
   const events = [
     createToolAvailabilityEvent(),
     createStageStartEvent("time-sync", "时间同步阶段开始", "生成时间同步默认摘要。"),
     createStageResultEvent("time-sync", "时间同步默认值", summary),
-    createConfirmationEvent("time-sync", "确认同步假设后进入建立流阶段，或说明需要调整的同步约束。"),
+    ...(capturedFlowSummary
+      ? [
+          {
+            id: "event-captured-flow-intent",
+            kind: "thought",
+            stage: "time-sync",
+            title: "流需求已暂存",
+            content: capturedFlowSummary,
+            status: "info",
+          } satisfies AgentEvent,
+        ]
+      : []),
+    createConfirmationEvent("time-sync", "确认同步假设后进入流量规划阶段，或说明需要调整的同步约束。"),
   ] satisfies AgentEvent[];
 
   return {
@@ -207,31 +259,33 @@ function runTimeSyncStage(project: CanonicalTsnProjectV0, workflow: WorkflowStat
 }
 
 function runFlowStage(project: CanonicalTsnProjectV0, workflow: WorkflowState): FakeAgentResult {
-  const flow = project.flows[0];
-  const summary = flow
-    ? `已准备 ${flow.name}，路径 ${flow.routeNodeIds.join(" -> ")}，周期 ${flow.periodUs}us，PCP ${flow.pcp}。`
-    : "当前拓扑还没有可用流模板。";
+  const nextProject = withDefaultControlFlow(project, {
+    scenarioConfigId: workflow.scenarioConfigId,
+  });
+  const summary = nextProject.flows.length > 0
+    ? `已准备 ${nextProject.flows.length} 条流：${nextProject.flows.map(describeFlow).join("；")}。`
+    : "当前拓扑还没有可用流量规划。";
   const nextWorkflow = recordStageResult(workflow, {
     step: "flow-template",
     summary,
   });
   const events = [
     createToolAvailabilityEvent(),
-    createStageStartEvent("flow-template", "建立流阶段开始", "根据当前拓扑生成一条入门控制流模板。"),
+    createStageStartEvent("flow-template", "流量规划阶段开始", "根据当前拓扑和用户已说明的业务流生成流量规划。"),
     {
       id: "event-flow-template",
       kind: "skill-result",
       stage: "flow-template",
       skillName: "tsn-flow-template",
-      title: "控制流模板",
+      title: "流量规划",
       content: summary,
       status: "success",
     },
-    createConfirmationEvent("flow-template", "确认流模板后发送规划并生成导出清单。"),
+    createConfirmationEvent("flow-template", "确认流量规划后生成仿真输入和导出清单。"),
   ] satisfies AgentEvent[];
 
   return {
-    project: refreshProject(project),
+    project: refreshProject(nextProject),
     workflow: nextWorkflow,
     events,
     assistantText: events.map((event) => event.content).join("\n"),
@@ -239,7 +293,10 @@ function runFlowStage(project: CanonicalTsnProjectV0, workflow: WorkflowState): 
 }
 
 function runPlanningExportStage(project: CanonicalTsnProjectV0, workflow: WorkflowState): FakeAgentResult {
-  const bundle = createArtifactBundle(project);
+  const projectWithFlow = withDefaultControlFlow(project, {
+    scenarioConfigId: workflow.scenarioConfigId,
+  });
+  const bundle = createArtifactBundle(projectWithFlow);
   const summary = `已生成规划器输入和导出清单：${bundle.artifacts.map((artifact) => artifact.path).join("、")}。`;
   const nextWorkflow = recordStageResult(workflow, {
     step: "planning-export",
@@ -247,7 +304,7 @@ function runPlanningExportStage(project: CanonicalTsnProjectV0, workflow: Workfl
   });
   const events = [
     createToolAvailabilityEvent(),
-    createStageStartEvent("planning-export", "发送规划阶段开始", "刷新规划器输入和项目导出清单。"),
+    createStageStartEvent("planning-export", "模拟仿真阶段开始", "刷新仿真输入、规划器输入和项目导出清单；当前不会执行 OMNeT++。"),
     {
       id: "event-export",
       kind: "artifact",
@@ -258,13 +315,48 @@ function runPlanningExportStage(project: CanonicalTsnProjectV0, workflow: Workfl
       status: "success",
     },
     createStageResultEvent("planning-export", "规划器输入已准备", "flow_plan_1.json 是规划器输入，不是规划器执行结果。"),
-    createConfirmationEvent("planning-export", "确认发送规划后完成本轮草案，或继续描述需要修改的规划输入。"),
+    createConfirmationEvent("planning-export", "确认仿真输入后完成本轮草案，或继续描述需要修改的输入文件。"),
   ] satisfies AgentEvent[];
 
   return {
-    project: refreshProject(project),
+    project: refreshProject(projectWithFlow),
     bundle,
     workflow: nextWorkflow,
+    events,
+    assistantText: events.map((event) => event.content).join("\n"),
+  };
+}
+
+function runUnsupportedSimulationRequest(
+  userIntent: string,
+  previousProject: CanonicalTsnProjectV0 | undefined,
+  workflow: WorkflowState,
+): FakeAgentResult {
+  const project = previousProject
+    ? refreshProject(previousProject)
+    : createProjectFromIntent(userIntent || "请生成默认拓扑", undefined, {
+        scenarioConfigId: workflow.scenarioConfigId,
+        includeControlFlow: false,
+      });
+  const events = [
+    createToolAvailabilityEvent(),
+    {
+      id: "event-simulation-unsupported",
+      kind: "error",
+      title: "仿真未执行",
+      content: "当前版本还没有接入 OMNeT++/远程服务器仿真 runner。本次不会在后台启动仿真，也不会异步返回仿真结果；请先使用导出文件，后续接入仿真执行器后再启动运行。",
+      status: "warning",
+    },
+  ] satisfies AgentEvent[];
+
+  return {
+    project,
+    bundle: shouldKeepExportBundle(workflow)
+      ? createArtifactBundle(withDefaultControlFlow(project, {
+          scenarioConfigId: workflow.scenarioConfigId,
+        }))
+      : undefined,
+    workflow,
     events,
     assistantText: events.map((event) => event.content).join("\n"),
   };
@@ -282,10 +374,14 @@ function runQuickGenerate(
     : createProjectFromIntent(userIntent, fallbackIntent, {
         scenarioConfigId: workflow.scenarioConfigId,
       });
-  const bundle = createArtifactBundle(project);
-  const intent = inferIntentFromProject(project);
-  const topologySummary = `识别到 ${intent.switchCount} 个交换机，每个交换机连接 ${intent.endSystemsPerSwitch} 个端系统。`;
-  let nextWorkflow = recordStageResult(workflow, { step: "topology", summary: topologySummary });
+  const projectWithFlow = withDefaultControlFlow(project, {
+    scenarioConfigId: workflow.scenarioConfigId,
+  });
+  const bundle = createArtifactBundle(projectWithFlow);
+  const intent = inferIntentFromProject(projectWithFlow);
+  const topologySummary = describeTopologyIntent(intent);
+  const interconnectSummary = describeTopologyInterconnect(intent);
+  let nextWorkflow = recordStageResult(workflow, { step: "topology", summary: `${topologySummary}${interconnectSummary}` });
   nextWorkflow = confirmCurrentStage(nextWorkflow);
   nextWorkflow = recordStageResult(nextWorkflow, {
     step: "time-sync",
@@ -294,7 +390,7 @@ function runQuickGenerate(
   nextWorkflow = confirmCurrentStage(nextWorkflow);
   nextWorkflow = recordStageResult(nextWorkflow, {
     step: "flow-template",
-    summary: `已准备 ${project.flows[0]?.name ?? "控制流模板"}。`,
+    summary: `已准备 ${projectWithFlow.flows[0]?.name ?? "流量规划"}。`,
   });
   nextWorkflow = confirmCurrentStage(nextWorkflow);
   nextWorkflow = recordStageResult(nextWorkflow, {
@@ -303,10 +399,10 @@ function runQuickGenerate(
   });
   const events = [
     createToolAvailabilityEvent(),
-    createStageStartEvent("topology", "快速生成开始", "按显式快速路径连续完成拓扑、同步、建立流和发送规划。"),
-    createStageResultEvent("topology", "拓扑结果", topologySummary),
+    createStageStartEvent("topology", "快速生成开始", "按显式快速路径连续完成拓扑、同步、流量规划和模拟仿真输入准备。"),
+    createStageResultEvent("topology", "拓扑结果", `${topologySummary}${interconnectSummary}`),
     createStageResultEvent("time-sync", "时间同步默认值", scenarioConfig.defaults.timeSyncSummary),
-    createStageResultEvent("flow-template", "控制流模板", `已准备 ${project.flows[0]?.name ?? "控制流模板"}。`),
+    createStageResultEvent("flow-template", "流量规划", `已准备 ${projectWithFlow.flows[0]?.name ?? "流量规划"}。`),
     {
       id: "event-export",
       kind: "artifact",
@@ -319,7 +415,7 @@ function runQuickGenerate(
   ] satisfies AgentEvent[];
 
   return {
-    project,
+    project: projectWithFlow,
     bundle,
     workflow: nextWorkflow,
     events,
@@ -331,8 +427,34 @@ function isContinuationIntent(text: string): boolean {
   return /^(直接生成|生成|确认|可以|好的|开始|继续|按这个|就这样|执行|下一步)\s*[。.!！]?$/i.test(text.trim());
 }
 
+function isStageConfirmationIntent(text: string): boolean {
+  return /^(确认|可以|好的|没问题|按这个|就这样|同意|通过|使用|采用|先给默认|默认|用默认|采用默认|使用默认)/i.test(text.trim());
+}
+
 function isQuickGenerateIntent(text: string): boolean {
   return /^(直接生成|生成完整草案|一键生成|生成全部|直接导出)\s*[。.!！]?$/i.test(text.trim());
+}
+
+function isSimulationExecutionIntent(text: string): boolean {
+  return /启动仿真|运行仿真|执行仿真|跑仿真|跑一下|跑起来|simulation|simulate|omnet|inet|devserver|ssh|服务器/i.test(text);
+}
+
+function hasFlowConfigurationIntent(text: string): boolean {
+  return /控制流|业务流|视频流|视频|摄像|traffic|flow|流量|时序控制|心跳|安全自毁|姿控|伺服|惯组|发动机|故障诊断/i.test(text);
+}
+
+function isStageAdvanceIntent(text: string, stage: WorkflowStep): boolean {
+  const trimmed = text.trim();
+
+  if (stage === "time-sync") {
+    return /时间同步|时钟同步|同步|统一时钟|gptp|802\.1as/i.test(trimmed) && /开始|继续|做|进入|配置|生成|确认/.test(trimmed);
+  }
+
+  if (stage === "flow-template") {
+    return /流量规划|建立流|控制流|业务流|流模板|流量/i.test(trimmed) && /开始|继续|做|进入|配置|生成|确认/.test(trimmed);
+  }
+
+  return /模拟仿真|仿真输入|发送规划|导出|规划器|保存|生成文件|文件/i.test(trimmed) && /开始|继续|做|进入|配置|生成|确认/.test(trimmed);
 }
 
 function hasTopologyChangeIntent(text: string, workflow: WorkflowState): boolean {
@@ -340,17 +462,61 @@ function hasTopologyChangeIntent(text: string, workflow: WorkflowState): boolean
     return hasExplicitTopologyIntent(text);
   }
 
-  return hasExplicitTopologyIntent(text) || /拓扑|交换机|端系统|终端|host|end/i.test(text) && /改|调整|重新|变成/.test(text);
+  return hasExplicitTopologyIntent(text) && !hasFlowConfigurationIntent(text)
+    || /拓扑|交换机|端系统|终端|host|end/i.test(text) && /改|调整|重新|变成/.test(text);
 }
 
-function inferIntentFromProject(project: CanonicalTsnProjectV0) {
+function hasSwitchInterconnectIntent(text: string): boolean {
+  return /环形|环网|ring|线型|线性|链式|串联|line/i.test(text)
+    || /闭环/.test(text) && !/闭环\s*(?:控制)?流/.test(text);
+}
+
+function inferIntentFromProject(project: CanonicalTsnProjectV0): TopologyIntent {
+  if (isAerospaceRedundantProject(project)) {
+    return {
+      switchCount: 4,
+      endSystemsPerSwitch: 0,
+      switchInterconnect: "line",
+      topologyTemplate: "aerospace-redundant",
+      endSystemCount: 7,
+    };
+  }
+
   const switchCount = project.topology.nodes.filter((node) => node.type === "switch").length;
   const endSystemCount = project.topology.nodes.filter((node) => node.type === "endSystem").length;
+  const switchLinkCount = project.topology.links.filter((link) =>
+    link.source.nodeId.startsWith("sw") && link.target.nodeId.startsWith("sw")
+  ).length;
 
   return {
     switchCount,
     endSystemsPerSwitch: switchCount > 0 ? Math.round(endSystemCount / switchCount) : 0,
+    switchInterconnect: switchCount > 2 && switchLinkCount >= switchCount ? "ring" : "line",
   };
+}
+
+function describeTopologyIntent(intent: TopologyIntent): string {
+  if (intent.topologyTemplate === "aerospace-redundant") {
+    return `识别到箭载双冗余拓扑：${intent.switchCount} 个交换机，${intent.endSystemCount ?? 7} 个网卡。`;
+  }
+
+  return `识别到 ${intent.switchCount} 个交换机，每个交换机连接 ${intent.endSystemsPerSwitch} 个端系统。`;
+}
+
+function describeTopologyInterconnect(intent: TopologyIntent): string {
+  if (intent.topologyTemplate === "aerospace-redundant") {
+    return "左右两组系统交换机不级联，通过双冗余主干链路互联，网卡双归属接入。";
+  }
+
+  return intent.switchInterconnect === "ring" ? "交换机采用环形互联。" : "交换机采用线型互联。";
+}
+
+function isAerospaceRedundantProject(project: CanonicalTsnProjectV0): boolean {
+  const nodeIds = new Set(project.topology.nodes.map((node) => node.id));
+
+  return project.id === "project-aerospace-redundant"
+    || ["nic1", "nic2", "nic3", "nic4", "nic5", "nic6", "nic7", "sw1", "sw2", "sw3", "sw4"]
+      .every((nodeId) => nodeIds.has(nodeId));
 }
 
 function refreshProject(project: CanonicalTsnProjectV0): CanonicalTsnProjectV0 {
@@ -360,12 +526,37 @@ function refreshProject(project: CanonicalTsnProjectV0): CanonicalTsnProjectV0 {
   };
 }
 
+function applyUserFlowIntent(
+  project: CanonicalTsnProjectV0 | undefined,
+  userIntent: string,
+  workflow: WorkflowState,
+): CanonicalTsnProjectV0 | undefined {
+  if (!project || workflow.currentStep === "topology") {
+    return project;
+  }
+
+  return withFlowsFromIntent(project, userIntent, {
+    scenarioConfigId: workflow.scenarioConfigId,
+  });
+}
+
+function shouldKeepExportBundle(workflow: WorkflowState): boolean {
+  const planningStatus = workflow.stages["planning-export"].status;
+
+  return workflow.currentStep === "planning-export"
+    && (planningStatus === "waiting_confirmation" || planningStatus === "confirmed");
+}
+
+function describeFlow(flow: CanonicalTsnProjectV0["flows"][number]): string {
+  return `${flow.name}，路径 ${flow.routeNodeIds.join(" -> ")}，周期 ${flow.periodUs}us，帧长 ${flow.frameSizeBytes}B，PCP ${flow.pcp}`;
+}
+
 function createToolAvailabilityEvent(): AgentEvent {
   return {
     id: "event-tool-availability",
     kind: "tool-availability",
-    title: "工具状态",
-    content: "本轮未启用 Bash/Edit/Write；使用本地确定性 TSN 生成器和安全摘要事件。",
+    title: "本地规划器",
+    content: "本轮使用本地确定性 TSN 生成器和安全摘要事件。",
     status: "info",
   };
 }

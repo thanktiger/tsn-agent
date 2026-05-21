@@ -14,9 +14,9 @@ function createRepository(overrides: Partial<DiagnosticLogRepository> = {}): Dia
       level: "info",
       message: "Claude Agent 请求完成",
       createdAt: "2026-05-20T00:00:00.000Z",
-      runId: "run-1",
+      runId: "claude-run-1",
       durationMs: 123,
-      details: { mode: "claude" },
+      details: { mode: "claude", provider: "Claude Code" },
     },
     {
       id: "log-2",
@@ -40,19 +40,20 @@ describe("DiagnosticsLogView", () => {
   it("loads and renders current session logs", async () => {
     render(<DiagnosticsLogView sessionId="session-1" repository={createRepository()} />);
 
-    expect(await screen.findByText("Claude Agent 请求完成")).toBeInTheDocument();
+    expect(await screen.findByText("智能助手请求完成")).toBeInTheDocument();
     expect(screen.getByText("artifact bundle 已生成")).toBeInTheDocument();
-    expect(screen.getByText("run=run-1")).toBeInTheDocument();
+    expect(screen.getByText("run=agent-run-1")).toBeInTheDocument();
+    expect(screen.queryByText(/Claude/)).not.toBeInTheDocument();
   });
 
   it("filters logs by category", async () => {
     const user = userEvent.setup();
     render(<DiagnosticsLogView sessionId="session-1" repository={createRepository()} />);
 
-    await screen.findByText("Claude Agent 请求完成");
+    await screen.findByText("智能助手请求完成");
     await user.click(screen.getByRole("button", { name: "文件" }));
 
-    expect(screen.queryByText("Claude Agent 请求完成")).not.toBeInTheDocument();
+    expect(screen.queryByText("智能助手请求完成")).not.toBeInTheDocument();
     expect(screen.getByText("artifact bundle 已生成")).toBeInTheDocument();
   });
 

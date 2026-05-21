@@ -28,7 +28,7 @@ export interface PlannerInputV1 {
       jitter_requirement: string;
       latency_requirement: string;
       redundant: "1";
-      flow_type: "ST";
+      flow_type: "ST" | "BE";
       fl_api_flag: 1;
       delay_para: 300;
       fivetuple_mask: 11111;
@@ -90,7 +90,7 @@ function exportFlow(project: CanonicalTsnProjectV0, flow: TsnFlow): PlannerInput
         jitter_requirement: String(flow.jitterRequirementUs),
         latency_requirement: String(flow.latencyRequirementUs),
         redundant: "1",
-        flow_type: "ST",
+        flow_type: flow.flowType,
         fl_api_flag: 1,
         delay_para: 300,
         fivetuple_mask: 11111,

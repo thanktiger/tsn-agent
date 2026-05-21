@@ -16,7 +16,7 @@
 ## 项目初始化上下文
 
 - 当前项目是 TSN Agent，一个 Tauri + React 桌面应用 MVP，面向了解 TSN 概念但不熟悉参数配置的新手用户。
-- 主流程是从自然语言需求生成 TSN 项目草案，并按“拓扑、时间同步、建立流、发送规划”四个阶段推进。每个关键阶段输出摘要后等待用户确认，不能一次性把所有结果都直接吐完，除非用户明确输入“直接生成”等快速路径。
+- 主流程是从自然语言需求生成 TSN 项目草案，并按“拓扑、时间同步、流量规划、模拟仿真”四个用户可见阶段推进。每个关键阶段输出摘要后等待用户确认，不能一次性把所有结果都直接吐完，除非用户明确输入“直接生成”等快速路径。
 - 当前主分支 `main` 已合入分阶段工作流提交 `9d15461 feat: add staged TSN planning workflow`。新窗口接手时先用 `git status --short` 确认工作区是否干净。
 - `docs/prototypes/箭载TSN技术规范_V1.2_1204-s.docx` 是后续典型场景参考文档；但“箭载/舰载 TSN”只是未来 8 个应用场景中的一个，不要把核心流程写死成单一场景。
 - 需求和计划文档优先参考：
@@ -45,11 +45,11 @@
 
 - 稳定阶段 ID 是 `topology`、`time-sync`、`flow-template`、`planning-export`。界面文案可按场景变化，但核心状态机不要改成场景专属 ID。
 - `recordStageResult()` 默认让阶段进入 `waiting_confirmation`；只有用户确认后才能 `confirmCurrentStage()` 进入下一阶段。
-- UI 的左上步骤导航应对应这四个阶段：拓扑、时间同步、建立流、发送规划。
-- 拓扑阶段可以生成 canonical project，但 UI 不应提前展示流模板为“已完成”。
-- 只有 `flow-template` 阶段完成或等待确认后，才显示控制流模板。
-- 只有 `planning-export` 阶段生成 bundle 后，才允许刷新/保存导出文件。
-- 最终 `planning-export` 阶段确认后应标记完成，不要再次触发规划导出造成确认循环。
+- UI 的左上步骤导航应对应这四个用户可见阶段：拓扑、时间同步、流量规划、模拟仿真；稳定阶段 ID 仍是 `topology`、`time-sync`、`flow-template`、`planning-export`。
+- 拓扑阶段可以生成 canonical project，但 UI 不应提前展示流量规划为“已完成”。
+- 只有 `flow-template` 阶段完成或等待确认后，才显示流量规划内容。
+- 只有 `planning-export` 阶段生成 bundle 后，才允许刷新/保存仿真输入/导出文件。
+- 最终 `planning-export` 阶段确认后应标记完成，不要再次触发仿真输入导出造成确认循环。
 - `flow_plan_1.json` 是规划器输入，不是规划器输出。不要在 MVP 中伪造 `flow_plan_result_1.json`、GCL 或 interface 摘要。
 
 ## 场景抽象约定
@@ -63,6 +63,7 @@
 
 - Agent 输出应逐步体现阶段进展，并在关键阶段等待用户确认。
 - 执行步骤面板应让用户看到 stage、skill、artifact、confirmation，以及工具/MCP 可用状态摘要。
+- 面向用户界面、聊天消息、按钮、toast、执行步骤标题、诊断抽屉和错误提示时，不要出现 `Claude`、`Claude Code` 等供应商敏感词；统一使用“智能助手”“Agent”“智能助手运行时”“工具权限”等中性表述。技术文档、代码标识、SDK 包名和内部命令名可保留真实名称。
 - 诊断日志只保存脱敏摘要，例如 run id、resume 状态、chunk 统计、session 保存状态、artifact 路径和错误摘要。不要保存凭证、完整敏感上下文或大段原始工具输出。
 - 真实 Claude SDK 的细粒度 `tool_use/tool_result` 解析仍是后续工作；当前不要假装已经完整支持。
 

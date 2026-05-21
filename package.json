@@ -11,7 +11,8 @@
     "test:watch": "vitest",
     "e2e": "playwright test",
     "cargo:test": "cargo test --manifest-path src-tauri/Cargo.toml",
-    "build:worker": "esbuild src-node/claude-agent-worker.mjs --bundle --platform=node --format=esm --outfile=src-node/dist/claude-agent-worker.mjs",
+    "verify:skills": "node scripts/verify-skills.mjs",
+    "build:worker": "npm run verify:skills && esbuild src-node/claude-agent-worker.mjs --bundle --platform=node --format=esm --outfile=src-node/dist/claude-agent-worker.mjs && esbuild src-node/stage-skills/tsn-stage-runner.ts --bundle --platform=node --format=esm --outfile=src-node/dist/tsn-stage-runner.mjs",
     "tauri": "npm run build:worker && tauri"
   },
   "dependencies": {

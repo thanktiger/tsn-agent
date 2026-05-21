@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { RefreshCw } from "lucide-react";
 import type { DiagnosticLogEntry } from "../../diagnostics/diagnostic-log";
 import type { DiagnosticLogRepository } from "../../diagnostics/diagnostic-log-repository";
+import { redactProviderNamesForDisplay, redactProviderNamesInValue } from "../display-redaction";
 
 interface DiagnosticsLogViewProps {
   sessionId: string;
@@ -74,7 +75,7 @@ export function DiagnosticsLogView({ sessionId, repository }: DiagnosticsLogView
         </button>
       </div>
 
-      {error && <div className="diagnostics-error">日志加载失败：{error}</div>}
+      {error && <div className="diagnostics-error">日志加载失败：{redactProviderNamesForDisplay(error)}</div>}
       {!error && filteredLogs.length === 0 && (
         <div className="empty-panel mono">{isLoading ? "正在加载日志" : "当前会话暂无诊断日志"}</div>
       )}
@@ -87,15 +88,15 @@ export function DiagnosticsLogView({ sessionId, repository }: DiagnosticsLogView
                 <span className="diag-category">{categoryLabel(log.category)}</span>
                 <time className="diag-time">{formatTime(log.createdAt)}</time>
               </div>
-              <strong>{log.message}</strong>
+              <strong>{redactProviderNamesForDisplay(log.message)}</strong>
               <div className="diagnostics-meta mono">
-                {log.runId && <span>run={log.runId}</span>}
+                {log.runId && <span>run={redactProviderNamesForDisplay(log.runId)}</span>}
                 {typeof log.durationMs === "number" && <span>{log.durationMs}ms</span>}
               </div>
               {log.details && (
                 <details>
                   <summary>details</summary>
-                  <pre>{JSON.stringify(log.details, null, 2)}</pre>
+                  <pre>{JSON.stringify(redactProviderNamesInValue(log.details), null, 2)}</pre>
                 </details>
               )}
             </li>

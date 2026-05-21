@@ -13,6 +13,8 @@ describe("scenario config", () => {
 
     expect(config.id).toBe(DEFAULT_SCENARIO_CONFIG_ID);
     expect(config.stageLabels.topology).toBe("拓扑");
+    expect(config.stageLabels["flow-template"]).toBe("流量规划");
+    expect(config.stageLabels["planning-export"]).toBe("模拟仿真");
     expect(config.flowTemplates[0].name).toBe("控制流-1");
   });
 
@@ -26,8 +28,11 @@ describe("scenario config", () => {
     const config = getScenarioConfig("aerospace-onboard");
 
     expect(config.displayName).toContain("箭载");
-    expect(config.stageLabels["flow-template"]).toBe("关键业务流");
-    expect(config.flowTemplates[0].name).toBe("飞控控制流-1");
+    expect(config.stageLabels["flow-template"]).toBe("关键流量规划");
+    expect(config.stageLabels["planning-export"]).toBe("模拟仿真");
+    expect(config.flowTemplates[0].name).toBe("时序控制消息-1");
+    expect(config.flowTemplates[0].periodUs).toBe(1_000);
+    expect(config.flowTemplates[0].frameSizeBytes).toBe(10);
   });
 
   it("falls back to the generic config for unknown ids with a warning", () => {

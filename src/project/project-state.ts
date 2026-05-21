@@ -8,6 +8,7 @@ import {
   type WorkflowStep,
 } from "../domain/scenario-config";
 import type { ArtifactBundle } from "../export/artifact-bundle";
+import type { StageSkillSummary } from "../agent/stage-skill-contract";
 
 export type { WorkflowStep };
 
@@ -19,6 +20,7 @@ export interface WorkflowStageState {
   step: WorkflowStep;
   status: WorkflowStepStatus;
   summary?: string;
+  skillResult?: StageSkillSummary;
   confirmedAt?: string;
   updatedAt?: string;
   error?: string;
@@ -121,6 +123,7 @@ export function normalizeWorkflowState(
           step,
           status: existing?.status ?? (step === currentStep ? "current" : "locked"),
           summary: existing?.summary,
+          skillResult: existing?.skillResult,
           confirmedAt: existing?.confirmedAt,
           updatedAt: existing?.updatedAt,
           error: existing?.error,
@@ -146,6 +149,7 @@ export function recordStageResult(
   input: {
     step?: WorkflowStep;
     summary: string;
+    skillResult?: StageSkillSummary;
     waitingConfirmation?: boolean;
     createdAt?: string;
   },
@@ -165,6 +169,7 @@ export function recordStageResult(
         step,
         status,
         summary: input.summary,
+        skillResult: input.skillResult,
         updatedAt: createdAt,
         error: undefined,
       },

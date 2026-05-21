@@ -20,6 +20,7 @@ src-tauri/gen/
 # Local app/runtime state
 *.log
 *.tmp
+.~*.docx
 tmp/
 .env
 .env.*
@@ -33,7 +34,12 @@ exports/
 generated-projects/
 
 # Agent/worktree scratch
-.claude/
+.claude/*
+!.claude/skills/
+!.claude/skills/tsn-topology/
+!.claude/skills/tsn-topology/SKILL.md
+!.claude/skills/tsn-flow-planning/
+!.claude/skills/tsn-flow-planning/SKILL.md
 
 # Existing nested skill repository. Keep it outside the root app git boundary.
-tsn-topology/
+/tsn-topology/

@@ -266,7 +266,7 @@ mod tests {
                     session_id: "session-1".to_string(),
                     category: "agent".to_string(),
                     level: "info".to_string(),
-                    message: "Claude 请求开始".to_string(),
+                    message: "智能助手请求开始".to_string(),
                     created_at: "2026-05-20T00:00:00.000Z".to_string(),
                     run_id: Some("run-1".to_string()),
                     duration_ms: Some(12),

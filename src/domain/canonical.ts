@@ -61,7 +61,7 @@ export interface TsnFlow {
   latencyRequirementUs: number;
   routeLinkIds: string[];
   routeNodeIds: string[];
-  flowType: "ST";
+  flowType: "ST" | "BE";
 }
 
 export interface TsnSimulationHints {
@@ -88,6 +88,9 @@ export interface CanonicalTsnProjectV0 {
 export interface TopologyIntent {
   switchCount: number;
   endSystemsPerSwitch: number;
+  switchInterconnect?: "line" | "ring";
+  topologyTemplate?: "aerospace-redundant";
+  endSystemCount?: number;
 }
 
 export function isSwitch(node: TsnNode): boolean {

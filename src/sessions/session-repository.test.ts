@@ -8,6 +8,9 @@ import {
   type SessionDatabase,
   type TsnSession,
 } from "./session-repository";
+import { createArtifactBundle } from "../export/artifact-bundle";
+import { createProjectFromIntent } from "../domain/topology-factory";
+import { createInitialWorkflowState } from "../project/project-state";
 
 const invokeMock = vi.hoisted(() => vi.fn());
 
@@ -82,6 +85,144 @@ describe("BrowserSessionRepository", () => {
 
     expect(session.messages[0].content).toContain("TSN 网络规模");
     expect(await repository.list()).toEqual([session]);
+  });
+
+  it("repairs topology drift from stored user messages when listing sessions", async () => {
+    const repository = new BrowserSessionRepository(window.localStorage);
+    const session: TsnSession = {
+      ...createEmptySession(),
+      messages: [
+        {
+          id: "message-1",
+          role: "user",
+          createdAt: "2026-05-20T00:00:00.000Z",
+          content: "我需要3个交换机，每个交换机连接5个端系统",
+        },
+        {
+          id: "message-2",
+          role: "user",
+          createdAt: "2026-05-20T00:01:00.000Z",
+          content: "需要改成4台交换机，每台连接3个端",
+        },
+        {
+          id: "message-3",
+          role: "user",
+          createdAt: "2026-05-20T00:02:00.000Z",
+          content: "可以使用环形互联",
+        },
+      ],
+      workflow: createInitialWorkflowState(),
+      project: createProjectFromIntent("我需要4个交换机，每个交换机连接5个端系统"),
+    };
+
+    await repository.save(session);
+
+    const restored = (await repository.list())[0];
+
+    expect(restored.project?.topology.nodes).toHaveLength(16);
+    expect(restored.project?.topology.links).toHaveLength(16);
+    expect(restored.project?.flows).toHaveLength(0);
+  });
+
+  it("repairs flow drift from stored user messages when listing sessions", async () => {
+    const repository = new BrowserSessionRepository(window.localStorage);
+    const project = createProjectFromIntent("我需要2个交换机，每个交换机连接3个端系统", undefined, {
+      includeControlFlow: false,
+    });
+    const session: TsnSession = {
+      ...createEmptySession(),
+      messages: [
+        {
+          id: "message-1",
+          role: "user",
+          createdAt: "2026-05-20T00:00:00.000Z",
+          content: "我需要2个交换机，每个交换机连接3个端系统",
+        },
+        {
+          id: "message-2",
+          role: "user",
+          createdAt: "2026-05-20T00:01:00.000Z",
+          content: "两条流，一条视频流，一条控制流",
+        },
+      ],
+      workflow: {
+        ...createInitialWorkflowState(),
+        currentStep: "planning-export",
+      },
+      project,
+      bundle: createArtifactBundle(project),
+    };
+
+    await repository.save(session);
+
+    const restored = (await repository.list())[0];
+    const flowPlan = restored.bundle?.artifacts.find((artifact) => artifact.path === "flow_plan_1.json");
+
+    expect(restored.project?.flows.map((flow) => flow.name)).toEqual(["控制流-1", "视频流-1"]);
+    expect(flowPlan?.content).toContain('"stream_name": "视频流-1"');
+  });
+
+  it("repairs incremental video and BE flows after topology drift repair", async () => {
+    const repository = new BrowserSessionRepository(window.localStorage);
+    const project = createProjectFromIntent("我需要4个交换机，每个交换机连接5个端系统", undefined, {
+      includeControlFlow: false,
+    });
+    const session: TsnSession = {
+      ...createEmptySession(),
+      messages: [
+        {
+          id: "message-1",
+          role: "user",
+          createdAt: "2026-05-20T00:00:00.000Z",
+          content: "我需要4个交换机，每个交换机连接5个端系统",
+        },
+        {
+          id: "message-2",
+          role: "user",
+          createdAt: "2026-05-20T00:01:00.000Z",
+          content: "需要改为3个交换机ring形状，每个交换机3个端系统",
+        },
+        {
+          id: "message-3",
+          role: "user",
+          createdAt: "2026-05-20T00:02:00.000Z",
+          content: "我还需要一条视频流，还有一条BE流",
+        },
+        {
+          id: "message-4",
+          role: "user",
+          createdAt: "2026-05-20T00:03:00.000Z",
+          content: "再加3条视频流吧",
+        },
+      ],
+      workflow: {
+        ...createInitialWorkflowState(),
+        currentStep: "flow-template",
+        stages: {
+          ...createInitialWorkflowState().stages,
+          topology: { step: "topology", status: "confirmed" },
+          "time-sync": { step: "time-sync", status: "confirmed" },
+          "flow-template": { step: "flow-template", status: "waiting_confirmation" },
+          "planning-export": { step: "planning-export", status: "locked" },
+        },
+      },
+      project,
+    };
+
+    await repository.save(session);
+
+    const restored = (await repository.list())[0];
+
+    expect(restored.project?.topology.nodes).toHaveLength(12);
+    expect(restored.project?.topology.links).toHaveLength(12);
+    expect(restored.project?.flows.map((flow) => flow.name)).toEqual([
+      "控制流-1",
+      "视频流-1",
+      "BE流-1",
+      "视频流-2",
+      "视频流-3",
+      "视频流-4",
+    ]);
   });
 
   it("keeps only the most recent twelve sessions", async () => {

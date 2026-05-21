@@ -436,6 +436,17 @@ textarea:focus-visible {
   background: var(--bg-tertiary);
 }
 
+.msg-agent.pending {
+  border: 1px solid rgba(250, 84, 28, 0.16);
+  background:
+    linear-gradient(90deg, rgba(250, 84, 28, 0.06), rgba(255, 255, 255, 0.5), rgba(250, 84, 28, 0.06)),
+    var(--bg-tertiary);
+  background-size: 220% 100%;
+  animation:
+    fadeIn 0.18s ease-out,
+    waitingSurface 1.4s ease-in-out infinite;
+}
+
 .msg-user p,
 .msg-agent p {
   margin: 0;
@@ -451,6 +462,39 @@ textarea:focus-visible {
 .msg-agent .message-role {
   color: var(--accent);
   font-weight: 600;
+}
+
+.agent-waiting {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 22px;
+  color: var(--text-secondary);
+  line-height: 1.55;
+}
+
+.agent-waiting-dots {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 4px;
+}
+
+.agent-waiting-dots span {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--accent);
+  opacity: 0.35;
+  animation: waitingDot 1s ease-in-out infinite;
+}
+
+.agent-waiting-dots span:nth-child(2) {
+  animation-delay: 0.14s;
+}
+
+.agent-waiting-dots span:nth-child(3) {
+  animation-delay: 0.28s;
 }
 
 .composer {
@@ -506,7 +550,7 @@ textarea:focus-visible {
   min-height: 74px;
   max-height: 170px;
   padding: 12px 54px 12px 14px;
-  resize: vertical;
+  resize: none;
   border: 1px solid var(--border);
   border-radius: 8px;
   color: var(--text-primary);
@@ -518,7 +562,7 @@ textarea:focus-visible {
 .composer-box button {
   position: absolute;
   right: 12px;
-  bottom: 13px;
+  bottom: 12px;
   width: 34px;
   height: 34px;
   border: 0;
@@ -621,6 +665,39 @@ textarea:focus-visible {
 .topology-canvas .react-flow__edge.selected .react-flow__edge-path,
 .topology-canvas .react-flow__edge:focus .react-flow__edge-path {
   stroke: var(--accent);
+}
+
+.topology-canvas .react-flow__edge.flow-highlighted .react-flow__edge-path {
+  stroke: var(--accent);
+  stroke-width: 2.6px;
+  filter: drop-shadow(0 0 4px rgba(250, 84, 28, 0.3));
+}
+
+.topology-canvas .react-flow__edge.flow-muted .react-flow__edge-path {
+  opacity: 0.28;
+}
+
+.topology-canvas .react-flow__node.selected .tsn-node,
+.topology-canvas .react-flow__node:focus .tsn-node {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-dim), 0 5px 14px rgba(0, 0, 0, 0.12);
+}
+
+.topology-canvas .react-flow__node.flow-highlighted .tsn-node {
+  border-color: var(--accent);
+  background: #ffffff;
+  box-shadow:
+    0 0 0 2px var(--accent-dim),
+    0 8px 20px rgba(250, 84, 28, 0.18);
+}
+
+.topology-canvas .react-flow__node.flow-highlighted .tsn-node-type {
+  color: #ffffff;
+  background: var(--accent);
+}
+
+.topology-canvas .react-flow__node.flow-muted .tsn-node {
+  opacity: 0.36;
 }
 
 .tsn-node {
@@ -746,9 +823,7 @@ textarea:focus-visible {
 }
 
 .config-body {
-  display: grid;
-  grid-template-columns: minmax(320px, 1.2fr) minmax(250px, 0.9fr) minmax(220px, 0.8fr);
-  gap: 16px;
+  display: block;
   flex: 1;
   min-height: 0;
   padding: 12px 16px;
@@ -757,12 +832,55 @@ textarea:focus-visible {
 
 .flow-panel,
 .artifact-panel,
-.steps-panel {
+.steps-panel,
+.detail-panel {
   min-width: 0;
+}
+
+.detail-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 8px;
+}
+
+.detail-row {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: #ffffff;
+}
+
+.detail-row span {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.detail-row strong {
+  overflow: hidden;
+  color: var(--text-primary);
+  font-family: "JetBrains Mono", "SF Mono", Consolas, monospace;
+  font-size: 12px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .panel-heading {
   margin-bottom: 10px;
+}
+
+.flow-panel .panel-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.flow-panel .panel-heading .btn {
+  flex: 0 0 auto;
 }
 
 .panel-heading.inline {
@@ -812,6 +930,31 @@ textarea:focus-visible {
   border-bottom: 1px solid var(--border);
   color: var(--text-primary);
   vertical-align: top;
+}
+
+.eng-table tr.flow-row {
+  cursor: pointer;
+  transition:
+    background 0.15s,
+    box-shadow 0.15s;
+}
+
+.eng-table tr.flow-row:hover td {
+  background: rgba(250, 84, 28, 0.04);
+}
+
+.eng-table tr.flow-row:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.eng-table tr.flow-row.selected td {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.eng-table tr.flow-row.selected td:first-child {
+  box-shadow: inset 2px 0 0 var(--accent);
 }
 
 .artifact-list {
@@ -1282,6 +1425,30 @@ textarea:focus-visible {
   to {
     opacity: 1;
     transform: translateY(0);
+  }
+}
+
+@keyframes waitingDot {
+  0%,
+  80%,
+  100% {
+    opacity: 0.32;
+    transform: translateY(0) scale(0.9);
+  }
+
+  40% {
+    opacity: 1;
+    transform: translateY(-3px) scale(1);
+  }
+}
+
+@keyframes waitingSurface {
+  from {
+    background-position: 120% 0;
+  }
+
+  to {
+    background-position: -120% 0;
   }
 }
 
