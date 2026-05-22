@@ -102,13 +102,13 @@ async function listProjectSkills() {
 }
 
 function readFrontmatterName(source) {
-  const match = source.match(/^---\n([\s\S]*?)\n---/);
+  const match = source.match(/^---\r?\n([\s\S]*?)\r?\n---/);
   if (!match) {
     return undefined;
   }
 
   return match[1]
-    .split("\n")
+    .split(/\r?\n/)
     .map((line) => line.match(/^name:\s*(.+?)\s*$/)?.[1])
     .find(Boolean);
 }
