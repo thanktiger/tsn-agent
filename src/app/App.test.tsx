@@ -755,14 +755,17 @@ describe("App", () => {
 
     await user.click(screen.getByTestId("flow-row-flow-video-1"));
 
-    const nic5ToSw2Edge = screen.getByRole("button", { name: "选择链路 link-9" });
-    const sw2ToSw4Edge = screen.getByRole("button", { name: "选择链路 link-11" });
+    const esToSwitchEdge = screen.getByRole("button", { name: "选择链路 link-2" });
+    const switchBackboneEdge = screen.getByRole("button", { name: "选择链路 link-40" });
+    const switchToEsEdge = screen.getByRole("button", { name: "选择链路 link-32" });
 
-    expect(nic5ToSw2Edge).toHaveAttribute("data-highlight", "flow-highlighted");
-    expect(nic5ToSw2Edge).toHaveAttribute("data-source", "nic5");
-    expect(nic5ToSw2Edge).toHaveAttribute("data-target", "sw2");
-    expect(sw2ToSw4Edge).toHaveAttribute("data-source", "sw2");
-    expect(sw2ToSw4Edge).toHaveAttribute("data-target", "sw4");
+    expect(esToSwitchEdge).toHaveAttribute("data-highlight", "flow-highlighted");
+    expect(esToSwitchEdge).toHaveAttribute("data-source", "es1-2");
+    expect(esToSwitchEdge).toHaveAttribute("data-target", "sw1");
+    expect(switchBackboneEdge).toHaveAttribute("data-source", "sw1");
+    expect(switchBackboneEdge).toHaveAttribute("data-target", "sw3");
+    expect(switchToEsEdge).toHaveAttribute("data-source", "sw3");
+    expect(switchToEsEdge).toHaveAttribute("data-target", "es4-2");
   });
 
   it("marks the final planning stage confirmed instead of rerunning it", async () => {

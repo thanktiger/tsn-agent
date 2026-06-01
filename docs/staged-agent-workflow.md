@@ -4,7 +4,7 @@
 
 TSN Agent 当前使用四个稳定阶段 ID：
 
-- `topology`：解析自然语言拓扑规模，生成 canonical 拓扑。
+- `topology`：Project/Agent 层解析自然语言拓扑规模，调用确定性 topology domain / `tsn_topology` MCP 生成拓扑，再由 project bridge 合成 canonical 拓扑。
 - `time-sync`：展示时间同步默认假设，后续再细化 gPTP、GM 和端口关系。
 - `flow-template`：用户可见为“流量规划”，基于当前拓扑准备 ST 控制流/视频流等流量输入，只负责创建和确认流集合。
 - `planning-export`：用户可见为“模拟仿真”，刷新项目导出文件，并可启动真实规划任务。基础导出包括 `simulation/inet/omnetpp.ini`、`simulation/inet/traffic.ini`、NED、`workspace/react-flow-topology.json`、`planner/flow_plan_1.json` 和 manifest；当前不执行 OMNeT++。
@@ -15,14 +15,23 @@ TSN Agent 当前使用四个稳定阶段 ID：
 
 执行步骤面板显示用户可理解的事件摘要：
 
-- `stage-start` / `stage-result`：阶段开始和阶段结果。
-- `skill-result`：本地阶段 skill 的确定性结果。
+- `stage-start` / `stage-result`：阶段开始和阶段结果。新拓扑主链路使用 `WorkflowStageResult`，来源由 `producer` 标识。
+- `skill-result`：旧会话/旧 fixture 中的本地阶段 skill 结果事件，仅作为兼容读取，不作为新拓扑成功事件。
 - `tool-availability`：当前工具/MCP 可用状态摘要。
 - `confirmation-required`：等待用户确认的提示。
 - `artifact`：导出清单或规划器输入已刷新。
 - 规划任务事件：启动、轮询、busy、停止、读取结果和刷新 artifact，诊断只保存 plan id、状态、耗时、错误和文件摘要。
 
-本轮不解析真实 Claude SDK `tool_use/tool_result` 细节，也不启用 Bash/Edit/Write 类高风险工具。诊断日志继续保存脱敏后的 run id、耗时、chunk 统计和错误摘要。
+当前执行步骤中的 `tool-availability` 会展示 `tsn_topology` 的 available / unavailable / call_failed 摘要。Agent-facing MCP response 默认展示 summary；只有初始化和 operations 链路为了继续消费 `IntermediateTopology` 才允许显式 full topology。完整 artifact、端口表、MAC 表和完整 changeSet 不进入对话或诊断日志。诊断日志继续保存脱敏后的 run id、耗时、chunk 统计、工具可用状态和错误摘要。
+
+## Topology MCP 边界
+
+拓扑阶段有两条路径：
+
+- 从 0 初始化：Project/Agent 层选择模板和结构化参数，`topology.initialize` 生成 `IntermediateTopology`，project bridge 合成 `CanonicalTsnProjectV0`。
+- 已有拓扑编辑：Project/Agent 层先做 selector 消歧，再用 `topology.inspect` 和 P0 `topology.apply_operations` 处理 `link.delete`、`node.add`、`link.add`。
+
+`tsn_topology` 不做自然语言理解、不保存 topology handle、不生成 project、不推进 workflow，也不导出 `network.ned`、`omnetpp.ini` 或 `flow_plan_1.json`。这些仍属于 Project/Export 层。
 
 ## ScenarioConfig
 

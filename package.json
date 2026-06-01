@@ -14,17 +14,19 @@
     "verify:skills": "node scripts/verify-skills.mjs",
     "release:prepare": "node scripts/prepare-release.mjs",
     "release:prepare:check": "node scripts/prepare-release.mjs --dry-run",
-    "build:worker": "npm run verify:skills && esbuild src-node/claude-agent-worker.mjs --bundle --platform=node --format=esm --outfile=src-node/dist/claude-agent-worker.mjs && esbuild src-node/stage-skills/tsn-stage-runner.ts --bundle --platform=node --format=esm --outfile=src-node/dist/tsn-stage-runner.mjs",
+    "build:worker": "npm run verify:skills && esbuild src-node/claude-agent-worker.mjs --bundle --platform=node --format=esm --outfile=src-node/dist/claude-agent-worker.mjs && esbuild src-node/stage-skills/tsn-stage-runner.ts --bundle --platform=node --format=esm --outfile=src-node/dist/tsn-stage-runner.mjs && esbuild src-node/mcp/tsn-topology-server.ts --bundle --platform=node --format=esm --outfile=src-node/dist/tsn-topology-server.mjs",
     "tauri": "npm run build:worker && tauri"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.145",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "@tauri-apps/api": "^2.9.0",
     "@tauri-apps/plugin-dialog": "^2.7.1",
     "@xyflow/react": "^12.8.5",
     "lucide-react": "^0.468.0",
     "react": "^19.2.0",
-    "react-dom": "^19.2.0"
+    "react-dom": "^19.2.0",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@playwright/test": "^1.56.1",

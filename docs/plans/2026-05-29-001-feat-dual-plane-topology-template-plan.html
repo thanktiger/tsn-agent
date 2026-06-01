@@ -1,0 +1,965 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+  <meta charset="utf-8" />
+  <meta name="generator" content="pandoc" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
+  <meta name="dcterms.date" content="2026-05-29" />
+  <title>feat: 重构双平面拓扑模板契约</title>
+  <style>
+    /* Default styles provided by pandoc.
+    ** See https://pandoc.org/MANUAL.html#variables-for-html for config info.
+    */
+    html {
+      color: #1a1a1a;
+      background-color: #fdfdfd;
+    }
+    body {
+      margin: 0 auto;
+      max-width: 36em;
+      padding-left: 50px;
+      padding-right: 50px;
+      padding-top: 50px;
+      padding-bottom: 50px;
+      hyphens: auto;
+      overflow-wrap: break-word;
+      text-rendering: optimizeLegibility;
+      font-kerning: normal;
+    }
+    @media (max-width: 600px) {
+      body {
+        font-size: 0.9em;
+        padding: 12px;
+      }
+      h1 {
+        font-size: 1.8em;
+      }
+    }
+    @media print {
+      html {
+        background-color: white;
+      }
+      body {
+        background-color: transparent;
+        color: black;
+        font-size: 12pt;
+      }
+      p, h2, h3 {
+        orphans: 3;
+        widows: 3;
+      }
+      h2, h3, h4 {
+        page-break-after: avoid;
+      }
+    }
+    p {
+      margin: 1em 0;
+    }
+    a {
+      color: #1a1a1a;
+    }
+    a:visited {
+      color: #1a1a1a;
+    }
+    img {
+      max-width: 100%;
+    }
+    svg {
+      height: auto;
+      max-width: 100%;
+    }
+    h1, h2, h3, h4, h5, h6 {
+      margin-top: 1.4em;
+    }
+    h5, h6 {
+      font-size: 1em;
+      font-style: italic;
+    }
+    h6 {
+      font-weight: normal;
+    }
+    ol, ul {
+      padding-left: 1.7em;
+      margin-top: 1em;
+    }
+    li > ol, li > ul {
+      margin-top: 0;
+    }
+    blockquote {
+      margin: 1em 0 1em 1.7em;
+      padding-left: 1em;
+      border-left: 2px solid #e6e6e6;
+      color: #606060;
+    }
+    code {
+      font-family: Menlo, Monaco, Consolas, 'Lucida Console', monospace;
+      font-size: 85%;
+      margin: 0;
+      hyphens: manual;
+    }
+    pre {
+      margin: 1em 0;
+      overflow: auto;
+    }
+    pre code {
+      padding: 0;
+      overflow: visible;
+      overflow-wrap: normal;
+    }
+    .sourceCode {
+     background-color: transparent;
+     overflow: visible;
+    }
+    hr {
+      border: none;
+      border-top: 1px solid #1a1a1a;
+      height: 1px;
+      margin: 1em 0;
+    }
+    table {
+      margin: 1em 0;
+      border-collapse: collapse;
+      width: 100%;
+      overflow-x: auto;
+      display: block;
+      font-variant-numeric: lining-nums tabular-nums;
+    }
+    table caption {
+      margin-bottom: 0.75em;
+    }
+    tbody {
+      margin-top: 0.5em;
+      border-top: 1px solid #1a1a1a;
+      border-bottom: 1px solid #1a1a1a;
+    }
+    th {
+      border-top: 1px solid #1a1a1a;
+      padding: 0.25em 0.5em 0.25em 0.5em;
+    }
+    td {
+      padding: 0.125em 0.5em 0.25em 0.5em;
+    }
+    header {
+      margin-bottom: 4em;
+      text-align: center;
+    }
+    #TOC li {
+      list-style: none;
+    }
+    #TOC ul {
+      padding-left: 1.3em;
+    }
+    #TOC > ul {
+      padding-left: 0;
+    }
+    #TOC a:not(:hover) {
+      text-decoration: none;
+    }
+    code{white-space: pre-wrap;}
+    span.smallcaps{font-variant: small-caps;}
+    div.columns{display: flex; gap: min(4vw, 1.5em);}
+    div.column{flex: auto; overflow-x: auto;}
+    div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+    /* The extra [class] is a hack that increases specificity enough to
+       override a similar rule in reveal.js */
+    ul.task-list[class]{list-style: none;}
+    ul.task-list li input[type="checkbox"] {
+      font-size: inherit;
+      width: 0.8em;
+      margin: 0 0.8em 0.2em -1.6em;
+      vertical-align: middle;
+    }
+    .display.math{display: block; text-align: center; margin: 0.5rem auto;}
+    /* CSS for syntax highlighting */
+    html { -webkit-text-size-adjust: 100%; }
+    pre > code.sourceCode { white-space: pre; position: relative; }
+    pre > code.sourceCode > span { display: inline-block; line-height: 1.25; }
+    pre > code.sourceCode > span:empty { height: 1.2em; }
+    .sourceCode { overflow: visible; }
+    code.sourceCode > span { color: inherit; text-decoration: inherit; }
+    div.sourceCode { margin: 1em 0; }
+    pre.sourceCode { margin: 0; }
+    @media screen {
+    div.sourceCode { overflow: auto; }
+    }
+    @media print {
+    pre > code.sourceCode { white-space: pre-wrap; }
+    pre > code.sourceCode > span { text-indent: -5em; padding-left: 5em; }
+    }
+    pre.numberSource code
+      { counter-reset: source-line 0; }
+    pre.numberSource code > span
+      { position: relative; left: -4em; counter-increment: source-line; }
+    pre.numberSource code > span > a:first-child::before
+      { content: counter(source-line);
+        position: relative; left: -1em; text-align: right; vertical-align: baseline;
+        border: none; display: inline-block;
+        -webkit-touch-callout: none; -webkit-user-select: none;
+        -khtml-user-select: none; -moz-user-select: none;
+        -ms-user-select: none; user-select: none;
+        padding: 0 4px; width: 4em;
+        color: #aaaaaa;
+      }
+    pre.numberSource { margin-left: 3em; border-left: 1px solid #aaaaaa;  padding-left: 4px; }
+    div.sourceCode
+      {   }
+    @media screen {
+    pre > code.sourceCode > span > a:first-child::before { text-decoration: underline; }
+    }
+    code span.al { color: #ff0000; font-weight: bold; } /* Alert */
+    code span.an { color: #60a0b0; font-weight: bold; font-style: italic; } /* Annotation */
+    code span.at { color: #7d9029; } /* Attribute */
+    code span.bn { color: #40a070; } /* BaseN */
+    code span.bu { color: #008000; } /* BuiltIn */
+    code span.cf { color: #007020; font-weight: bold; } /* ControlFlow */
+    code span.ch { color: #4070a0; } /* Char */
+    code span.cn { color: #880000; } /* Constant */
+    code span.co { color: #60a0b0; font-style: italic; } /* Comment */
+    code span.cv { color: #60a0b0; font-weight: bold; font-style: italic; } /* CommentVar */
+    code span.do { color: #ba2121; font-style: italic; } /* Documentation */
+    code span.dt { color: #902000; } /* DataType */
+    code span.dv { color: #40a070; } /* DecVal */
+    code span.er { color: #ff0000; font-weight: bold; } /* Error */
+    code span.ex { } /* Extension */
+    code span.fl { color: #40a070; } /* Float */
+    code span.fu { color: #06287e; } /* Function */
+    code span.im { color: #008000; font-weight: bold; } /* Import */
+    code span.in { color: #60a0b0; font-weight: bold; font-style: italic; } /* Information */
+    code span.kw { color: #007020; font-weight: bold; } /* Keyword */
+    code span.op { color: #666666; } /* Operator */
+    code span.ot { color: #007020; } /* Other */
+    code span.pp { color: #bc7a00; } /* Preprocessor */
+    code span.sc { color: #4070a0; } /* SpecialChar */
+    code span.ss { color: #bb6688; } /* SpecialString */
+    code span.st { color: #4070a0; } /* String */
+    code span.va { color: #19177c; } /* Variable */
+    code span.vs { color: #4070a0; } /* VerbatimString */
+    code span.wa { color: #60a0b0; font-weight: bold; font-style: italic; } /* Warning */
+  </style>
+</head>
+<body>
+<header id="title-block-header">
+<h1 class="title">feat: 重构双平面拓扑模板契约</h1>
+<p class="date">2026-05-29</p>
+</header>
+<h1 id="feat-重构双平面拓扑模板契约">feat: 重构双平面拓扑模板契约</h1>
+<h2 id="摘要">摘要</h2>
+<p>把现有 <code>aerospace-redundant</code> 参考拓扑从公开 topology MCP
+模板目录中移除，新增一个收窄后的 <code>dual-plane-redundant</code>
+模板。该模板不接收 <code>endSystemsPerSwitch</code> 这类 UI/语义层
+shortcut，而是接收由 Project/Agent
+层整理并校验过的结构化双平面参数：显式交换机、交换机分组、端系统接入分配、双归属规则、平面内骨干连接和平面间桥接策略。MCP
+只负责确定性生成、校验和返回 <code>IntermediateTopology</code>。</p>
+<hr />
+<h2 id="问题框架">问题框架</h2>
+<p>当前实现把三个概念混在了一起：<code>aerospace-onboard</code>
+场景配置、<code>aerospace-redundant</code> 拓扑模板、以及针对 7
+个网卡参考图的硬编码端系统分布。用户输入“4 个交换机，每个交换机 2
+个端系统”时，大模型把端系统总数传成 4；MCP 按当前契约生成了 4
+个端系统，但这不是用户期望的 8 个端系统。问题不是 MCP
+算错，而是公开模板契约让模型必须猜参数语义。</p>
+<p>新的边界应当是：Topology MCP
+维护所有拓扑模板和生成规则；Project/Agent
+层负责从自然语言、场景默认值和用户确认中形成结构化参数。MCP
+不需要知道“每个交换机几个端系统”这句话，它只需要收到“有哪些交换机、有哪些端系统、端系统接入到哪些主/备交换机、交换机之间如何形成两套平面”的确定输入，然后稳定生成拓扑。</p>
+<h3 id="当前实现状态">当前实现状态</h3>
+<p>本计划落地后的公开 <code>topology.describe_templates</code>
+目录只应返回当前可新建模板。<code>generic-line</code> /
+<code>generic-ring</code> 继续作为基础 smoke
+模板保留；<code>dual-plane-redundant</code>
+已作为通用双平面/双归属模板加入；<code>aerospace-redundant</code>
+不再公开，也不作为新建、repair 或默认 fixture 的成功路径。</p>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr>
+<th>模板 ID</th>
+<th>当前状态</th>
+<th>规则</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>generic-line</code></td>
+<td>当前可用，使用 <code>switchCount</code> /
+<code>endSystemsPerSwitch</code></td>
+<td>通用简化模板，不承载双平面语义</td>
+</tr>
+<tr>
+<td><code>generic-ring</code></td>
+<td>当前可用，使用 <code>switchCount</code> /
+<code>endSystemsPerSwitch</code></td>
+<td>通用简化模板，不承载双平面语义</td>
+</tr>
+<tr>
+<td><code>dual-plane-redundant</code></td>
+<td>当前可用</td>
+<td>通用双平面/双归属模板，必须传显式节点、分组和 A/B 接入</td>
+</tr>
+<tr>
+<td><code>aerospace-redundant</code></td>
+<td>已移除</td>
+<td>不在 public catalog 中；旧 ID 只作为错误测试输入</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="需求">需求</h2>
+<p><strong>模板目录</strong></p>
+<ul>
+<li>R1. 从 <code>topology.describe_templates</code> 公开目录中移除
+<code>aerospace-redundant</code> /
+<code>aerospace-redundant-reference</code> 或任何等价参考拓扑模板。</li>
+<li>R2. 新增 <code>dual-plane-redundant</code> 作为 P0
+双平面/双冗余拓扑模板，由 topology MCP 维护参数
+schema、默认约束、示例和确定性生成规则；P0 只覆盖 A/B 两平面、成对
+switch group、显式端系统双归属、<code>line</code> / <code>ring</code>
+平面内骨干，以及 <code>none</code> / <code>paired</code>
+跨平面桥接。</li>
+<li>R3. MVP 尚未上线，不保留 <code>aerospace-redundant</code> 旧 session
+兼容路径；该模板 ID 必须从公开目录、初始化入口、fake/session repair
+fallback 和默认 fixture 中移除。若调用方显式传入该
+ID，<code>topology.initialize</code>
+必须返回结构化错误，不得生成拓扑。</li>
+</ul>
+<p><strong>参数契约</strong></p>
+<ul>
+<li>R4. <code>dual-plane-redundant</code> 不得把
+<code>endSystemsPerSwitch</code>
+作为模板参数；这个值如果来自用户自然语言，应由 Project/Agent
+层换算成明确的
+<code>switches</code>、<code>switchGroups</code>、<code>endSystems</code>
+和接入分配。</li>
+<li>R5. 模板必须支持 Project/Agent 层传入显式
+<code>switches</code>、<code>switchGroups</code> 和
+<code>endSystems</code>。每台交换机必须声明
+<code>id</code>、<code>plane</code>、<code>groupId</code>
+和端口容量或可推导的端口容量；每个端系统必须声明主接入和备接入。</li>
+<li>R6. 模板 P0 必须支持比“每个交换机挂 N
+个端系统”更明确的双平面连接策略，但范围收窄到可测试集合：成对 A/B switch
+group、端系统按 group 双归属、平面内 <code>line</code> /
+<code>ring</code> 骨干，以及 <code>none</code> / <code>paired</code>
+跨平面桥接。<code>mesh</code>、<code>custom pairs</code>、多级
+aggregation/core、非对称平面和每平面多 access switch
+进入后续模板扩展。</li>
+<li>R7.
+模板必须区分“两个物理平面”和“端系统双归属”两个概念：双平面描述交换机骨干冗余，双归属描述端系统接入冗余。二者可同时存在，但不是同一个字段。</li>
+<li>R8. 参数 schema 必须让大模型能够先调用
+<code>topology.describe_templates</code>
+得知可用枚举、字段含义、required/optional、数组 item
+shape、引用关系和完整示例，再生成 <code>topology.initialize</code>
+参数；<code>describe_templates</code> 不应只返回自然语言描述。</li>
+<li>R8a.
+文档和测试必须区分“当前可调用模板”和“目标/已废弃模板”；<code>topology.describe_templates</code>
+的 public catalog 只返回当前可调用模板。实现完成后不得在 public catalog
+中展示 <code>aerospace-redundant</code>；文档中的
+<code>dual-plane-redundant</code> 示例不得作为可调用示例发布，直到
+catalog 实际返回该模板 ID 和 schema。</li>
+</ul>
+<p><strong>确定性行为</strong></p>
+<ul>
+<li>R9. 相同 <code>dual-plane-redundant</code>
+输入必须得到相同节点、链路、端口、坐标和摘要。</li>
+<li>R10. MCP
+必须校验交换机实体、交换机分组、端系统接入、端口容量、端口占用、链路重复、平面内连接、跨平面桥接和关键字段缺失。</li>
+<li>R11.
+如果模型传入的接入规则不完整或歧义，例如端系统只声明数量但没有接入到哪些交换机，MCP
+必须返回结构化错误，不得猜测用户意图。</li>
+<li>R12. P0 不支持 <code>attachmentPlan</code>
+或其他压缩展开参数。调用方必须传入显式端系统和主备接入；如果后续支持压缩参数，必须作为独立增量定义
+schema、余数分配、group 映射、主备选择和错误路径。</li>
+</ul>
+<p><strong>集成边界</strong></p>
+<ul>
+<li>R13. <code>src/domain/topology-factory.ts</code> 和 fake/session
+repair 路径必须删除旧 <code>aerospace-redundant</code> 参考拓扑
+fallback，不得在任何新建、确认、继续或修复路径中生成该参考拓扑。</li>
+<li>R14. <code>aerospace-onboard</code>
+场景可以继续存在，但它只能提供业务语义、默认场景和提示词上下文；拓扑初始化必须通过
+<code>dual-plane-redundant</code> 或其他 MCP 公开模板完成。</li>
+<li>R15. 本计划不重写 flow 阶段；但拓扑阶段回归测试必须确保新建双平面
+topology stage result 不包含引用不存在节点的 flow 或阶段 payload。旧
+flow 模板硬编码节点问题作为独立 follow-up 处理。</li>
+<li>R16. <code>project-bridge</code> 不得根据旧模板 ID 自动把 project
+命名为“箭载双冗余拓扑”；项目命名应来自场景配置、用户输入或通用模板元数据。</li>
+</ul>
+<p><strong>测试</strong></p>
+<ul>
+<li>R17. 必须新增测试覆盖“4 个交换机，每个交换机 2
+个端系统”的模型展开结果：Project/Agent 层传给 MCP 的是 4 个交换机、8
+个端系统和明确双归属接入，MCP 返回 12 个节点。</li>
+<li>R18. 必须新增测试覆盖 4 个交换机、20 个端系统、每端系统双归属到 A/B
+平面的拓扑，确认它不依赖 <code>endSystemsPerSwitch</code> 参数。</li>
+<li>R19. 必须新增错误测试：只传
+<code>endSystemsPerSwitch</code>、只传端系统总数但没有接入分配、端系统主备接入同一平面、端口不足、缺少必填
+<code>backbone</code> 或
+<code>crossPlaneLinks</code>、端系统引用不存在的 switch。</li>
+<li>R20. 必须更新 MCP schema 测试，确认 <code>topology.initialize</code>
+不再用 <code>z.unknown()</code> 暴露模板参数，而是至少对
+<code>dual-plane-redundant</code> 的关键字段做结构化校验。</li>
+<li>R21. MCP 文档必须明确 <code>topologyFullAllowed</code> 只是显式
+opt-in，不是鉴权。当前安全边界是能否启动并访问本机 MCP 进程；capability
+token、签名/hash、private IPC 或 localhost-only 属于生产 sidecar
+后续设计。</li>
+<li>R22. MCP 文档必须区分 artifact 的 ingress 和
+egress：<code>build_artifacts</code> 从
+<code>IntermediateTopology</code> 返回
+summary；<code>describe_artifacts</code> /
+<code>validate_artifacts</code> 只适合调用方已经持有 artifact
+对象时使用。外部模型侧不应把完整 artifact/MAC 表作为主链路 tool
+arguments 传入。</li>
+</ul>
+<hr />
+<h2 id="建议的-dual-plane-redundant-参数规则">建议的
+<code>dual-plane-redundant</code> 参数规则</h2>
+<p>这个 schema
+是计划中的方向性契约，具体字段名实现时可以小幅调整，但语义不应退回
+<code>endSystemsPerSwitch</code>。</p>
+<div class="sourceCode" id="cb1"><pre class="sourceCode ts"><code class="sourceCode typescript"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="kw">type</span> DualPlaneRedundantParams <span class="op">=</span> {</span>
+<span id="cb1-2"><a href="#cb1-2" aria-hidden="true" tabindex="-1"></a>  dataRateMbps<span class="op">:</span> <span class="dv">10</span> <span class="op">|</span> <span class="dv">100</span> <span class="op">|</span> <span class="dv">1000</span> <span class="op">|</span> <span class="dv">10000</span><span class="op">;</span></span>
+<span id="cb1-3"><a href="#cb1-3" aria-hidden="true" tabindex="-1"></a>  planes<span class="op">:</span> [</span>
+<span id="cb1-4"><a href="#cb1-4" aria-hidden="true" tabindex="-1"></a>    { id<span class="op">:</span> <span class="st">&quot;A&quot;</span><span class="op">;</span> name<span class="op">?:</span> <span class="dt">string</span> }<span class="op">,</span></span>
+<span id="cb1-5"><a href="#cb1-5" aria-hidden="true" tabindex="-1"></a>    { id<span class="op">:</span> <span class="st">&quot;B&quot;</span><span class="op">;</span> name<span class="op">?:</span> <span class="dt">string</span> }</span>
+<span id="cb1-6"><a href="#cb1-6" aria-hidden="true" tabindex="-1"></a>  ]<span class="op">;</span></span>
+<span id="cb1-7"><a href="#cb1-7" aria-hidden="true" tabindex="-1"></a>  switches<span class="op">:</span> <span class="bu">Array</span><span class="op">&lt;</span>{</span>
+<span id="cb1-8"><a href="#cb1-8" aria-hidden="true" tabindex="-1"></a>    id<span class="op">:</span> <span class="dt">string</span><span class="op">;</span></span>
+<span id="cb1-9"><a href="#cb1-9" aria-hidden="true" tabindex="-1"></a>    name<span class="op">?:</span> <span class="dt">string</span><span class="op">;</span></span>
+<span id="cb1-10"><a href="#cb1-10" aria-hidden="true" tabindex="-1"></a>    plane<span class="op">:</span> <span class="st">&quot;A&quot;</span> <span class="op">|</span> <span class="st">&quot;B&quot;</span><span class="op">;</span></span>
+<span id="cb1-11"><a href="#cb1-11" aria-hidden="true" tabindex="-1"></a>    groupId<span class="op">:</span> <span class="dt">string</span><span class="op">;</span></span>
+<span id="cb1-12"><a href="#cb1-12" aria-hidden="true" tabindex="-1"></a>    role<span class="op">?:</span> <span class="st">&quot;access&quot;</span><span class="op">;</span></span>
+<span id="cb1-13"><a href="#cb1-13" aria-hidden="true" tabindex="-1"></a>    portCount<span class="op">?:</span> <span class="dt">number</span><span class="op">;</span></span>
+<span id="cb1-14"><a href="#cb1-14" aria-hidden="true" tabindex="-1"></a>  }<span class="op">&gt;;</span></span>
+<span id="cb1-15"><a href="#cb1-15" aria-hidden="true" tabindex="-1"></a>  switchGroups<span class="op">:</span> <span class="bu">Array</span><span class="op">&lt;</span>{</span>
+<span id="cb1-16"><a href="#cb1-16" aria-hidden="true" tabindex="-1"></a>    id<span class="op">:</span> <span class="dt">string</span><span class="op">;</span></span>
+<span id="cb1-17"><a href="#cb1-17" aria-hidden="true" tabindex="-1"></a>    name<span class="op">?:</span> <span class="dt">string</span><span class="op">;</span></span>
+<span id="cb1-18"><a href="#cb1-18" aria-hidden="true" tabindex="-1"></a>    planeSwitches<span class="op">:</span> {</span>
+<span id="cb1-19"><a href="#cb1-19" aria-hidden="true" tabindex="-1"></a>      A<span class="op">:</span> <span class="dt">string</span><span class="op">;</span></span>
+<span id="cb1-20"><a href="#cb1-20" aria-hidden="true" tabindex="-1"></a>      B<span class="op">:</span> <span class="dt">string</span><span class="op">;</span></span>
+<span id="cb1-21"><a href="#cb1-21" aria-hidden="true" tabindex="-1"></a>    }<span class="op">;</span></span>
+<span id="cb1-22"><a href="#cb1-22" aria-hidden="true" tabindex="-1"></a>  }<span class="op">&gt;;</span></span>
+<span id="cb1-23"><a href="#cb1-23" aria-hidden="true" tabindex="-1"></a>  endSystems<span class="op">:</span> <span class="bu">Array</span><span class="op">&lt;</span>{</span>
+<span id="cb1-24"><a href="#cb1-24" aria-hidden="true" tabindex="-1"></a>    id<span class="op">:</span> <span class="dt">string</span><span class="op">;</span></span>
+<span id="cb1-25"><a href="#cb1-25" aria-hidden="true" tabindex="-1"></a>    name<span class="op">?:</span> <span class="dt">string</span><span class="op">;</span></span>
+<span id="cb1-26"><a href="#cb1-26" aria-hidden="true" tabindex="-1"></a>    groupId<span class="op">:</span> <span class="dt">string</span><span class="op">;</span></span>
+<span id="cb1-27"><a href="#cb1-27" aria-hidden="true" tabindex="-1"></a>    attachment<span class="op">:</span> {</span>
+<span id="cb1-28"><a href="#cb1-28" aria-hidden="true" tabindex="-1"></a>      primary<span class="op">:</span> { switchId<span class="op">:</span> <span class="dt">string</span><span class="op">;</span> plane<span class="op">:</span> <span class="st">&quot;A&quot;</span> <span class="op">|</span> <span class="st">&quot;B&quot;</span> }<span class="op">;</span></span>
+<span id="cb1-29"><a href="#cb1-29" aria-hidden="true" tabindex="-1"></a>      backup<span class="op">:</span> { switchId<span class="op">:</span> <span class="dt">string</span><span class="op">;</span> plane<span class="op">:</span> <span class="st">&quot;A&quot;</span> <span class="op">|</span> <span class="st">&quot;B&quot;</span> }<span class="op">;</span></span>
+<span id="cb1-30"><a href="#cb1-30" aria-hidden="true" tabindex="-1"></a>    }<span class="op">;</span></span>
+<span id="cb1-31"><a href="#cb1-31" aria-hidden="true" tabindex="-1"></a>  }<span class="op">&gt;;</span></span>
+<span id="cb1-32"><a href="#cb1-32" aria-hidden="true" tabindex="-1"></a>  backbone<span class="op">:</span> {</span>
+<span id="cb1-33"><a href="#cb1-33" aria-hidden="true" tabindex="-1"></a>    mode<span class="op">:</span> <span class="st">&quot;line&quot;</span> <span class="op">|</span> <span class="st">&quot;ring&quot;</span><span class="op">;</span></span>
+<span id="cb1-34"><a href="#cb1-34" aria-hidden="true" tabindex="-1"></a>    withinPlane<span class="op">:</span> <span class="dt">boolean</span><span class="op">;</span></span>
+<span id="cb1-35"><a href="#cb1-35" aria-hidden="true" tabindex="-1"></a>  }<span class="op">;</span></span>
+<span id="cb1-36"><a href="#cb1-36" aria-hidden="true" tabindex="-1"></a>  crossPlaneLinks<span class="op">:</span> {</span>
+<span id="cb1-37"><a href="#cb1-37" aria-hidden="true" tabindex="-1"></a>    mode<span class="op">:</span> <span class="st">&quot;none&quot;</span> <span class="op">|</span> <span class="st">&quot;paired&quot;</span><span class="op">;</span></span>
+<span id="cb1-38"><a href="#cb1-38" aria-hidden="true" tabindex="-1"></a>  }<span class="op">;</span></span>
+<span id="cb1-39"><a href="#cb1-39" aria-hidden="true" tabindex="-1"></a>  allocation<span class="op">?:</span> {</span>
+<span id="cb1-40"><a href="#cb1-40" aria-hidden="true" tabindex="-1"></a>    idPrefix<span class="op">?:</span> {</span>
+<span id="cb1-41"><a href="#cb1-41" aria-hidden="true" tabindex="-1"></a>      <span class="cf">switch</span><span class="op">?:</span> <span class="dt">string</span><span class="op">;</span></span>
+<span id="cb1-42"><a href="#cb1-42" aria-hidden="true" tabindex="-1"></a>      endSystem<span class="op">?:</span> <span class="dt">string</span><span class="op">;</span></span>
+<span id="cb1-43"><a href="#cb1-43" aria-hidden="true" tabindex="-1"></a>      link<span class="op">?:</span> <span class="dt">string</span><span class="op">;</span></span>
+<span id="cb1-44"><a href="#cb1-44" aria-hidden="true" tabindex="-1"></a>    }<span class="op">;</span></span>
+<span id="cb1-45"><a href="#cb1-45" aria-hidden="true" tabindex="-1"></a>    portStrategy<span class="op">:</span> <span class="st">&quot;first-free&quot;</span><span class="op">;</span></span>
+<span id="cb1-46"><a href="#cb1-46" aria-hidden="true" tabindex="-1"></a>    layoutStrategy<span class="op">:</span> <span class="st">&quot;dual-plane-grid&quot;</span><span class="op">;</span></span>
+<span id="cb1-47"><a href="#cb1-47" aria-hidden="true" tabindex="-1"></a>  }<span class="op">;</span></span>
+<span id="cb1-48"><a href="#cb1-48" aria-hidden="true" tabindex="-1"></a>}<span class="op">;</span></span></code></pre></div>
+<h3 id="模型应如何把自然语言转成参数">模型应如何把自然语言转成参数</h3>
+<p>用户说“4 个交换机，每个交换机 2
+个端系统，双平面冗余”时，Project/Agent 层可以先把它解释为：</p>
+<ul>
+<li>交换机：4 台，构成 2 个双平面 switch group，每个 group 有 A/B
+两台交换机。</li>
+<li>端系统：8 个，因为“每个交换机 2 个端系统”是语义
+shortcut，需要由模型展开。</li>
+<li>接入：每个端系统双归属到某个 group 的 A/B 交换机。</li>
+<li>骨干：如果用户没有明确说 <code>line</code> 或
+<code>ring</code>，Project/Agent
+层必须按场景默认策略选择并在阶段摘要中暴露默认值，或请求用户确认；MCP
+只执行已给定的 <code>backbone.mode</code>。</li>
+<li>跨平面桥接：必须显式传入
+<code>crossPlaneLinks.mode</code>。<code>none</code> 表示 A/B
+平面隔离但端系统双归属；<code>paired</code> 表示每个 switch group 内 A/B
+交换机有成对跨平面链路。</li>
+</ul>
+<p>展开后的 MCP 参数应表达为显式
+<code>switches</code>、<code>switchGroups</code> 和
+<code>endSystems</code>。MCP 可以校验这个结构，但不从自然语言计算
+8。</p>
+<h3 id="双平面与双冗余的处理">双平面与双冗余的处理</h3>
+<p>本计划采用如下工程语义：</p>
+<ul>
+<li><strong>双平面:</strong> 至少存在两个可区分的交换机平面，通常是
+A/B，两套平面内骨干可以独立连通。</li>
+<li><strong>双归属:</strong> 一个端系统同时接入两个不同故障域，通常是
+A/B 平面各一台交换机。</li>
+<li><strong>双冗余:</strong>
+泛指上面一种或两种冗余能力；在模板参数里不作为单独拓扑结构，而是由
+<code>planes</code>、<code>switches</code>、<code>switchGroups</code>、<code>attachment</code>、<code>backbone</code>
+和 <code>crossPlaneLinks</code> 组合表达。</li>
+</ul>
+<hr />
+<h2 id="关键技术决策">关键技术决策</h2>
+<ul>
+<li>KTD1. <strong>公开模板由 MCP 统一维护。</strong> Project/Agent
+层只能通过 <code>topology.describe_templates</code> 发现模板，不再在
+<code>topology-factory</code>、stage runner、fake agent 或 skill
+中维护第二套参考拓扑。</li>
+<li>KTD2. <strong>删除参考拓扑，而不是重命名。</strong>
+<code>aerospace-redundant</code> 当前承载的是特定 7 网卡图例，不应以
+<code>aerospace-redundant-reference</code>
+继续暴露；保留它只会让模型继续选错。</li>
+<li>KTD3. <strong>MCP 参数接收结构化拓扑意图，不接收自然语言
+shortcut。</strong>
+<code>endSystemsPerSwitch</code>、<code>每台交换机连接 N 个端系统</code>、<code>左侧三个右侧两个</code>
+都属于 Project/Agent 层的语义归一化来源，不是 MCP
+模板核心字段。大模型可以参与提取，但进入 MCP 前由 Project/Agent
+层拥有和校验结构化初始化参数。</li>
+<li>KTD4. <strong>P0 双平面模板以成对故障域建模。</strong>
+<code>planes</code>、<code>switches</code>、<code>switchGroups</code>、端系统主备接入、平面内骨干和跨平面连接是比“每交换机端系统数量”更稳定的参数。P0
+只承诺成对 A/B access
+group；更复杂的多级或非对称双平面拓扑进入后续模板扩展。</li>
+<li>KTD5. <strong>本期不实现压缩展开参数。</strong>
+<code>attachmentPlan</code> 或 <code>endSystemsPerGroup</code>
+这类压缩输入可以减少模型枚举成本，但必须单独定义 schema、展开规则和
+fixture；本计划先用显式端系统接入消除当前语义歧义。</li>
+<li>KTD6. <strong>不引入旧模板兼容层。</strong> 由于 MVP
+未上线，没有需要迁移的历史会话；本计划直接删除
+<code>aerospace-redundant</code> 的旧参考模板、fixture、repair fallback
+和公开类型，不新增任何旧模板类型或旧模板转换器。旧 ID
+只作为错误测试输入存在。</li>
+<li>KTD7. <strong>文档必须分清当前能力和废弃模板。</strong>
+当前可执行示例应使用实时 catalog
+中真实存在的模板；<code>dual-plane-redundant</code>
+已可作为当前主链路示例，<code>aerospace-redundant</code>
+只能作为错误测试或历史背景出现。</li>
+<li>KTD8. <strong><code>topologyFullAllowed</code>
+不是安全授权。</strong> 它只是允许 full topology 返回的显式 opt-in
+flag；真正的鉴权、token 和进程隔离必须留在生产 sidecar 决策中处理。</li>
+</ul>
+<hr />
+<h2 id="高层技术设计">高层技术设计</h2>
+<pre class="mermaid"><code>flowchart TB
+  User[用户自然语言] --&gt; Agent[Project / Agent 层]
+  Agent --&gt; Catalog[topology.describe_templates]
+  Catalog --&gt; Agent
+  Agent --&gt;|生成结构化 dual-plane 参数| Init[topology.initialize]
+  Init --&gt; Domain[Topology domain: dual-plane-redundant]
+  Domain --&gt; Validate[validate_intermediate]
+  Validate --&gt; Bridge[Project composition bridge]
+  Bridge --&gt; App[Topology stage result + React Flow]
+</code></pre>
+<p>初始化链路的职责分配：</p>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr>
+<th>层级</th>
+<th>职责</th>
+<th>不做什么</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Project/Agent</td>
+<td>从自然语言提取数量、角色、连接意图；查询模板目录；生成并校验结构化参数；必要时向用户确认</td>
+<td>不维护拓扑 builder</td>
+</tr>
+<tr>
+<td>Topology MCP</td>
+<td>维护机器可读模板 schema；确定性生成
+nodes/links/ports/layout；校验结构化输入</td>
+<td>不理解自然语言、不生成 project</td>
+</tr>
+<tr>
+<td>Project bridge</td>
+<td>把 <code>IntermediateTopology</code> 合成
+<code>CanonicalTsnProjectV0</code> 和阶段结果</td>
+<td>不改写拓扑规则</td>
+</tr>
+<tr>
+<td>Flow/time-sync</td>
+<td>基于实际拓扑生成后续阶段草案</td>
+<td>不属于本计划实现范围</td>
+</tr>
+</tbody>
+</table>
+<p>外部模型调用时的数据边界：</p>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr>
+<th>数据</th>
+<th>请求侧</th>
+<th>响应侧</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>IntermediateTopology</code></td>
+<td>可作为
+<code>inspect</code>、<code>validate_intermediate</code>、<code>apply_operations</code>
+输入</td>
+<td>仅 <code>initialize</code> / <code>apply_operations</code> 在
+<code>responseMode: "full"</code> 且
+<code>topologyFullAllowed: true</code> 时返回</td>
+</tr>
+<tr>
+<td>Artifact 对象</td>
+<td>不作为模型主链路输入；仅本地 runtime 已持有 artifact 时传给
+<code>describe_artifacts</code> / <code>validate_artifacts</code></td>
+<td>不返回 full artifact；<code>build_artifacts</code> 只返回
+summary</td>
+</tr>
+<tr>
+<td>端口占用表 / full changeSet</td>
+<td>不作为外部模型输入</td>
+<td>不返回；full changeSet 在 MCP wrapper 中剥离</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="范围边界">范围边界</h2>
+<h3 id="范围内">范围内</h3>
+<ul>
+<li>新增 <code>dual-plane-redundant</code>
+模板目录项、参数类型、初始化逻辑、校验和 fixture。</li>
+<li>从公开 MCP 模板目录移除 <code>aerospace-redundant</code>。</li>
+<li>改造 Project/Agent 参数归一化和提示，使新建双平面拓扑走
+<code>dual-plane-redundant</code>。</li>
+<li>删除新建、确认、继续、repair/fallback 路径中对旧 7
+网卡参考拓扑的依赖。</li>
+<li>更新测试，覆盖大模型展开后的 4+8、4+20 和非法参数场景。</li>
+</ul>
+<h3 id="后续工作">后续工作</h3>
+<ul>
+<li>增加更细的 <code>attachmentPlan</code> /
+<code>endSystemsPerGroup</code> 压缩参数，前提是其展开规则足够明确并有
+fixture。</li>
+<li>处理 flow 阶段旧
+<code>nic5</code>、<code>nic6</code>、<code>nic7</code>
+硬编码和默认流选择策略。</li>
+<li>为工业、车载、电力、轨交等场景增加基于
+<code>dual-plane-redundant</code> 的场景级参数预设。</li>
+<li>把 flow/time-sync 也迁移成独立 MCP domain。</li>
+</ul>
+<h3 id="范围外">范围外</h3>
+<ul>
+<li>不让 MCP 直接接受自然语言 prompt。</li>
+<li>不把 <code>generate_project</code> 加回 topology MCP。</li>
+<li>不保留旧 <code>aerospace-redundant</code> session 兼容转换器；MVP
+没有线上历史数据，本计划不做旧会话迁移。</li>
+<li>不重做完整拓扑编辑 CRUD；本计划只处理初始化模板契约。</li>
+<li>不重写 flow/time-sync 阶段语义。</li>
+<li>不在本计划中实现生产 sidecar 鉴权、capability token、HTTP transport
+或跨机器共享。</li>
+</ul>
+<hr />
+<h2 id="实施单元">实施单元</h2>
+<h3 id="u1.-重定义模板-id-和公开目录">U1. 重定义模板 ID 和公开目录</h3>
+<ul>
+<li><strong>目标:</strong> 删除公开
+<code>aerospace-redundant</code>，加入
+<code>dual-plane-redundant</code>。</li>
+<li><strong>需求:</strong> R1, R2, R3, R8, R8a</li>
+<li><strong>文件:</strong>
+<ul>
+<li><code>src/topology/intermediate.ts</code></li>
+<li><code>src/topology/templates.ts</code></li>
+<li><code>src/topology/templates.test.ts</code></li>
+<li><code>src-node/mcp/topology-tools.test.ts</code></li>
+</ul></li>
+<li><strong>方案:</strong> 将公开 <code>TopologyTemplateId</code>
+收敛为当前可新建模板集合，不引入单独的旧模板类型。公开 catalog 不包含
+<code>aerospace-redundant</code>。新增 layout 值
+<code>dual-plane</code>。<code>describeTemplates()</code> 返回
+<code>generic-line</code>、<code>generic-ring</code>、<code>dual-plane-redundant</code>。删除旧模板相关默认
+fixture 或把它改成显式错误测试输入。</li>
+<li><strong>测试场景:</strong>
+<ul>
+<li><code>describeTemplates()</code> 不包含
+<code>aerospace-redundant</code>。</li>
+<li><code>dual-plane-redundant</code> catalog 包含机器可读 schema、完整
+4+8
+示例、<code>planes</code>、<code>switches</code>、<code>switchGroups</code>、<code>endSystems</code>、<code>backbone</code>、<code>crossPlaneLinks</code>
+的参数说明。</li>
+<li>显式调用旧 <code>aerospace-redundant</code>
+返回结构化错误，不存在任何转换成功路径。</li>
+<li>MCP allowed tool 不变，工具行为变更只体现在模板目录和 initialize
+参数。</li>
+</ul></li>
+</ul>
+<h3 id="u2.-实现-dual-plane-redundant-初始化器">U2. 实现
+<code>dual-plane-redundant</code> 初始化器</h3>
+<ul>
+<li><strong>目标:</strong> 让 MCP 根据显式双平面参数生成确定性
+<code>IntermediateTopology</code>。</li>
+<li><strong>需求:</strong> R4, R5, R6, R7, R9, R10, R11, R12</li>
+<li><strong>文件:</strong>
+<ul>
+<li><code>src/topology/initialize.ts</code></li>
+<li><code>src/topology/initialize.test.ts</code></li>
+<li><code>src/topology/validate.ts</code></li>
+<li><code>src/topology/limits.ts</code></li>
+</ul></li>
+<li><strong>方案:</strong> 新增 <code>DualPlaneRedundantParams</code>
+类型和 <code>createDualPlaneRedundantTopology()</code>。节点顺序按显式
+<code>switches</code>、switch groups、plane A/B、end systems
+稳定排列；链路顺序先端系统接入，再平面内 backbone，再
+cross-plane。端口使用 <code>first-free</code> 确定性分配；若
+<code>switch.portCount</code> 缺失，则按该 switch
+的接入链路数、骨干链路数和跨平面链路数推导最小端口容量。布局使用
+<code>dual-plane-grid</code>：A/B 平面上下两行，group 沿 X
+轴排列，端系统放在对应 group 外侧或中间轨道。</li>
+<li><strong>测试场景:</strong>
+<ul>
+<li>2 个 switch group、每组 A/B 两台交换机、8 个端系统双归属，返回 12
+个节点。</li>
+<li>2 个 switch group、20
+个端系统，节点和链路数量稳定，端口无冲突。</li>
+<li><code>backbone.mode = "line"</code> 时 A 平面和 B 平面各自形成 group
+间链路。</li>
+<li><code>backbone.mode = "ring"</code> 且至少 3 个 switch group 时，A/B
+平面各自形成闭环；不足 3 个 group 时返回结构化错误或明确降级规则。</li>
+<li><code>crossPlaneLinks.mode = "none"</code> 时 A/B
+平面隔离但端系统仍可双归属。</li>
+<li><code>crossPlaneLinks.mode = "paired"</code> 时每个 group 内 A/B
+switch 有跨平面桥接。</li>
+<li>显式 <code>portCount</code> 小于所需端口数时返回端口不足错误。</li>
+<li>重复运行同一输入结果完全相等。</li>
+</ul></li>
+</ul>
+<h3 id="u3.-强化-mcp-输入-schema">U3. 强化 MCP 输入 schema</h3>
+<ul>
+<li><strong>目标:</strong> 降低模型误传参数的空间，让错误尽早变成结构化
+validation。</li>
+<li><strong>需求:</strong> R8, R10, R11, R20, R21</li>
+<li><strong>文件:</strong>
+<ul>
+<li><code>src-node/mcp/topology-tools.ts</code></li>
+<li><code>src-node/mcp/tsn-topology-server.ts</code></li>
+<li><code>src-node/mcp/topology-tools.test.ts</code></li>
+<li><code>src/topology/tool-result.ts</code></li>
+</ul></li>
+<li><strong>方案:</strong> 保留 MCP 工具名，但
+<code>topology.initialize</code> 的输入 schema 不再使用
+<code>z.unknown()</code> 作为主要约束。至少对
+<code>templateId</code>、<code>params</code>、<code>responseMode</code>、<code>topologyFullAllowed</code>
+和 <code>dual-plane-redundant</code> 关键字段做 zod
+校验。<code>topology.describe_templates</code> 返回与 zod schema
+同步的机器可读 schema 或等价 JSON schema 摘要。校验失败返回现有 error
+envelope。文档和测试必须把 <code>topologyFullAllowed</code> 表述为 full
+topology opt-in，而非鉴权。</li>
+<li><strong>测试场景:</strong>
+<ul>
+<li>传 <code>endSystemsPerSwitch</code> 到
+<code>dual-plane-redundant</code> 返回
+<code>INVALID_TEMPLATE_PARAM</code> 或 schema 错误。</li>
+<li>显式传 <code>templateId: "aerospace-redundant"</code> 到
+<code>topology.initialize</code> 返回 <code>UNKNOWN_TEMPLATE_ID</code>
+或 <code>UNSUPPORTED_TEMPLATE_ID</code>，不生成新拓扑。</li>
+<li>缺少 <code>endSystems[].attachment</code> 返回可定位路径。</li>
+<li><code>primary</code> 和 <code>backup</code>
+指向同一平面时返回结构化错误。</li>
+<li>端系统引用不存在的 switchId 返回结构化错误。</li>
+<li>缺少 <code>backbone</code> 或 <code>crossPlaneLinks</code>
+返回结构化错误；<code>crossPlaneLinks.mode = "none"</code>
+是合法成功路径。</li>
+<li><code>topologyFullAllowed: true</code> 只允许
+<code>initialize</code> / <code>apply_operations</code> 返回 full
+topology；不能暴露 full artifact、端口占用表或完整 changeSet。</li>
+</ul></li>
+</ul>
+<h3 id="u4.-实现-projectagent-参数归一化边界">U4. 实现 Project/Agent
+参数归一化边界</h3>
+<ul>
+<li><strong>目标:</strong> 新建双平面拓扑时，Project/Agent 层把自然语言
+shortcut 展开成显式 <code>dual-plane-redundant</code> 参数，而不是把
+<code>endSystemsPerSwitch</code> 或旧模板 ID 传给 MCP。</li>
+<li><strong>需求:</strong> R4, R8, R13, R14, R17, R18</li>
+<li><strong>文件:</strong>
+<ul>
+<li><code>src/domain/topology-factory.ts</code></li>
+<li><code>src/domain/topology-factory.test.ts</code></li>
+<li><code>src/domain/scenario-config.ts</code></li>
+<li><code>src/domain/scenario-config.test.ts</code></li>
+<li><code>src/agent/fake-agent.ts</code></li>
+</ul></li>
+<li><strong>方案:</strong> 定义 Project/Agent 层的 deterministic
+normalizer：输入自然语言解析结果和场景默认值，输出显式
+<code>switches</code>、<code>switchGroups</code>、<code>endSystems</code>、<code>backbone</code>
+和 <code>crossPlaneLinks</code>。大模型可以参与提取，但进入 MCP 前必须由
+Project/Agent 层持有结构化参数并能记录默认值来源。未说明 backbone
+时，按场景配置选择默认并在阶段摘要中暴露，或返回需要澄清；该规则必须有测试矩阵。</li>
+<li><strong>测试场景:</strong>
+<ul>
+<li>“4 个交换机，每个交换机 2 个端系统，双平面冗余”最终应用 4
+个交换机、8 个端系统。</li>
+<li>“4 个交换机，每个交换机 5 个端系统，双平面冗余”最终应用 4
+个交换机、20 个端系统。</li>
+<li><code>aerospace-onboard</code> 场景仍能展示场景文案，但拓扑模板 ID
+为 <code>dual-plane-redundant</code>。</li>
+<li>未声明 backbone 时，<code>generic-tsn</code> 与
+<code>aerospace-onboard</code> 的默认或澄清行为稳定可断言。</li>
+<li>Project/Agent 层不会把 <code>endSystemsPerSwitch</code> 作为 MCP
+参数传入。</li>
+</ul></li>
+</ul>
+<h3 id="u5.-删除旧参考模板-fallback-和-repair-覆盖风险">U5.
+删除旧参考模板 fallback 和 repair 覆盖风险</h3>
+<ul>
+<li><strong>目标:</strong> 移除旧 <code>aerospace-redundant</code>
+repair/fallback 生成路径，确保新的 MCP
+成功结果不会被历史推导逻辑覆盖。</li>
+<li><strong>需求:</strong> R3, R13, R15, R16</li>
+<li><strong>文件:</strong>
+<ul>
+<li><code>src/sessions/session-topology-repair.ts</code></li>
+<li><code>src/sessions/session-repository.test.ts</code></li>
+<li><code>src/agent/agent-adapter.ts</code></li>
+<li><code>src/agent/agent-adapter.test.ts</code></li>
+<li><code>src/topology/project-bridge.ts</code></li>
+<li><code>src/topology/project-bridge.test.ts</code></li>
+</ul></li>
+<li><strong>方案:</strong> 删除或改写以
+<code>project-aerospace-redundant</code>、<code>metadata.templateId = "aerospace-redundant"</code>、7
+网卡参考拓扑为默认结果的 repair/fallback。session repair 必须检测
+trusted MCP topology stage result，存在时不得重新从历史消息推导
+topology；不存在可信拓扑时应失败闭合或等待重新初始化，而不是合成旧参考图。<code>project-bridge</code>
+的默认 project id/name 不再根据旧模板 ID 写入新结果。</li>
+<li><strong>测试场景:</strong>
+<ul>
+<li>新建、确认、继续路径不会生成
+<code>project-aerospace-redundant</code>。</li>
+<li>新建路径显式传旧 template ID 时返回结构化错误，不生成新拓扑。</li>
+<li>继续/确认消息不会触发 session repair 把 MCP
+结果覆盖成旧参考拓扑。</li>
+<li>新建双平面 topology stage result 不包含引用不存在节点的 flow 或阶段
+payload。</li>
+</ul></li>
+</ul>
+<h3 id="u6.-文档和-agent-指引">U6. 文档和 Agent 指引</h3>
+<ul>
+<li><strong>目标:</strong> 让后续实现者、调试者和 Agent prompt
+都以新边界为准。</li>
+<li><strong>需求:</strong> R1-R22</li>
+<li><strong>文件:</strong>
+<ul>
+<li><code>docs/topology-mcp.md</code></li>
+<li><code>docs/tsn-topology-status.md</code></li>
+<li><code>docs/topology-mcp-implementation-report.html</code></li>
+<li><code>docs/brainstorms/2026-05-27-tsn-topology-mcp-requirements.md</code></li>
+<li><code>.claude/skills/tsn-topology/SKILL.md</code></li>
+<li><code>.claude/skills/tsn-topology/docs/rules.md</code></li>
+</ul></li>
+<li><strong>方案:</strong>
+更新文档中关于双平面模板的描述：删除参考拓扑，说明 P0
+双平面模板、参数归一化职责、机器可读 schema、完整 4+8 示例、错误示例和从
+0 初始化路径。skill 只保留“查询模板目录、生成结构化参数、调用
+MCP、不要传自然语言 shortcut”的薄指引。</li>
+<li><strong>测试场景:</strong>
+<ul>
+<li>文档不再把 <code>aerospace-redundant</code> 列为新建模板。</li>
+<li>文档包含模板状态矩阵，明确 <code>generic-line</code> /
+<code>generic-ring</code>
+是当前简化模板，<code>dual-plane-redundant</code>
+是当前可用双平面模板，<code>aerospace-redundant</code> 已移除。</li>
+<li>文档明确 <code>endSystemsPerSwitch</code> 是 Project/Agent
+层可解析的自然语言概念，不是 MCP 模板参数。</li>
+<li>当前使用指南中的可执行示例只使用实时 catalog
+中存在的模板；双平面示例必须展示显式参数，不得使用数量 shortcut。</li>
+<li>文档说明 <code>crossPlaneLinks.mode = "none"</code>
+是合法隔离平面，<code>paired</code> 是显式跨平面桥接。</li>
+<li>文档明确 artifact 工具的 request/response 边界，不鼓励外部模型传入
+full artifact。</li>
+</ul></li>
+</ul>
+<hr />
+<h2 id="验收示例">验收示例</h2>
+<ul>
+<li>AE1. Given 用户说“4 个交换机，每个交换机 2
+个端系统，双平面冗余”，when Project/Agent 层调用
+<code>topology.describe_templates</code> 后生成
+<code>dual-plane-redundant</code> 参数，then MCP 收到 4 个 switch、8 个
+end systems、明确 A/B 接入分配，并返回 12 个节点的 topology。</li>
+<li>AE2. Given 调用方直接把 <code>{ endSystemsPerSwitch: 2 }</code> 放进
+<code>dual-plane-redundant.params</code>，when 调用
+<code>topology.initialize</code>，then MCP
+返回结构化错误，提示该字段不是模板参数。</li>
+<li>AE3. Given 端系统声明 primary 和 backup 都接到 A 平面，when
+初始化，then MCP 返回错误，指出双归属没有跨故障域。</li>
+<li>AE4. Given <code>backbone.mode = "ring"</code> 且有 3 个 switch
+group，when 初始化，then A 平面和 B
+平面各生成闭环骨干链路，结果可重复。</li>
+<li>AE5. Given 调用方传入
+<code>templateId = "aerospace-redundant"</code>，when 调用
+<code>topology.initialize</code>，then MCP 返回结构化错误；when 查询
+<code>topology.describe_templates</code>，then catalog
+不包含该模板，也不提供旧会话兼容路径。</li>
+<li>AE6. Given 调用方传入
+<code>crossPlaneLinks.mode = "none"</code>，when A/B
+平面内骨干和端系统双归属都合法，then MCP 成功生成隔离双平面拓扑；given
+缺少 <code>crossPlaneLinks</code> 字段，then MCP 返回结构化错误。</li>
+<li>AE7. Given Agent 只拿到 <code>topology.describe_templates</code>
+的返回，when 生成 4+8 双平面初始化参数，then catalog 中的机器可读 schema
+和完整示例足以让参数通过 <code>topology.initialize</code> schema
+校验。</li>
+<li>AE8. Given 当前使用指南面向外部模型，when 展示
+<code>dual-plane-redundant</code> 初始化，then 示例必须与实时 catalog
+一致，且参数里不得包含
+<code>endSystemsPerSwitch</code>、<code>switchCount</code> 或
+<code>endSystemCount</code> shortcut。</li>
+<li>AE9. Given 调用方请求 full payload，when 没有设置
+<code>topologyFullAllowed: true</code>，then MCP 返回
+<code>FORBIDDEN_RESPONSE_MODE</code>；when 设置该 flag，then 它只允许
+full topology 返回，不代表安全鉴权，也不能返回 full artifact 或完整
+changeSet。</li>
+</ul>
+<hr />
+<h2 id="风险与依赖">风险与依赖</h2>
+<ul>
+<li>RISK1. 大模型仍可能传不完整参数。缓解方式是强化
+<code>describe_templates</code> 的机器可读 schema、完整示例、zod schema
+和结构化错误，让失败可恢复，而不是 MCP 猜测。</li>
+<li>RISK2. 旧测试可能大量依赖
+<code>aerospace-redundant</code>。缓解方式是删除旧兼容测试或改成错误测试；新建路径、fake
+agent、fixture、session repair 和 MCP 测试全部迁到
+<code>dual-plane-redundant</code>。</li>
+<li>RISK3. 双平面默认骨干策略可能影响用户预期。缓解方式是让
+Project/Agent 层在用户未说明 <code>line</code> / <code>ring</code>
+时使用场景默认或请求确认，并在阶段摘要中暴露默认值；MCP
+只执行已给定策略。</li>
+<li>RISK4. Flow
+阶段旧硬编码节点会在拓扑修正后暴露更多问题。缓解方式是本计划只保证
+topology stage result 不引入 invalid flow 引用；默认 flow
+选择策略作为独立 follow-up。</li>
+<li>RISK5. 文档如果继续保留旧目标/未来措辞，外部模型会误以为
+<code>dual-plane-redundant</code>
+不可用。缓解方式是使用模板状态矩阵，并要求所有当前使用指南以实时
+<code>describe_templates</code> 返回为准。</li>
+</ul>
+<hr />
+<h2 id="资料与代码参考">资料与代码参考</h2>
+<ul>
+<li><code>docs/brainstorms/2026-05-27-tsn-topology-mcp-requirements.md</code></li>
+<li><code>docs/plans/2026-05-28-001-feat-deterministic-topology-mcp-service-plan.md</code></li>
+<li><code>src/topology/templates.ts</code></li>
+<li><code>src/topology/initialize.ts</code></li>
+<li><code>src/topology/intermediate.ts</code></li>
+<li><code>src-node/mcp/topology-tools.ts</code></li>
+<li><code>src/domain/topology-factory.ts</code></li>
+<li><code>src/domain/scenario-config.ts</code></li>
+</ul>
+</body>
+</html>

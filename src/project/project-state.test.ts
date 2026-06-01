@@ -5,6 +5,7 @@ import {
   STAGE_SKILL_SCHEMA_VERSION,
   type StageSkillSummary,
 } from "../agent/stage-skill-contract";
+import { WORKFLOW_STAGE_RESULT_SCHEMA_VERSION, type WorkflowStageSummary } from "../agent/workflow-stage-result";
 import {
   confirmCurrentStage,
   createInitialWorkflowState,
@@ -61,10 +62,14 @@ describe("project state snapshots", () => {
   });
 
   it("records stage results and advances only after confirmation", () => {
-    const skillResult: StageSkillSummary = {
-      schemaVersion: STAGE_SKILL_SCHEMA_VERSION,
+    const stageResult: WorkflowStageSummary = {
+      schemaVersion: WORKFLOW_STAGE_RESULT_SCHEMA_VERSION,
       stage: "topology",
-      skillName: "tsn-topology",
+      producer: {
+        type: "mcp",
+        name: "tsn_topology",
+        tool: "topology.initialize",
+      },
       status: "success",
       summary: "拓扑已生成",
       validation: { ok: true, errors: [] },
@@ -72,13 +77,13 @@ describe("project state snapshots", () => {
     const topologyWaiting = recordStageResult(createInitialWorkflowState(), {
       step: "topology",
       summary: "拓扑已生成",
-      skillResult,
+      stageResult,
       createdAt: "2026-05-20T00:00:00.000Z",
     });
 
     expect(topologyWaiting.currentStep).toBe("topology");
     expect(topologyWaiting.stages.topology.status).toBe("waiting_confirmation");
-    expect(topologyWaiting.stages.topology.skillResult).toEqual(skillResult);
+    expect(topologyWaiting.stages.topology.stageResult).toEqual(stageResult);
     expect(topologyWaiting.availableActions).toContain("confirm-stage");
 
     const next = confirmCurrentStage(topologyWaiting, "2026-05-20T00:01:00.000Z");
@@ -86,6 +91,37 @@ describe("project state snapshots", () => {
     expect(next.currentStep).toBe("time-sync");
     expect(next.stages.topology.status).toBe("confirmed");
     expect(next.stages["time-sync"].status).toBe("current");
+  });
+
+  it("normalizes legacy skillResult into stageResult", () => {
+    const skillResult = {
+      schemaVersion: STAGE_SKILL_SCHEMA_VERSION,
+      stage: "topology",
+      skillName: "tsn-topology",
+      producer: {
+        type: "legacy-skill",
+        name: "tsn-topology",
+      },
+      status: "success",
+      summary: "旧拓扑已生成",
+      validation: { ok: true, errors: [] },
+    } as unknown as StageSkillSummary;
+    const normalized = normalizeWorkflowState({
+      scenarioConfigId: "generic-tsn",
+      currentStep: "topology",
+      availableActions: [],
+      stages: {
+        ...createInitialWorkflowState().stages,
+        topology: {
+          step: "topology",
+          status: "waiting_confirmation",
+          summary: "旧拓扑已生成",
+          skillResult,
+        },
+      },
+    });
+
+    expect(normalized.stages.topology.stageResult).toEqual(skillResult);
   });
 
   it("rejects confirmation when the current step is not waiting", () => {

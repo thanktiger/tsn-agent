@@ -4,12 +4,7 @@ import { createProjectFromIntent } from "../domain/topology-factory";
 import { isEndSystem, isSwitch } from "../domain/canonical";
 import { createInitialWorkflowState } from "../project/project-state";
 
-const AEROSPACE_TOPOLOGY_PROMPT = [
-  "基于箭载TSN技术规范创建图示拓扑：采用双冗余链路和两组系统交换机。",
-  "创建4台交换机和7个网卡，交换机1、交换机2为左侧系统交换机，交换机3、交换机4为右侧系统交换机。",
-  "网卡1、网卡2、网卡3、网卡4、网卡5分别双归属连接交换机1和交换机2；网卡6、网卡7分别双归属连接交换机3和交换机4。",
-  "主干链路为交换机1连接交换机3、交换机2连接交换机4，2台系统交换机为独立单机，不相互级联，链路速率不小于1000Mbps。",
-].join("");
+const DUAL_PLANE_TOPOLOGY_PROMPT = "我需要4个交换机，每个交换机连接2个端系统，双平面冗余";
 
 describe("fake tsn agent", () => {
   it("runs only the topology stage for an initial topology request", () => {
@@ -20,6 +15,7 @@ describe("fake tsn agent", () => {
     expect(result.bundle).toBeUndefined();
     expect(result.project.flows).toHaveLength(0);
     expect(result.events.map((event) => event.kind)).toContain("confirmation-required");
+    expect(result.events.find((event) => event.kind === "tool-availability")?.content).toContain("tsn_topology available");
     expect(result.events.map((event) => event.skillName).filter(Boolean)).toEqual(["tsn-topology"]);
   });
 
@@ -45,9 +41,9 @@ describe("fake tsn agent", () => {
     expect(timeSync.assistantText).toContain("GM 选择、同步域和从端口关系");
   });
 
-  it("runs the pictured aerospace redundant topology as a topology-only stage", () => {
+  it("runs a dual-plane redundant topology as a topology-only stage", () => {
     const result = runFakeTsnAgent(
-      AEROSPACE_TOPOLOGY_PROMPT,
+      DUAL_PLANE_TOPOLOGY_PROMPT,
       undefined,
       createInitialWorkflowState("aerospace-onboard"),
     );
@@ -55,27 +51,27 @@ describe("fake tsn agent", () => {
     expect(result.workflow.currentStep).toBe("topology");
     expect(result.workflow.stages.topology.status).toBe("waiting_confirmation");
     expect(result.project.topology.nodes.filter(isSwitch)).toHaveLength(4);
-    expect(result.project.topology.nodes.filter(isEndSystem)).toHaveLength(7);
-    expect(result.project.topology.links).toHaveLength(16);
+    expect(result.project.topology.nodes.filter(isEndSystem)).toHaveLength(8);
+    expect(result.project.topology.links).toHaveLength(18);
     expect(result.project.flows).toHaveLength(0);
-    expect(result.assistantText).toContain("箭载双冗余拓扑");
-    expect(result.assistantText).toContain("7 个网卡");
+    expect(result.assistantText).toContain("双平面冗余拓扑");
+    expect(result.assistantText).toContain("每个交换机连接 2 个端系统");
   });
 
-  it("updates an aerospace redundant topology when the user adds networkcards 8 and 9", () => {
+  it("updates a dual-plane topology when the user changes per-switch endpoints", () => {
     const previous = runFakeTsnAgent(
-      AEROSPACE_TOPOLOGY_PROMPT,
+      DUAL_PLANE_TOPOLOGY_PROMPT,
       undefined,
       createInitialWorkflowState("aerospace-onboard"),
     );
 
-    const result = runFakeTsnAgent("交换机3和4那里，我希望再添加网卡8和9", previous.project, previous.workflow);
+    const result = runFakeTsnAgent("每个交换机改成3个端系统，保持双平面冗余", previous.project, previous.workflow);
 
     expect(result.workflow.currentStep).toBe("topology");
     expect(result.project.topology.nodes.filter(isSwitch)).toHaveLength(4);
-    expect(result.project.topology.nodes.filter(isEndSystem)).toHaveLength(9);
-    expect(result.project.topology.links).toHaveLength(20);
-    expect(result.assistantText).toContain("9 个网卡");
+    expect(result.project.topology.nodes.filter(isEndSystem)).toHaveLength(12);
+    expect(result.project.topology.links).toHaveLength(26);
+    expect(result.assistantText).toContain("每个交换机连接 3 个端系统");
   });
 
   it("confirms the final planning stage without rerunning it", () => {
@@ -187,9 +183,9 @@ describe("fake tsn agent", () => {
     expect(flow.project.flows[0].routeNodeIds).toEqual(["es1-1", "sw1", "sw2", "es2-1"]);
   });
 
-  it("creates aerospace spec-derived flows only after topology and time sync confirmation", () => {
+  it("creates scenario control flow only after topology and time sync confirmation", () => {
     const topology = runFakeTsnAgent(
-      AEROSPACE_TOPOLOGY_PROMPT,
+      DUAL_PLANE_TOPOLOGY_PROMPT,
       undefined,
       createInitialWorkflowState("aerospace-onboard"),
     );
@@ -199,9 +195,8 @@ describe("fake tsn agent", () => {
     expect(topology.project.flows).toHaveLength(0);
     expect(timeSync.project.flows).toHaveLength(0);
     expect(flow.workflow.currentStep).toBe("flow-template");
-    expect(flow.project.flows.map((candidate) => candidate.name)).toEqual(["时序控制消息-1", "心跳消息-1"]);
-    expect(flow.project.flows[0].routeNodeIds).toEqual(["nic1", "sw1", "sw3", "nic7"]);
-    expect(flow.project.flows[1].routeNodeIds).toEqual(["nic2", "sw2", "sw4", "nic6"]);
+    expect(flow.project.flows.map((candidate) => candidate.name)).toEqual(["时序控制消息-1"]);
+    expect(flow.project.flows[0].routeNodeIds).toEqual(["es1-1", "sw1", "sw3", "es4-1"]);
   });
 
   it("keeps user-declared video flow when it is mentioned before the flow stage", () => {
@@ -264,7 +259,7 @@ describe("fake tsn agent", () => {
   });
 
   it("does not advance to simulation when the user describes more flow requirements", () => {
-    const topology = runFakeTsnAgent("我需要4台交换机和7个网卡，采用双冗余系统交换机拓扑");
+    const topology = runFakeTsnAgent(DUAL_PLANE_TOPOLOGY_PROMPT);
     const timeSync = runFakeTsnAgent("继续", topology.project, topology.workflow);
     const flow = runFakeTsnAgent("继续", timeSync.project, timeSync.workflow);
 

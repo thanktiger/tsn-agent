@@ -13,19 +13,7 @@ import { createProjectFromIntent } from "../domain/topology-factory";
 import { isEndSystem, isSwitch } from "../domain/canonical";
 import { createInitialWorkflowState } from "../project/project-state";
 
-const AEROSPACE_TOPOLOGY_PROMPT = [
-  "采用双冗余链路和两组系统交换机。",
-  "创建4台交换机和7个网卡，交换机1、交换机2为左侧系统交换机，交换机3、交换机4为右侧系统交换机。",
-  "网卡1、网卡2、网卡3、网卡4、网卡5分别双归属连接交换机1和交换机2；网卡6、网卡7分别双归属连接交换机3和交换机4。",
-  "主干链路为交换机1连接交换机3、交换机2连接交换机4，2台系统交换机为独立单机，不相互级联，链路速率不小于1000Mbps。",
-].join("");
-
-const AEROSPACE_ENDPOINT_TOPOLOGY_PROMPT = [
-  "采用双冗余链路和两组系统交换机。",
-  "创建4台交换机和7个端系统，交换机1、交换机2为左侧系统交换机，交换机3、交换机4为右侧系统交换机。",
-  "端1、端2、端3、端4、端5分别双归属连接交换机1和交换机2；端6、端7分别双归属连接交换机3和交换机4。",
-  "主干链路为交换机1连接交换机3、交换机2连接交换机4，2台系统交换机为独立单机，不相互级联，链路速率不小于1000Mbps。",
-].join("");
+const DUAL_PLANE_TOPOLOGY_PROMPT = "我需要4个交换机，每个交换机连接2个端系统，双平面冗余";
 
 const invokeMock = vi.hoisted(() => vi.fn());
 
@@ -139,9 +127,9 @@ describe("BrowserSessionRepository", () => {
     expect(restored.project?.flows).toHaveLength(0);
   });
 
-  it("does not let continuation messages rewrite an aerospace redundant topology", async () => {
+  it("does not let continuation messages rewrite a dual-plane redundant topology", async () => {
     const repository = new BrowserSessionRepository(window.localStorage);
-    const project = createProjectFromIntent(AEROSPACE_TOPOLOGY_PROMPT, undefined, {
+    const project = createProjectFromIntent(DUAL_PLANE_TOPOLOGY_PROMPT, undefined, {
       includeControlFlow: false,
     });
     const workflow = createInitialWorkflowState();
@@ -156,7 +144,7 @@ describe("BrowserSessionRepository", () => {
           id: "message-1",
           role: "user",
           createdAt: "2026-05-20T00:00:00.000Z",
-          content: AEROSPACE_TOPOLOGY_PROMPT,
+          content: DUAL_PLANE_TOPOLOGY_PROMPT,
         },
         {
           id: "message-2",
@@ -173,13 +161,13 @@ describe("BrowserSessionRepository", () => {
 
     const restored = (await repository.list())[0];
 
-    expect(restored.project?.id).toBe("project-aerospace-redundant");
+    expect(restored.project?.id).toBe("project-default");
     expect(restored.project?.topology.nodes.filter(isSwitch)).toHaveLength(4);
-    expect(restored.project?.topology.nodes.filter(isEndSystem)).toHaveLength(7);
-    expect(restored.project?.topology.links).toHaveLength(16);
+    expect(restored.project?.topology.nodes.filter(isEndSystem)).toHaveLength(8);
+    expect(restored.project?.topology.links).toHaveLength(18);
   });
 
-  it("repairs stored endpoint-worded aerospace topology instead of preserving a generic fallback shape", async () => {
+  it("repairs stored dual-plane topology instead of preserving a generic fallback shape", async () => {
     const repository = new BrowserSessionRepository(window.localStorage);
     const session: TsnSession = {
       ...createEmptySession(),
@@ -188,7 +176,7 @@ describe("BrowserSessionRepository", () => {
           id: "message-1",
           role: "user",
           createdAt: "2026-05-20T00:00:00.000Z",
-          content: AEROSPACE_ENDPOINT_TOPOLOGY_PROMPT,
+          content: DUAL_PLANE_TOPOLOGY_PROMPT,
         },
         {
           id: "message-2",
@@ -207,15 +195,15 @@ describe("BrowserSessionRepository", () => {
 
     const restored = (await repository.list())[0];
 
-    expect(restored.project?.id).toBe("project-aerospace-redundant");
+    expect(restored.project?.id).toBe("project-default");
     expect(restored.project?.topology.nodes.filter(isSwitch)).toHaveLength(4);
-    expect(restored.project?.topology.nodes.filter(isEndSystem)).toHaveLength(7);
-    expect(restored.project?.topology.links).toHaveLength(16);
+    expect(restored.project?.topology.nodes.filter(isEndSystem)).toHaveLength(8);
+    expect(restored.project?.topology.links).toHaveLength(18);
   });
 
-  it("repairs aerospace redundant topology edits that add networkcards 8 and 9", async () => {
+  it("repairs dual-plane topology edits that change endpoints per switch", async () => {
     const repository = new BrowserSessionRepository(window.localStorage);
-    const project = createProjectFromIntent(AEROSPACE_TOPOLOGY_PROMPT, undefined, {
+    const project = createProjectFromIntent(DUAL_PLANE_TOPOLOGY_PROMPT, undefined, {
       includeControlFlow: false,
     });
 
@@ -226,13 +214,13 @@ describe("BrowserSessionRepository", () => {
           id: "message-1",
           role: "user",
           createdAt: "2026-05-20T00:00:00.000Z",
-          content: AEROSPACE_TOPOLOGY_PROMPT,
+          content: DUAL_PLANE_TOPOLOGY_PROMPT,
         },
         {
           id: "message-2",
           role: "user",
           createdAt: "2026-05-20T00:01:00.000Z",
-          content: "交换机3和4那里，我希望再添加网卡8和9",
+          content: "每个交换机改成3个端系统，保持双平面冗余",
         },
       ],
       workflow: createInitialWorkflowState("aerospace-onboard"),
@@ -243,10 +231,10 @@ describe("BrowserSessionRepository", () => {
 
     const restored = (await repository.list())[0];
 
-    expect(restored.project?.id).toBe("project-aerospace-redundant");
+    expect(restored.project?.id).toBe("project-default");
     expect(restored.project?.topology.nodes.filter(isSwitch)).toHaveLength(4);
-    expect(restored.project?.topology.nodes.filter(isEndSystem)).toHaveLength(9);
-    expect(restored.project?.topology.links).toHaveLength(20);
+    expect(restored.project?.topology.nodes.filter(isEndSystem)).toHaveLength(12);
+    expect(restored.project?.topology.links).toHaveLength(26);
   });
 
   it("repairs flow drift from stored user messages when listing sessions", async () => {

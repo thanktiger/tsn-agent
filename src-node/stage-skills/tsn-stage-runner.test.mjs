@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { join, resolve } from "node:path";
@@ -10,19 +10,7 @@ import { runCli, runFlowPlanningStage, runTopologyStage } from "./tsn-stage-runn
 
 const execFileAsync = promisify(execFile);
 
-const AEROSPACE_TOPOLOGY_PROMPT = [
-  "基于箭载TSN技术规范创建图示拓扑：采用双冗余链路和两组系统交换机。",
-  "创建4台交换机和7个网卡，交换机1、交换机2为左侧系统交换机，交换机3、交换机4为右侧系统交换机。",
-  "网卡1、网卡2、网卡3、网卡4、网卡5分别双归属连接交换机1和交换机2；网卡6、网卡7分别双归属连接交换机3和交换机4。",
-  "主干链路为交换机1连接交换机3、交换机2连接交换机4，2台系统交换机为独立单机，不相互级联，链路速率不小于1000Mbps。",
-].join("");
-
-const AEROSPACE_ENDPOINT_TOPOLOGY_PROMPT = [
-  "采用双冗余链路和两组系统交换机。",
-  "创建4台交换机和7个端系统，交换机1、交换机2为左侧系统交换机，交换机3、交换机4为右侧系统交换机。",
-  "端1、端2、端3、端4、端5分别双归属连接交换机1和交换机2；端6、端7分别双归属连接交换机3和交换机4。",
-  "主干链路为交换机1连接交换机3、交换机2连接交换机4，2台系统交换机为独立单机，不相互级联，链路速率不小于1000Mbps。",
-].join("");
+const DUAL_PLANE_TOPOLOGY_PROMPT = "我需要4个交换机，每个交换机连接2个端系统，双平面冗余";
 
 describe("tsn-stage-runner", () => {
   it("generates a canonical-first topology stage result", () => {
@@ -59,15 +47,14 @@ describe("tsn-stage-runner", () => {
     expect(result.payload.project.topology.nodes).toHaveLength(16);
   });
 
-  it("switches from the aerospace fallback to a generic distributed endpoint topology", () => {
+  it("switches from a dual-plane fallback to a generic distributed endpoint topology", () => {
     const result = runTopologyStage({
       userIntent: "改为 20 个端系统，分配到 4 台交换机",
       fallbackIntent: {
         switchCount: 4,
         endSystemsPerSwitch: 0,
         switchInterconnect: "line",
-        topologyTemplate: "aerospace-redundant",
-        endSystemCount: 7,
+        topologyTemplate: "dual-plane-redundant",
       },
     });
 
@@ -77,43 +64,30 @@ describe("tsn-stage-runner", () => {
     expect(result.payload.project.topology.nodes).toHaveLength(24);
   });
 
-  it("generates the aerospace redundant topology stage result from the spec prompt", () => {
+  it("generates the dual-plane redundant topology stage result from the prompt", () => {
     const result = runTopologyStage({
-      userIntent: AEROSPACE_TOPOLOGY_PROMPT,
+      userIntent: DUAL_PLANE_TOPOLOGY_PROMPT,
       scenarioConfigId: "aerospace-onboard",
     });
 
-    expect(result.summary).toContain("箭载双冗余拓扑");
-    expect(result.summary).toContain("7 个网卡");
-    expect(result.payload.project.topology.nodes).toHaveLength(11);
-    expect(result.payload.project.topology.links).toHaveLength(16);
+    expect(result.summary).toContain("双平面冗余拓扑");
+    expect(result.summary).toContain("每个交换机连接 2 个端系统");
+    expect(result.payload.project.topology.nodes).toHaveLength(12);
+    expect(result.payload.project.topology.links).toHaveLength(18);
     expect(result.payload.project.flows).toHaveLength(0);
-    expect(result.payload.project.topology.nodes.map((node) => node.name)).toEqual([
-      "网卡1",
-      "网卡2",
-      "网卡3",
-      "交换机1",
-      "交换机2",
-      "网卡4",
-      "网卡5",
-      "交换机3",
-      "交换机4",
-      "网卡6",
-      "网卡7",
-    ]);
+    expect(result.payload.project.topology.nodes.filter((node) => node.type === "endSystem").every((node) => node.ports.length === 2)).toBe(true);
   });
 
-  it("keeps endpoint wording on the aerospace redundant topology path", () => {
+  it("keeps endpoint wording on the dual-plane topology path", () => {
     const result = runTopologyStage({
-      userIntent: AEROSPACE_ENDPOINT_TOPOLOGY_PROMPT,
+      userIntent: DUAL_PLANE_TOPOLOGY_PROMPT,
       scenarioConfigId: "generic-tsn",
     });
 
-    expect(result.summary).toContain("箭载双冗余拓扑");
-    expect(result.summary).toContain("7 个网卡");
-    expect(result.payload.project.id).toBe("project-aerospace-redundant");
-    expect(result.payload.project.topology.nodes).toHaveLength(11);
-    expect(result.payload.project.topology.links).toHaveLength(16);
+    expect(result.summary).toContain("双平面冗余拓扑");
+    expect(result.payload.project.id).toBe("project-default");
+    expect(result.payload.project.topology.nodes).toHaveLength(12);
+    expect(result.payload.project.topology.links).toHaveLength(18);
   });
 
   it("writes the result to the requested result path without stdout coupling", async () => {
@@ -251,6 +225,15 @@ describe("tsn-stage-runner", () => {
       },
       maxBuffer: 1024 * 1024,
     });
+
+    const outputFiles = await readdir(skillOutputDir);
+    expect(outputFiles).toEqual(expect.arrayContaining([
+      "topology.json",
+      "topo_feature.json",
+      "data-server.json",
+      "mac-forwarding-table.json",
+    ]));
+    expect(outputFiles).not.toContain("mac-forwarding-table.html");
 
     await runCli([
       "--stage",

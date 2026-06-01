@@ -504,12 +504,12 @@ composition bridge 管理。</li>
 dryRun/confirm 通过调用方保存 current topology snapshot 和 operations
 来重放，MCP 工具保持纯函数式行为。这减少了 Tauri、Agent SDK
 和测试进程之间共享状态的复杂度。</li>
-<li>KTD5. <strong>Agent MCP summary 与本地 full 数据通道分离:</strong>
-Agent-facing MCP adapter 强制 summary，并拒绝 <code>full</code>
-responseMode；stage runner/project bridge 在本地进程内直接调用同一
-topology domain 获取 full <code>IntermediateTopology</code>，full
-artifact/changeSet 只进入本地 project/client storage，不进入 Agent
-上下文。</li>
+<li>KTD5. <strong>Agent MCP summary 与受限 full topology 通道分离:</strong>
+Agent-facing MCP adapter 默认 summary；只有 <code>initialize</code> /
+<code>apply_operations</code> 在显式 <code>topologyFullAllowed</code>
+时返回 full <code>IntermediateTopology</code>，用于继续传给后续工具或
+stage runner。full artifact、端口表、MAC 表和 full changeSet 只进入本地
+project/client storage，不进入 Agent 对话或诊断。</li>
 <li>KTD6. <strong>Stage workflow remains project-owned:</strong> 拓扑
 MCP 只返回 topology
 result；<code>recordStageResult()</code>、阶段确认、flow-template 和
@@ -537,7 +537,7 @@ MCP host resolution，必须 fail closed 或回退到本地域/stage-runner
   Project --&gt;|IntermediateTopology + scenario defaults| Bridge[Project composition bridge]
   Bridge --&gt; Canonical[CanonicalTsnProjectV0&lt;br/&gt;topology stage payload]
   Canonical --&gt; Client
-  Project -.summary only.-&gt; Agent[Agent runtime]</code></pre>
+  Project -.summary / authorized topology.-&gt; Agent[Agent runtime]</code></pre>
 <h3 id="从-0-初始化">从 0 初始化</h3>
 <pre class="mermaid"><code>sequenceDiagram
   participant U as User
@@ -607,12 +607,13 @@ Flow、planner input</td>
 </tr>
 </tbody>
 </table>
-<p>P0 明确使用两条数据通道：Agent MCP tool response 只承载 summary；本地
-stage runner、fake agent 和 client wrapper 通过同一 topology domain
-package 获取 full <code>IntermediateTopology</code>，再交给 project
-bridge。任何 Agent-facing MCP 请求 <code>responseMode: "full"</code>
-都应返回 <code>FORBIDDEN_RESPONSE_MODE</code>，而不是把 full topology 或
-artifact 放进模型上下文。</p>
+<p>P0 明确使用两条数据通道：Agent MCP tool response 默认承载
+summary；<code>initialize</code> / <code>apply_operations</code>
+可在显式授权时返回 full <code>IntermediateTopology</code>，用于无服务端状态的工具组合和
+stage runner 输入。本地 stage runner、fake agent 和 client wrapper
+仍可通过同一 topology domain package 获取 full 数据，再交给 project
+bridge。任何请求 full artifact、端口表、MAC 表或 full changeSet 的
+Agent-facing MCP 调用都应返回 <code>FORBIDDEN_RESPONSE_MODE</code>。</p>
 <h3 id="mcp-工具命名映射">MCP 工具命名映射</h3>
 <table>
 <thead>
@@ -994,10 +995,11 @@ stdout 文本契约。</li>
 <li>超大 payload、过深 JSON、handler timeout 和 process-level failure
 都映射为结构化错误或可诊断 <code>call_failed</code>，并有 dev host
 黑盒测试。</li>
-<li>Agent-facing MCP handler 对 <code>responseMode: "full"</code> 返回
-<code>FORBIDDEN_RESPONSE_MODE</code>；full result 只能由本地
-wrapper/domain 调用路径获取。</li>
-<li>summary 模式不返回 full artifact、full port table 或 full
+<li>Agent-facing MCP handler 只允许 <code>initialize</code> /
+<code>apply_operations</code> 在 <code>topologyFullAllowed=true</code>
+时返回 full topology；其他 full 请求返回
+<code>FORBIDDEN_RESPONSE_MODE</code>。</li>
+<li>summary 模式不返回 full artifact、full port table、MAC 表或 full
 changeSet。</li>
 <li>dev host 可被测试进程启动并完成一次 template catalog/ping 类 fixture
 调用。</li>
@@ -1024,9 +1026,9 @@ skill shim</h3>
 <ul>
 <li>Agent SDK options 增加 topology MCP server 配置和 allowed
 tools，系统提示说明拓扑规则必须通过 MCP/domain 结构化结果落地。</li>
-<li>Agent MCP 工具只用于生成可展示摘要和结构化诊断；stage result 所需
-full topology 由 stage runner/project bridge 在本地调用 topology domain
-获取，不能从 Agent tool response 中解析 full payload。</li>
+<li>Agent MCP 工具用于生成可展示摘要和结构化诊断；初始化和 operations
+链路可显式返回 full topology 作为后续结构化输入。stage result
+仍必须由 stage runner 写入，不能从对话文本解析 full payload。</li>
 <li><code>.claude/skills/tsn-topology/SKILL.md</code> 删除独立
 builder/validator/HTML 导出说明，改成 Agent 使用 MCP
 的指引：初始化路径、已有拓扑 edit 路径、selector resolution、stage
@@ -1067,7 +1069,7 @@ renderer。</li>
 <code>mac-forwarding-table.html</code> 作为产物要求。</li>
 <li>旧 skill 兼容入口若仍存在，成功输出不包含 HTML artifact。</li>
 <li>MCP call failure 被记录为脱敏 <code>call_failed</code> 摘要，不记录
-full topology data。</li>
+full topology 原文。</li>
 </ul>
 <p><strong>验收方式:</strong> Worker/skill tests 能证明 Agent-facing
 path 已经切到 MCP contract。</p>
@@ -1108,10 +1110,9 @@ dryRun。</li>
 <li>对 <code>AMBIGUOUS_SELECTOR</code>
 提供最小候选选择体验：在现有聊天或步骤面板展示候选显示名、类型、邻接摘要和稳定
 ID 摘要；用户选择后重新 dryRun，取消时保持当前拓扑不变。</li>
-<li>full topology、artifact、端口占用和 dryRun changeSet 只保存在本地
-project/session storage；dryRun full
-数据默认会话内保存，取消确认、关闭会话或删除项目时清理，诊断日志和 Agent
-上下文不得保存 full 数据。</li>
+<li>full artifact、端口占用、MAC 表和 dryRun changeSet 只保存在本地
+project/session storage；dryRun full 数据默认会话内保存，取消确认、关闭会话或删除项目时清理，诊断日志和 Agent
+上下文不得保存这些敏感 full 数据。full topology 仅作为结构化工具输入/输出短链路使用。</li>
 </ul>
 <p><strong>参考模式:</strong></p>
 <ul>
@@ -1305,7 +1306,7 @@ token、来源校验、固定随包路径、禁止 <code>PATH</code> 解析和 f
 <hr />
 <h2 id="验证策略">验证策略</h2>
 <ul>
-<li>Domain-level: <code>src/topology/*.test.ts</code> 覆盖
+<li>领域层: <code>src/topology/*.test.ts</code> 覆盖
 schema、templates、initialize、validate、artifacts、inspect、operations
 和 limits。</li>
 <li>Bridge-level:
@@ -1325,7 +1326,7 @@ packaging 时再运行 <code>npm run cargo:test</code> 和相关 E2E。</li>
 <hr />
 <h2 id="来源">来源</h2>
 <ul>
-<li>Origin requirements:
+<li>需求来源:
 <code>docs/brainstorms/2026-05-27-tsn-topology-mcp-requirements.md</code></li>
 <li>Architecture visualization:
 <code>docs/brainstorms/2026-05-27-tsn-topology-mcp-architecture.html</code></li>

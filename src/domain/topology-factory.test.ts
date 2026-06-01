@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  createAerospaceRedundantTopologyProject,
+  createDualPlaneRedundantTopologyProject,
   createProjectFromIntent,
   parseTopologyIntent,
   withDefaultControlFlow,
@@ -9,24 +9,8 @@ import {
 import { isEndSystem, isSwitch } from "./canonical";
 import { validateCanonicalProject } from "./validation";
 
-const AEROSPACE_TOPOLOGY_PROMPT = [
-  "基于箭载TSN技术规范创建图示拓扑：采用双冗余链路和两组系统交换机。",
-  "创建4台交换机和7个网卡，交换机1、交换机2为左侧系统交换机，交换机3、交换机4为右侧系统交换机。",
-  "网卡1、网卡2、网卡3、网卡4、网卡5分别双归属连接交换机1和交换机2；网卡6、网卡7分别双归属连接交换机3和交换机4。",
-  "主干链路为交换机1连接交换机3、交换机2连接交换机4，2台系统交换机为独立单机，不相互级联，链路速率不小于1000Mbps。",
-].join("");
-
-const AEROSPACE_ENDPOINT_TOPOLOGY_PROMPT = [
-  "采用双冗余链路和两组系统交换机。",
-  "创建4台交换机和7个端系统，交换机1、交换机2为左侧系统交换机，交换机3、交换机4为右侧系统交换机。",
-  "端1、端2、端3、端4、端5分别双归属连接交换机1和交换机2；端6、端7分别双归属连接交换机3和交换机4。",
-  "主干链路为交换机1连接交换机3、交换机2连接交换机4，2台系统交换机为独立单机，不相互级联，链路速率不小于1000Mbps。",
-].join("");
-
-const AEROSPACE_FLOW_PROMPT = [
-  "基于箭载TSN流量特征做流量规划：",
+const DUAL_PLANE_FLOW_PROMPT = [
   "生成时序控制消息，周期1ms，需要同步，延迟约束，不允许丢包，8-10字节，高关键性；",
-  "生成心跳消息，周期20ms，需要同步，延迟约束，不允许丢包，8-10字节，高关键性；",
   "同时预留视频流，按帧频周期，关注带宽和延迟，1000-1500字节。",
 ].join("");
 
@@ -74,12 +58,12 @@ describe("topology factory", () => {
       switchCount: 4,
       endSystemsPerSwitch: 0,
       switchInterconnect: "line",
-      topologyTemplate: "aerospace-redundant",
-      endSystemCount: 7,
+      topologyTemplate: "dual-plane-redundant",
     })).toEqual({
       switchCount: 4,
       endSystemsPerSwitch: 5,
       switchInterconnect: "line",
+      topologyTemplate: "dual-plane-redundant",
     });
   });
 
@@ -123,177 +107,98 @@ describe("topology factory", () => {
     expect(project.topology.nodes.filter(isEndSystem)).toHaveLength(12);
     expect(project.topology.links).toHaveLength(16);
     expect(project.topology.links.some((link) => link.source.nodeId === "sw4" && link.target.nodeId === "sw1")).toBe(true);
-    expect(project.flows[0].routeLinkIds).toEqual(["link-0", "link-12", "link-13", "link-14", "link-9"]);
+    expect(project.flows[0].routeLinkIds).toEqual(["link-0", "link-15", "link-9"]);
     expect(validateCanonicalProject(project)).toEqual({ ok: true, errors: [] });
   });
 
-  it("parses the aerospace redundant topology prompt derived from the rocket TSN spec", () => {
-    expect(parseTopologyIntent(AEROSPACE_TOPOLOGY_PROMPT, undefined, {
+  it("parses a dual-plane redundant topology prompt without using old reference templates", () => {
+    expect(parseTopologyIntent("我需要4个交换机，每个交换机连接2个端系统，双平面冗余", undefined, {
       scenarioConfigId: "aerospace-onboard",
     })).toEqual({
       switchCount: 4,
-      endSystemsPerSwitch: 0,
+      endSystemsPerSwitch: 2,
       switchInterconnect: "line",
-      topologyTemplate: "aerospace-redundant",
-      endSystemCount: 7,
+      topologyTemplate: "dual-plane-redundant",
     });
   });
 
-  it("treats endpoint wording as networkcards in aerospace redundant topology prompts", () => {
-    expect(parseTopologyIntent(AEROSPACE_ENDPOINT_TOPOLOGY_PROMPT, undefined, {
-      scenarioConfigId: "generic-tsn",
-    })).toEqual({
-      switchCount: 4,
-      endSystemsPerSwitch: 0,
-      switchInterconnect: "line",
-      topologyTemplate: "aerospace-redundant",
-      endSystemCount: 7,
-    });
-  });
-
-  it("creates the pictured aerospace redundant topology before the flow stage", () => {
-    const project = createProjectFromIntent(AEROSPACE_TOPOLOGY_PROMPT, undefined, {
+  it("creates a dual-plane redundant topology before the flow stage", () => {
+    const project = createProjectFromIntent("我需要4个交换机，每个交换机连接2个端系统，双平面冗余", undefined, {
       scenarioConfigId: "aerospace-onboard",
       includeControlFlow: false,
     });
 
-    expect(project.topology.nodes.filter(isSwitch).map((node) => node.name)).toEqual([
-      "交换机1",
-      "交换机2",
-      "交换机3",
-      "交换机4",
-    ]);
-    expect(project.topology.nodes.filter(isEndSystem).map((node) => node.name)).toEqual([
-      "网卡1",
-      "网卡2",
-      "网卡3",
-      "网卡4",
-      "网卡5",
-      "网卡6",
-      "网卡7",
-    ]);
-    expect(project.topology.links).toHaveLength(16);
+    expect(project.id).toBe("project-default");
+    expect(project.topology.nodes.filter(isSwitch)).toHaveLength(4);
+    expect(project.topology.nodes.filter(isEndSystem)).toHaveLength(8);
+    expect(project.topology.links).toHaveLength(18);
     expect(project.flows).toHaveLength(0);
-    expect(project.topology.links.map((link) => [link.source.nodeId, link.target.nodeId])).toEqual([
-      ["nic1", "sw1"],
-      ["nic1", "sw2"],
-      ["nic2", "sw1"],
-      ["nic2", "sw2"],
-      ["nic3", "sw1"],
-      ["nic3", "sw2"],
-      ["sw1", "nic4"],
-      ["sw2", "nic4"],
-      ["sw1", "nic5"],
-      ["sw2", "nic5"],
+    expect(project.topology.nodes.filter(isEndSystem).every((node) => node.ports.length === 2)).toBe(true);
+    expect(project.topology.links.map((link) => [link.source.nodeId, link.target.nodeId])).toEqual(expect.arrayContaining([
       ["sw1", "sw3"],
       ["sw2", "sw4"],
-      ["sw3", "nic6"],
-      ["sw4", "nic6"],
-      ["sw3", "nic7"],
-      ["sw4", "nic7"],
-    ]);
+    ]));
     expect(validateCanonicalProject(project)).toEqual({ ok: true, errors: [] });
   });
 
-  it("does not let the '2 system switches are standalone' sentence overwrite the 4-switch aerospace scale", () => {
-    const project = createProjectFromIntent(AEROSPACE_ENDPOINT_TOPOLOGY_PROMPT, undefined, {
-      scenarioConfigId: "generic-tsn",
-      includeControlFlow: false,
-    });
-
-    expect(project.topology.nodes.filter(isSwitch)).toHaveLength(4);
-    expect(project.topology.nodes.filter(isEndSystem)).toHaveLength(7);
-    expect(project.topology.links).toHaveLength(16);
-    expect(project.id).toBe("project-aerospace-redundant");
-  });
-
-  it("updates the aerospace redundant topology when adding networkcards 8 and 9", () => {
-    const fallback = parseTopologyIntent(AEROSPACE_TOPOLOGY_PROMPT, undefined, {
-      scenarioConfigId: "aerospace-onboard",
-    });
-    const intent = parseTopologyIntent("交换机3和4那里，我希望再添加网卡8和9", fallback, {
-      scenarioConfigId: "aerospace-onboard",
-    });
-    const project = createProjectFromIntent("交换机3和4那里，我希望再添加网卡8和9", fallback, {
+  it("keeps dual-plane topology generic for aerospace scenarios", () => {
+    const project = createProjectFromIntent("箭载场景，4个交换机，每个交换机2个端系统，双归属双平面", undefined, {
       scenarioConfigId: "aerospace-onboard",
       includeControlFlow: false,
     });
 
-    expect(intent).toEqual({
+    expect(parseTopologyIntent("箭载场景，4个交换机，每个交换机2个端系统，双归属双平面", undefined, {
+      scenarioConfigId: "aerospace-onboard",
+    })).toEqual({
       switchCount: 4,
-      endSystemsPerSwitch: 0,
+      endSystemsPerSwitch: 2,
       switchInterconnect: "line",
-      topologyTemplate: "aerospace-redundant",
-      endSystemCount: 9,
+      topologyTemplate: "dual-plane-redundant",
     });
     expect(project.topology.nodes.filter(isSwitch)).toHaveLength(4);
-    expect(project.topology.nodes.filter(isEndSystem).map((node) => node.name)).toEqual([
-      "网卡1",
-      "网卡2",
-      "网卡3",
-      "网卡4",
-      "网卡5",
-      "网卡6",
-      "网卡7",
-      "网卡8",
-      "网卡9",
-    ]);
-    expect(project.topology.links).toHaveLength(20);
-    expect(project.topology.links.map((link) => [link.source.nodeId, link.source.portId, link.target.nodeId, link.target.portId])).toEqual(
-      expect.arrayContaining([
-        ["sw3", "p5", "nic8", "p1"],
-        ["sw4", "p5", "nic8", "p2"],
-        ["sw3", "p6", "nic9", "p1"],
-        ["sw4", "p6", "nic9", "p2"],
-      ]),
-    );
-    expect(validateCanonicalProject(project)).toEqual({ ok: true, errors: [] });
+    expect(project.topology.nodes.filter(isEndSystem)).toHaveLength(8);
+    expect(project.id).not.toBe("project-aerospace-redundant");
   });
 
-  it("adds aerospace control and heartbeat flows from the rocket TSN flow prompt", () => {
-    const topologyOnlyProject = createAerospaceRedundantTopologyProject("箭载双冗余拓扑", {
+  it("adds generic control and video flows on top of a dual-plane topology", () => {
+    const topologyOnlyProject = createDualPlaneRedundantTopologyProject({
+      switchCount: 4,
+      endSystemsPerSwitch: 2,
+      switchInterconnect: "line",
+      topologyTemplate: "dual-plane-redundant",
+    }, "双平面冗余拓扑", {
       scenarioConfigId: "aerospace-onboard",
       includeControlFlow: false,
     });
 
-    const project = withFlowsFromIntent(topologyOnlyProject, AEROSPACE_FLOW_PROMPT, {
+    const project = withFlowsFromIntent(topologyOnlyProject, DUAL_PLANE_FLOW_PROMPT, {
       scenarioConfigId: "aerospace-onboard",
     });
 
-    expect(project.flows.map((flow) => flow.name)).toEqual(["时序控制消息-1", "心跳消息-1", "视频流-1"]);
+    expect(project.flows.map((flow) => flow.name)).toEqual(["时序控制消息-1", "视频流-1"]);
     expect(withDefaultControlFlow(project, {
       scenarioConfigId: "aerospace-onboard",
-    }).flows.map((flow) => flow.name)).toEqual(["时序控制消息-1", "心跳消息-1", "视频流-1"]);
+    }).flows.map((flow) => flow.name)).toEqual(["时序控制消息-1", "视频流-1"]);
     expect(project.flows[0]).toMatchObject({
       id: "flow-control-1",
       name: "时序控制消息-1",
-      source: expect.objectContaining({ nodeId: "nic1", ipAddress: "10.10.0.1" }),
-      destination: expect.objectContaining({ nodeId: "nic7", ipAddress: "10.10.0.7" }),
+      source: expect.objectContaining({ nodeId: "es1-1" }),
+      destination: expect.objectContaining({ nodeId: "es4-1" }),
       periodUs: 1_000,
       frameSizeBytes: 10,
       pcp: 7,
       jitterRequirementUs: 0.5,
-      routeNodeIds: ["nic1", "sw1", "sw3", "nic7"],
+      routeNodeIds: ["es1-1", "sw1", "sw3", "es4-1"],
     });
     expect(project.flows[1]).toMatchObject({
-      id: "flow-heartbeat-1",
-      name: "心跳消息-1",
-      source: expect.objectContaining({ nodeId: "nic2" }),
-      destination: expect.objectContaining({ nodeId: "nic6" }),
-      periodUs: 20_000,
-      frameSizeBytes: 10,
-      pcp: 6,
-      routeNodeIds: ["nic2", "sw2", "sw4", "nic6"],
-    });
-    expect(project.flows[2]).toMatchObject({
       id: "flow-video-1",
       name: "视频流-1",
-      source: expect.objectContaining({ nodeId: "nic5" }),
-      destination: expect.objectContaining({ nodeId: "nic6" }),
+      source: expect.objectContaining({ nodeId: "es1-2" }),
+      destination: expect.objectContaining({ nodeId: "es4-2" }),
       periodUs: 33_333,
-      frameSizeBytes: 1_500,
-      pcp: 4,
-      routeNodeIds: ["nic5", "sw2", "sw4", "nic6"],
+      frameSizeBytes: 50 * 1024,
+      pcp: 5,
+      routeNodeIds: ["es1-2", "sw1", "sw3", "es4-2"],
     });
     expect(validateCanonicalProject(project)).toEqual({ ok: true, errors: [] });
   });

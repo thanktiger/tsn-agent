@@ -3,11 +3,9 @@ export const TOPOLOGY_LIMITS = {
   maxLinks: 1024,
   maxPortsPerNode: 64,
   maxOperations: 32,
-  maxTemplateParams: 16,
   maxArtifactBytes: 1_000_000,
   maxJsonDepth: 32,
   maxIngressPayloadBytes: 1_000_000,
-  handlerTimeoutMs: 5_000,
 } as const;
 
 export type TopologyLimitName = keyof typeof TOPOLOGY_LIMITS;
@@ -17,11 +15,35 @@ export function measureJsonDepth(value: unknown): number {
     return 0;
   }
 
-  if (Array.isArray(value)) {
-    return 1 + Math.max(0, ...value.map(measureJsonDepth));
+  let maxDepth = 0;
+  const stack: Array<{ value: unknown; depth: number }> = [{ value, depth: 1 }];
+  const seen = new Set<object>();
+
+  while (stack.length > 0) {
+    const item = stack.pop();
+    if (!item || item.value === null || typeof item.value !== "object") {
+      continue;
+    }
+
+    const objectValue = item.value;
+    if (seen.has(objectValue)) {
+      continue;
+    }
+
+    seen.add(objectValue);
+    maxDepth = Math.max(maxDepth, item.depth);
+
+    const children = Array.isArray(objectValue)
+      ? objectValue
+      : Object.values(objectValue as Record<string, unknown>);
+    for (const child of children) {
+      if (child !== null && typeof child === "object") {
+        stack.push({ value: child, depth: item.depth + 1 });
+      }
+    }
   }
 
-  return 1 + Math.max(0, ...Object.values(value as Record<string, unknown>).map(measureJsonDepth));
+  return maxDepth;
 }
 
 export function measureJsonBytes(value: unknown): number {

@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { describe, expect, it, vi } from "vitest";
 import {
   buildPrompt,
+  TOPOLOGY_MCP_ALLOWED_TOOLS,
+  extractTopologyWorkflowStageResults,
   extractOperationTraceEvents,
   extractStreamEventText,
   normalizeError,
@@ -11,7 +13,9 @@ import {
   redactSecrets,
   runClaude,
 } from "./claude-agent-worker.mjs";
+import { TOPOLOGY_MCP_ALLOWED_TOOLS as REGISTRY_TOPOLOGY_MCP_ALLOWED_TOOLS } from "./mcp/topology-tools";
 import { runTopologyStage, writeStageResult } from "./stage-skills/tsn-stage-runner";
+import { initializeTopology } from "../src/topology/initialize";
 
 function failedTopologyStageResult(error) {
   const result = runTopologyStage({ userIntent: "我需要4个交换机，每个交换机连接5个端系统" });
@@ -30,6 +34,41 @@ function failedTopologyStageResult(error) {
   };
 }
 
+function dualPlaneParams(endSystemsPerSwitch) {
+  return {
+    planes: [{ id: "A" }, { id: "B" }],
+    switches: [
+      { id: "sw1", name: "SW-1", plane: "A", groupId: "g1" },
+      { id: "sw2", name: "SW-2", plane: "B", groupId: "g1" },
+      { id: "sw3", name: "SW-3", plane: "A", groupId: "g2" },
+      { id: "sw4", name: "SW-4", plane: "B", groupId: "g2" },
+    ],
+    switchGroups: [
+      { id: "g1", planeSwitches: { A: "sw1", B: "sw2" } },
+      { id: "g2", planeSwitches: { A: "sw3", B: "sw4" } },
+    ],
+    endSystems: Array.from({ length: 4 * endSystemsPerSwitch }, (_, index) => {
+      const switchOrdinal = Math.floor(index / endSystemsPerSwitch) + 1;
+      const hostOrdinal = index % endSystemsPerSwitch + 1;
+      const groupOrdinal = Math.ceil(switchOrdinal / 2);
+      const primarySwitch = groupOrdinal === 1 ? "sw1" : "sw3";
+      const backupSwitch = groupOrdinal === 1 ? "sw2" : "sw4";
+      return {
+        id: `es${switchOrdinal}-${hostOrdinal}`,
+        name: `ES-${switchOrdinal}-${hostOrdinal}`,
+        groupId: `g${groupOrdinal}`,
+        attachment: {
+          primary: { switchId: primarySwitch, plane: "A" },
+          backup: { switchId: backupSwitch, plane: "B" },
+        },
+      };
+    }),
+    backbone: { mode: "line", withinPlane: true },
+    crossPlaneLinks: { mode: "none" },
+    dataRateMbps: 1000,
+  };
+}
+
 async function* messages(items) {
   for (const item of items) {
     yield item;
@@ -37,20 +76,47 @@ async function* messages(items) {
 }
 
 describe("claude-agent-worker", () => {
+  it("keeps worker MCP allowedTools aligned with the topology registry", () => {
+    expect(TOPOLOGY_MCP_ALLOWED_TOOLS).toEqual(REGISTRY_TOPOLOGY_MCP_ALLOWED_TOOLS);
+  });
+
   it("maps structured output and session id from SDK messages", async () => {
+    const mcpHostDir = await mkdtemp(join(tmpdir(), "tsn-topology-mcp-host-"));
+    const topologyMcpServerPath = join(mcpHostDir, "tsn-topology-server.mjs");
+    await writeFile(topologyMcpServerPath, "", "utf8");
+
     const query = async function* (input) {
+      expect(input.options.allowedTools).toEqual([
+        "Skill",
+        "Read",
+        ...TOPOLOGY_MCP_ALLOWED_TOOLS,
+      ]);
       expect(input.options.settingSources).toEqual(["user", "project"]);
       expect(input.options.skills).toEqual(["tsn-topology", "tsn-flow-planning"]);
       expect(input.options.tools).toEqual({ type: "preset", preset: "claude_code" });
-      expect(input.options.allowedTools).toEqual(expect.arrayContaining(["Skill", "Read", "Bash", "Edit", "Write"]));
+      expect(input.options.allowedTools).toEqual([
+        "Skill",
+        "Read",
+        ...TOPOLOGY_MCP_ALLOWED_TOOLS,
+      ]);
+      expect(input.options.mcpServers.tsn_topology).toMatchObject({
+        type: "stdio",
+        command: process.execPath,
+        alwaysLoad: true,
+      });
+      expect(input.options.mcpServers.tsn_topology.args[0]).toContain("tsn-topology-server.mjs");
       expect(input.options.disallowedTools).toEqual([]);
+      expect(input.options.maxTurns).toBe(20);
       expect(input.options.includePartialMessages).toBe(true);
       expect(input.options.systemPrompt).toContain("工程状态只接受结构化校验结果");
+      expect(input.options.systemPrompt).toContain("tsn_topology MCP 工具");
       expect(input.options.systemPrompt).toContain("拓扑、时间同步、流量规划、模拟仿真");
       expect(input.options.systemPrompt).toContain("不能声称已启动仿真");
-      expect(input.prompt).toContain("TSN_AGENT_STAGE_RESULT_PATH");
       expect(input.prompt).toContain("TSN_AGENT_SKILL_OUTPUT_DIR");
-      expect(input.prompt).toContain("--skill-output-dir");
+      expect(input.prompt).toContain("tsn_topology MCP 工具");
+      expect(input.prompt).not.toContain("--stage topology");
+      expect(input.prompt).toContain("不要写 TSN_AGENT_STAGE_RESULT_PATH");
+      expect(input.prompt).not.toContain("必须写入 TSN_AGENT_STAGE_RESULT_PATH");
       expect(input.options.env.TSN_AGENT_SKILL_OUTPUT_DIR).toContain("skill-output");
       yield* messages([
         { type: "system", session_id: "session-1" },
@@ -62,6 +128,12 @@ describe("claude-agent-worker", () => {
       "我需要4个交换机",
       {
         cwd: "/tmp/project",
+        topologyMcpServerPath,
+        stageRunnerInput: {
+          userIntent: "我需要4个交换机",
+          stage: "topology",
+          scenarioConfigId: "generic-tsn",
+        },
       },
       query,
     );
@@ -69,6 +141,50 @@ describe("claude-agent-worker", () => {
     expect(result.sessionId).toBe("session-1");
     expect(result.assistantText).toContain("已生成拓扑说明");
     expect(result.stageResults).toEqual([]);
+  });
+
+  it("extracts topology workflow stage results from full MCP tool_result blocks", () => {
+    const toolUseNamesById = new Map([
+      ["toolu-init", "mcp__tsn_topology__topology_initialize"],
+    ]);
+    const toolResult = initializeTopology({
+      templateId: "dual-plane-redundant",
+      params: dualPlaneParams(2),
+      responseMode: "full",
+    });
+    expect(toolResult.ok).toBe(true);
+
+    const extracted = extractTopologyWorkflowStageResults({
+      type: "user",
+      message: {
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "toolu-init",
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify(toolResult),
+              },
+            ],
+          },
+        ],
+      },
+    }, toolUseNamesById, { stage: "topology" });
+
+    expect(extracted).toHaveLength(1);
+    expect(extracted[0].result).toMatchObject({
+      schemaVersion: "tsn-agent.workflow-stage-result.v1",
+      stage: "topology",
+      producer: {
+        type: "mcp",
+        name: "tsn_topology",
+        tool: "topology.initialize",
+      },
+      status: "success",
+    });
+    expect(extracted[0].result.payload.project.topology.nodes.filter((node) => node.type === "switch")).toHaveLength(4);
+    expect(extracted[0].result.payload.project.topology.nodes.filter((node) => node.type === "endSystem")).toHaveLength(8);
   });
 
   it("reads and validates a topology stage result written to the run-scoped path", async () => {
@@ -98,7 +214,25 @@ describe("claude-agent-worker", () => {
     );
   });
 
-  it("runs a repair turn when the model does not write a structured topology result", async () => {
+  it("fails closed by omitting MCP server config when topology host cannot be resolved", async () => {
+    const query = async function* (input) {
+      expect(input.options.allowedTools).not.toContain("mcp__tsn_topology__topology_initialize");
+      expect(input.options.mcpServers).toBeUndefined();
+      yield { type: "result", session_id: "session-no-mcp-host", result: "拓扑工具暂不可用，已回退本地 runner 路径" };
+    };
+
+    const result = await runClaude(
+      "我需要4个交换机",
+      {
+        cwd: "/tmp/project-without-mcp-host",
+      },
+      query,
+    );
+
+    expect(result.assistantText).toContain("回退本地 runner 路径");
+  });
+
+  it("does not run a topology runner repair turn when no trusted topology result is returned", async () => {
     const events = [];
     const auditDir = await mkdtemp(join(tmpdir(), "tsn-agent-repair-audit-test-"));
     let callCount = 0;
@@ -106,37 +240,8 @@ describe("claude-agent-worker", () => {
       callCount += 1;
       expect(input.prompt).toContain("stage-runner-input.json");
       expect(input.options.env.TSN_AGENT_STAGE_RUNNER_INPUT_PATH).toContain("stage-runner-input.json");
-      if (callCount === 1) {
-        yield { type: "system", session_id: "session-repair-runner" };
-        yield { type: "result", session_id: "session-repair-runner", result: "拓扑已生成" };
-        return;
-      }
-
-      expect(input.options.resume).toBe("session-repair-runner");
-      expect(input.prompt).toContain("上一轮只返回了文字说明");
-      await writeFile(
-        input.options.env.TSN_AGENT_STAGE_RESULT_PATH,
-        JSON.stringify(runTopologyStage({ userIntent: "我需要4个交换机，每个交换机连接5个端系统" })),
-        "utf8",
-      );
-      yield {
-        type: "assistant",
-        session_id: "session-repair-runner",
-        message: {
-          content: [
-            {
-              type: "tool_use",
-              id: "toolu-repair",
-              name: "Bash",
-              input: {
-                command:
-                  'node "$TSN_AGENT_STAGE_RUNNER_PATH" --stage topology --input \'{"userIntent":"我需要4个交换机，每个交换机连接5个端系统"}\' --result-path "$TSN_AGENT_STAGE_RESULT_PATH"',
-              },
-            },
-          ],
-        },
-      };
-      yield { type: "result", session_id: "session-repair-runner", result: "拓扑结构化结果已生成" };
+      yield { type: "system", session_id: "session-no-topology-result" };
+      yield { type: "result", session_id: "session-no-topology-result", result: "拓扑已生成" };
     };
 
     const result = await runClaude(
@@ -157,16 +262,10 @@ describe("claude-agent-worker", () => {
 
     const streamed = events.map((event) => event.text ?? "").join("");
     const audit = JSON.parse(await readFile(result.auditPath, "utf8"));
-    expect(callCount).toBe(2);
-    expect(streamed).toContain("[工具] Bash: node tsn-stage-runner --stage topology");
-    expect(result.assistantText).toContain("[工具] Bash: node tsn-stage-runner --stage topology");
-    expect(result.assistantText).toContain("拓扑结构化结果已生成");
-    expect(result.stageResults).toHaveLength(1);
-    expect(result.stageResults[0]).toMatchObject({
-      stage: "topology",
-      skillName: "tsn-topology",
-      validation: { ok: true, errors: [] },
-    });
+    expect(callCount).toBe(1);
+    expect(streamed).not.toContain("tsn-stage-runner --stage topology");
+    expect(result.assistantText).toContain("拓扑已生成");
+    expect(result.stageResults).toEqual([]);
     expect(audit.stageRunnerInputPath).toContain("stage-runner-input.json");
     expect(audit.promptRuns).toEqual([
       expect.objectContaining({
@@ -174,41 +273,21 @@ describe("claude-agent-worker", () => {
         kind: "initial",
         resultText: "拓扑已生成",
       }),
-      expect.objectContaining({
-        id: "2-missing_stage_result_retry",
-        kind: "missing_stage_result_retry",
-        prompt: expect.stringContaining("上一轮只返回了文字说明"),
-        resultText: "拓扑结构化结果已生成",
-      }),
     ]);
   });
 
-  it("runs a repair turn when the structured topology result fails validation", async () => {
+  it("does not repair invalid topology stage result files through the topology runner", async () => {
     let callCount = 0;
     const validationError = "通用分布式拓扑缺少交换机互联链路";
     const query = async function* (input) {
       callCount += 1;
-
-      if (callCount === 1) {
-        await writeFile(
-          input.options.env.TSN_AGENT_STAGE_RESULT_PATH,
-          JSON.stringify(failedTopologyStageResult(validationError)),
-          "utf8",
-        );
-        yield { type: "system", session_id: "session-invalid-runner" };
-        yield { type: "result", session_id: "session-invalid-runner", result: "拓扑已生成" };
-        return;
-      }
-
-      expect(input.options.resume).toBe("session-invalid-runner");
-      expect(input.prompt).toContain("上一轮已经写入 stage result，但校验未通过");
-      expect(input.prompt).toContain(validationError);
       await writeFile(
         input.options.env.TSN_AGENT_STAGE_RESULT_PATH,
-        JSON.stringify(runTopologyStage({ userIntent: "我需要4个交换机，每个交换机连接5个端系统" })),
+        JSON.stringify(failedTopologyStageResult(validationError)),
         "utf8",
       );
-      yield { type: "result", session_id: "session-invalid-runner", result: "已补齐交换机互联链路" };
+      yield { type: "system", session_id: "session-invalid-runner" };
+      yield { type: "result", session_id: "session-invalid-runner", result: "拓扑已生成" };
     };
 
     const result = await runClaude(
@@ -223,10 +302,10 @@ describe("claude-agent-worker", () => {
       query,
     );
 
-    expect(callCount).toBe(2);
-    expect(result.assistantText).toContain("已补齐交换机互联链路");
+    expect(callCount).toBe(1);
+    expect(result.assistantText).toContain("拓扑已生成");
     expect(result.stageResults).toHaveLength(1);
-    expect(result.stageResults[0].status).toBe("success");
+    expect(result.stageResults[0].status).toBe("failed");
   });
 
   it("surfaces SDK tool use and tool result events in the final assistant text", async () => {
@@ -279,11 +358,6 @@ describe("claude-agent-worker", () => {
   it("writes a per-session audit log with prompt, result, and tool traces", async () => {
     const auditDir = await mkdtemp(join(tmpdir(), "tsn-agent-audit-test-"));
     const query = async function* (input) {
-      await writeFile(
-        input.options.env.TSN_AGENT_STAGE_RESULT_PATH,
-        JSON.stringify(runTopologyStage({ userIntent: "我需要4个交换机" })),
-        "utf8",
-      );
       yield { type: "system", session_id: "sdk-session-audit" };
       yield {
         type: "assistant",
@@ -293,10 +367,9 @@ describe("claude-agent-worker", () => {
             {
               type: "tool_use",
               id: "toolu-audit",
-              name: "Bash",
+              name: "mcp__tsn_topology__topology_describe_templates",
               input: {
-                command:
-                  'node "$TSN_AGENT_STAGE_RUNNER_PATH" --stage topology --input \'{"userIntent":"我需要4个交换机"}\' --result-path "$TSN_AGENT_STAGE_RESULT_PATH"',
+                responseMode: "summary",
               },
             },
           ],
@@ -310,7 +383,17 @@ describe("claude-agent-worker", () => {
             {
               type: "tool_result",
               tool_use_id: "toolu-audit",
-              content: "stage result written",
+              content: JSON.stringify({
+                ok: true,
+                summary: {
+                  templates: [],
+                },
+                warnings: [],
+                metadata: {
+                  responseMode: "summary",
+                  summaryOnly: true,
+                },
+              }),
             },
           ],
         },
@@ -367,10 +450,14 @@ describe("claude-agent-worker", () => {
         resultText: expect.stringContaining("拓扑已生成"),
       }),
     ]);
-    expect(audit.sdkOptions.allowedTools).toEqual(["Skill", "Read", "Bash", "Edit", "Write"]);
+    expect(audit.sdkOptions.allowedTools).toEqual([
+      "Skill",
+      "Read",
+      ...TOPOLOGY_MCP_ALLOWED_TOOLS,
+    ]);
     expect(audit.sdkOptions.skills).toEqual(["tsn-topology", "tsn-flow-planning"]);
-    expect(audit.toolCalls.map((call) => call.text).join("\n")).toContain("[工具] Bash: node tsn-stage-runner --stage topology");
-    expect(audit.toolCalls.map((call) => call.text).join("\n")).toContain("[工具结果] Bash 已返回");
+    expect(audit.toolCalls.map((call) => call.text).join("\n")).toContain("[工具] mcp__tsn_topology__topology_describe_templates");
+    expect(audit.toolCalls.map((call) => call.text).join("\n")).toContain("[工具结果] mcp__tsn_topology__topology_describe_templates 已返回");
     expect(audit.result.assistantText).toContain("拓扑已生成");
     expect(audit.sdkSessionId).toBe("sdk-session-audit");
     expect(JSON.parse(latestRaw).runId).toBe("agent-run-audit");
@@ -525,19 +612,21 @@ describe("claude-agent-worker", () => {
       "历史上下文",
       "/tmp/result.json",
       "/tmp/skill-output",
-      { userIntent: "我需要4个交换机", scenarioConfigId: "generic-tsn" },
+      { userIntent: "我需要4个交换机", stage: "topology", scenarioConfigId: "generic-tsn" },
     );
 
     expect(prompt).toContain("我需要4个交换机");
     expect(prompt).toContain("历史上下文");
-    expect(prompt).toContain("stage runner 结构化输入");
+    expect(prompt).toContain("阶段结构化输入");
     expect(prompt).toContain('"scenarioConfigId": "generic-tsn"');
     expect(prompt).toContain("只描述当前阶段已经完成或正在等待确认的内容");
     expect(prompt).toContain("拓扑 -> 时间同步 -> 流量规划 -> 模拟仿真");
     expect(prompt).toContain("当前应用没有接入 OMNeT++/远程服务器仿真 runner");
-    expect(prompt).toContain("/tmp/result.json");
+    expect(prompt).not.toContain("/tmp/result.json");
     expect(prompt).toContain("/tmp/skill-output");
-    expect(prompt).toContain("--skill-output-dir");
+    expect(prompt).toContain("tsn_topology MCP 工具");
+    expect(prompt).toContain("trusted topology result");
+    expect(prompt).not.toContain("--stage topology");
     expect(prompt).not.toContain("然后继续生成控制流模板和导出文件");
   });
 

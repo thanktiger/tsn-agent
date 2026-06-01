@@ -113,6 +113,7 @@ export function validateTopologyArtifacts(input: {
   const errors = [];
   const topology = input.artifacts["topology.json"] as LegacyTopologyJson | undefined;
   const topoFeature = input.artifacts["topo_feature.json"] as LegacyTopoFeatureEntry[] | undefined;
+  const dataServer = input.artifacts["data-server.json"] as LegacyDataServerJson | undefined;
   const macTable = input.artifacts["mac-forwarding-table.json"] as LegacyMacForwardingTableJson | undefined;
 
   if (!topology?.node || !Array.isArray(topology.node.nodes) || !Array.isArray(topology.node.links)) {
@@ -128,6 +129,14 @@ export function validateTopologyArtifacts(input: {
       code: "INVALID_ARTIFACT",
       message: "topo_feature.json must be an array.",
       path: "$.artifacts['topo_feature.json']",
+    }));
+  }
+
+  if (!dataServer || dataServer.version !== "2.0" || !Array.isArray(dataServer.datas)) {
+    errors.push(topologyError({
+      code: "INVALID_ARTIFACT",
+      message: "data-server.json must contain version 2.0 and datas array.",
+      path: "$.artifacts['data-server.json']",
     }));
   }
 

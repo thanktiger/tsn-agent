@@ -204,16 +204,16 @@ function describeFlow(flow: CanonicalTsnProjectV0["flows"][number]): string {
 }
 
 function describeTopologyIntent(intent: TopologyIntent): string {
-  if (intent.topologyTemplate === "aerospace-redundant") {
-    return `识别到箭载双冗余拓扑：${intent.switchCount} 个交换机，${intent.endSystemCount ?? 7} 个网卡。`;
+  if (intent.topologyTemplate === "dual-plane-redundant") {
+    return `识别到双平面冗余拓扑：${intent.switchCount} 个交换机，每个交换机连接 ${intent.endSystemsPerSwitch} 个端系统。`;
   }
 
   return `识别到 ${intent.switchCount} 个交换机，每个交换机连接 ${intent.endSystemsPerSwitch} 个端系统。`;
 }
 
 function describeTopologyInterconnect(intent: TopologyIntent): string {
-  if (intent.topologyTemplate === "aerospace-redundant") {
-    return "左右两组系统交换机不级联，通过双冗余主干链路互联，网卡双归属接入。";
+  if (intent.topologyTemplate === "dual-plane-redundant") {
+    return "交换机按 A/B 双平面成对分组，端系统双归属接入对应故障域。";
   }
 
   return intent.switchInterconnect === "ring" ? "交换机采用环形互联。" : "交换机采用线型互联。";

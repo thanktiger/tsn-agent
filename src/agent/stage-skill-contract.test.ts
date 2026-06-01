@@ -8,6 +8,7 @@ import {
   type TopologyStageSkillResult,
   type FlowPlanningStageSkillResult,
 } from "./stage-skill-contract";
+import { WORKFLOW_STAGE_RESULT_SCHEMA_VERSION } from "./workflow-stage-result";
 
 function topologyResult(overrides: Partial<TopologyStageSkillResult> = {}): TopologyStageSkillResult {
   return {
@@ -85,7 +86,7 @@ describe("stage skill contract", () => {
     const summary = summarizeStageSkillResult(result);
 
     expect(summary).toMatchObject({
-      schemaVersion: STAGE_SKILL_SCHEMA_VERSION,
+      schemaVersion: WORKFLOW_STAGE_RESULT_SCHEMA_VERSION,
       stage: "topology",
       skillName: "tsn-topology",
       status: "success",

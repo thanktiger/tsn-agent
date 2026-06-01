@@ -16,6 +16,21 @@ npm run cargo:test
 - `npm run e2e`：运行 Web smoke E2E，使用 fake agent 验证一句话拓扑输入、拓扑展示、导出文件列表、保存入口和诊断日志。
 - `npm run cargo:test`：运行 Tauri/Rust 单元测试，覆盖会话数据库 schema、诊断日志、Agent bridge、规划服务 URL/响应边界和写盘安全校验。
 
+## Topology MCP 测试
+
+拓扑 MCP 的 P0 测试不依赖网络、模型、真实 Agent 会话或 Tauri：
+
+```bash
+npx vitest run src/topology src-node/mcp/topology-tools.test.ts
+```
+
+- `src/topology/*.test.ts`：覆盖 `IntermediateTopology` 契约、模板目录、初始化、校验、legacy JSON artifact、inspect、P0 operations 和 project bridge。
+- `src-node/mcp/topology-tools.test.ts`：覆盖 MCP tool registry、allowedTools 映射、full topology 白名单边界、`FORBIDDEN_RESPONSE_MODE`、structured errors 和无 HTML artifact。
+- `src-node/claude-agent-worker.test.mjs`：覆盖 worker 的 `tsn_topology` MCP server 配置、allowedTools、dev host fail-closed 和 stage runner fallback。
+- `src-node/stage-skills/tsn-stage-runner.test.mjs`：覆盖旧 skill JSON artifact 兼容路径，确保只输出四份 JSON，不输出 HTML。
+
+完整回归仍使用 `npm test` 和 `npm run build`。
+
 ## 当前不进默认测试
 
 - 真实 Claude Agent SDK 流式输出。

@@ -9,6 +9,7 @@ import {
 } from "../domain/scenario-config";
 import type { ArtifactBundle } from "../export/artifact-bundle";
 import type { StageSkillSummary } from "../agent/stage-skill-contract";
+import type { WorkflowStageSummary } from "../agent/workflow-stage-result";
 
 export type { WorkflowStep };
 
@@ -20,6 +21,8 @@ export interface WorkflowStageState {
   step: WorkflowStep;
   status: WorkflowStepStatus;
   summary?: string;
+  stageResult?: WorkflowStageSummary;
+  /** Legacy session field; normalized into stageResult on read. */
   skillResult?: StageSkillSummary;
   confirmedAt?: string;
   updatedAt?: string;
@@ -116,6 +119,7 @@ export function normalizeWorkflowState(
   const stages = Object.fromEntries(
     WORKFLOW_STEPS.map((step) => {
       const existing = state.stages?.[step];
+      const stageResult = existing?.stageResult ?? existing?.skillResult;
 
       return [
         step,
@@ -123,7 +127,7 @@ export function normalizeWorkflowState(
           step,
           status: existing?.status ?? (step === currentStep ? "current" : "locked"),
           summary: existing?.summary,
-          skillResult: existing?.skillResult,
+          stageResult,
           confirmedAt: existing?.confirmedAt,
           updatedAt: existing?.updatedAt,
           error: existing?.error,
@@ -149,6 +153,8 @@ export function recordStageResult(
   input: {
     step?: WorkflowStep;
     summary: string;
+    stageResult?: WorkflowStageSummary;
+    /** Legacy call site compatibility; new code should pass stageResult. */
     skillResult?: StageSkillSummary;
     waitingConfirmation?: boolean;
     createdAt?: string;
@@ -169,7 +175,7 @@ export function recordStageResult(
         step,
         status,
         summary: input.summary,
-        skillResult: input.skillResult,
+        stageResult: input.stageResult ?? input.skillResult,
         updatedAt: createdAt,
         error: undefined,
       },

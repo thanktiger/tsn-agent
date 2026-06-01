@@ -8,7 +8,7 @@ export type IntermediateNodeType = "switch" | "endSystem" | "server";
 
 export type IntermediateLinkMedium = "ethernet";
 
-export type TopologyTemplateId = "generic-line" | "generic-ring" | "aerospace-redundant";
+export type TopologyTemplateId = "generic-line" | "generic-ring" | "dual-plane-redundant";
 
 export interface IntermediatePosition {
   x: number;
@@ -48,8 +48,8 @@ export interface IntermediateLink {
 
 export interface IntermediateTopologyMetadata {
   templateId?: TopologyTemplateId;
-  templateParams?: Record<string, number | string | boolean>;
-  layout?: "line" | "ring" | "aerospace-redundant" | "custom";
+  templateParams?: Record<string, unknown>;
+  layout?: "line" | "ring" | "dual-plane" | "custom";
   source?: "template" | "operations" | "canonical" | "legacy-artifacts";
 }
 

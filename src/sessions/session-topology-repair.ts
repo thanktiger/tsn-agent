@@ -124,16 +124,6 @@ function shouldIncludeDefaultFlow(workflow: WorkflowState): boolean {
 }
 
 function inferTopologyIntentFromProject(project: CanonicalTsnProjectV0): TopologyIntent {
-  if (isAerospaceRedundantProject(project)) {
-    return {
-      switchCount: 4,
-      endSystemsPerSwitch: 0,
-      switchInterconnect: "line",
-      topologyTemplate: "aerospace-redundant",
-      endSystemCount: project.topology.nodes.filter((node) => node.type === "endSystem").length,
-    };
-  }
-
   const switchCount = project.topology.nodes.filter((node) => node.type === "switch").length;
   const endSystemCount = project.topology.nodes.filter((node) => node.type === "endSystem").length;
 
@@ -148,8 +138,7 @@ function isSameTopologyIntent(left: TopologyIntent, right: TopologyIntent): bool
   return left.switchCount === right.switchCount
     && left.endSystemsPerSwitch === right.endSystemsPerSwitch
     && (left.switchInterconnect ?? "line") === (right.switchInterconnect ?? "line")
-    && left.topologyTemplate === right.topologyTemplate
-    && left.endSystemCount === right.endSystemCount;
+    && left.topologyTemplate === right.topologyTemplate;
 }
 
 function isSameTopologyShape(left: CanonicalTsnProjectV0, right: CanonicalTsnProjectV0): boolean {
@@ -164,20 +153,12 @@ function isSameFlows(left: CanonicalTsnProjectV0, right: CanonicalTsnProjectV0):
 }
 
 function formatTopologyIntent(intent: TopologyIntent): string {
-  if (intent.topologyTemplate === "aerospace-redundant") {
-    return `箭载双冗余拓扑，创建${intent.switchCount}台交换机和${intent.endSystemCount ?? 7}个网卡，网卡双归属接入两组系统交换机，主干链路为交换机1连接交换机3、交换机2连接交换机4`;
+  if (intent.topologyTemplate === "dual-plane-redundant") {
+    return `双平面冗余拓扑，创建${intent.switchCount}台交换机，每台连接${intent.endSystemsPerSwitch}个端系统，端系统双归属接入 A/B 平面`;
   }
 
   const interconnect = intent.switchInterconnect === "ring" ? "环形互联" : "线型互联";
   return `${intent.switchCount}台交换机，每台连接${intent.endSystemsPerSwitch}个端系统，${interconnect}`;
-}
-
-function isAerospaceRedundantProject(project: CanonicalTsnProjectV0): boolean {
-  const nodeIds = new Set(project.topology.nodes.map((node) => node.id));
-
-  return project.id === "project-aerospace-redundant"
-    || ["nic1", "nic2", "nic3", "nic4", "nic5", "nic6", "nic7", "sw1", "sw2", "sw3", "sw4"]
-      .every((nodeId) => nodeIds.has(nodeId));
 }
 
 function describeSwitchInterconnect(project: CanonicalTsnProjectV0): string {

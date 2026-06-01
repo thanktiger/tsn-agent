@@ -4,14 +4,14 @@ import type {
   TsnFlow,
   TsnLink,
   TsnNode,
-  TsnPort,
 } from "./canonical";
 import { getScenarioConfig, resolveScenarioConfig, type ScenarioFlowTemplate } from "./scenario-config";
+import { initializeTopology, type DualPlaneRedundantParams, type TopologyInitIntent } from "../topology/initialize";
+import { intermediateToCanonicalProject } from "../topology/project-bridge";
 
 export interface TopologyFactoryOptions {
   scenarioConfigId?: string;
   includeControlFlow?: boolean;
-  aerospaceEndSystemCount?: number;
 }
 
 export function parseTopologyIntent(
@@ -19,21 +19,6 @@ export function parseTopologyIntent(
   fallback?: Partial<TopologyIntent>,
   options: TopologyFactoryOptions = {},
 ): TopologyIntent {
-  const aerospaceNetworkcardCount = matchAerospaceNetworkcardCount(text, fallback?.endSystemCount);
-  const shouldUseAerospaceTemplate = !hasDistributedEndSystemTopologyRequest(text)
-    && (isAerospaceRedundantTopologyRequest(text, options.scenarioConfigId)
-      || fallback?.topologyTemplate === "aerospace-redundant" && hasAerospaceTemplateEditRequest(text));
-
-  if (shouldUseAerospaceTemplate) {
-    return {
-      switchCount: 4,
-      endSystemsPerSwitch: 0,
-      switchInterconnect: "line",
-      topologyTemplate: "aerospace-redundant",
-      endSystemCount: clampNumber(Number(aerospaceNetworkcardCount ?? fallback?.endSystemCount ?? 7), 1, 24),
-    };
-  }
-
   const switchMatch = matchTargetCount(text, "(?:系统\\s*)?(?:交换机|switch)");
   const endSystemMatch = matchTargetCount(
     text,
@@ -49,20 +34,15 @@ export function parseTopologyIntent(
     1,
     24,
   );
+  const shouldUseDualPlaneTemplate = isDualPlaneTopologyRequest(text, options.scenarioConfigId)
+    || fallback?.topologyTemplate === "dual-plane-redundant";
 
   const intent: TopologyIntent = {
     switchCount,
     endSystemsPerSwitch,
     switchInterconnect,
+    topologyTemplate: shouldUseDualPlaneTemplate ? "dual-plane-redundant" : undefined,
   };
-
-  if (fallback?.topologyTemplate && !distributedEndSystemMatch && !endSystemMatch) {
-    intent.topologyTemplate = fallback.topologyTemplate;
-  }
-
-  if (fallback?.endSystemCount !== undefined && intent.topologyTemplate) {
-    intent.endSystemCount = fallback.endSystemCount;
-  }
 
   return intent;
 }
@@ -74,146 +54,29 @@ export function createProjectFromIntent(
 ): CanonicalTsnProjectV0 {
   const intent = parseTopologyIntent(text, fallback, options);
 
-  if (intent.topologyTemplate === "aerospace-redundant") {
-    const aerospaceOptions = intent.endSystemCount === undefined
-      ? options
-      : { ...options, aerospaceEndSystemCount: intent.endSystemCount };
-
-    return createAerospaceRedundantTopologyProject("箭载双冗余拓扑", aerospaceOptions);
+  if (intent.topologyTemplate === "dual-plane-redundant") {
+    return createDualPlaneRedundantTopologyProject(intent, "当前规划", options);
   }
 
   return createLineTopologyProject(intent, "当前规划", options);
 }
 
-export function createAerospaceRedundantTopologyProject(
-  projectName = "箭载双冗余拓扑",
+export function createDualPlaneRedundantTopologyProject(
+  intent: TopologyIntent,
+  projectName = "当前规划",
   options: TopologyFactoryOptions = {},
 ): CanonicalTsnProjectV0 {
-  const scenarioConfig = resolveScenarioConfig(options.scenarioConfigId ?? "aerospace-onboard").config;
+  const scenarioConfig = resolveScenarioConfig(options.scenarioConfigId).config;
   const dataRateMbps = scenarioConfig.defaults.topology.dataRateMbps;
-  const endSystemCount = clampNumber(Number(options.aerospaceEndSystemCount ?? 7), 1, 24);
-  const leftEndSystemCount = Math.min(3, endSystemCount);
-  const middleEndSystemCount = Math.max(0, Math.min(2, endSystemCount - leftEndSystemCount));
-  const rightEndSystemCount = Math.max(0, endSystemCount - leftEndSystemCount - middleEndSystemCount);
-  const sw3PortCount = Math.max(6, rightEndSystemCount + 2);
   const now = new Date().toISOString();
-  const nodes: TsnNode[] = [];
-  const links: TsnLink[] = [];
-  let numericNodeId = 0;
-  let numericLinkId = 0;
-
-  const addNode = (input: {
-    id: string;
-    name: string;
-    type: TsnNode["type"];
-    portCount: number;
-    position: TsnNode["position"];
-    hostOrdinal?: number;
-  }) => {
-    nodes.push({
-      id: input.id,
-      numericId: numericNodeId,
-      name: input.name,
-      type: input.type,
-      ports: createPorts(input.portCount),
-      position: input.position,
-      macAddress: input.hostOrdinal === undefined ? undefined : createMacAddress(input.hostOrdinal),
-      ipAddress: input.hostOrdinal === undefined ? undefined : `10.10.0.${input.hostOrdinal}`,
-    });
-    numericNodeId += 1;
-  };
-
-  const addLink = (sourceNodeId: string, sourcePortId: string, targetNodeId: string, targetPortId: string) => {
-    links.push(
-      createLink({
-        numericId: numericLinkId,
-        sourceNodeId,
-        sourcePortId,
-        targetNodeId,
-        targetPortId,
-        dataRateMbps,
-      }),
-    );
-    numericLinkId += 1;
-  };
-
-  for (let index = 1; index <= leftEndSystemCount; index += 1) {
-    addNode({
-      id: `nic${index}`,
-      name: `网卡${index}`,
-      type: "endSystem",
-      portCount: 2,
-      position: { x: 30, y: leftAerospaceY(index) },
-      hostOrdinal: index,
-    });
-  }
-
-  addNode({ id: "sw1", name: "交换机1", type: "switch", portCount: 8, position: { x: 210, y: 55 } });
-  addNode({ id: "sw2", name: "交换机2", type: "switch", portCount: 8, position: { x: 210, y: 195 } });
-
-  for (let offset = 0; offset < middleEndSystemCount; offset += 1) {
-    const ordinal = leftEndSystemCount + offset + 1;
-    addNode({
-      id: `nic${ordinal}`,
-      name: `网卡${ordinal}`,
-      type: "endSystem",
-      portCount: 2,
-      position: { x: 380, y: middleAerospaceY(offset) },
-      hostOrdinal: ordinal,
-    });
-  }
-
-  addNode({ id: "sw3", name: "交换机3", type: "switch", portCount: sw3PortCount, position: { x: 590, y: 55 } });
-  addNode({ id: "sw4", name: "交换机4", type: "switch", portCount: sw3PortCount, position: { x: 590, y: 195 } });
-
-  for (let offset = 0; offset < rightEndSystemCount; offset += 1) {
-    const ordinal = leftEndSystemCount + middleEndSystemCount + offset + 1;
-    addNode({
-      id: `nic${ordinal}`,
-      name: `网卡${ordinal}`,
-      type: "endSystem",
-      portCount: 2,
-      position: { x: 760, y: rightAerospaceY(offset) },
-      hostOrdinal: ordinal,
-    });
-  }
-
-  for (let ordinal = 1; ordinal <= leftEndSystemCount; ordinal += 1) {
-    addLink(`nic${ordinal}`, "p1", "sw1", `p${ordinal}`);
-    addLink(`nic${ordinal}`, "p2", "sw2", `p${ordinal}`);
-  }
-
-  for (let offset = 0; offset < middleEndSystemCount; offset += 1) {
-    const ordinal = leftEndSystemCount + offset + 1;
-    addLink("sw1", `p${ordinal}`, `nic${ordinal}`, "p1");
-    addLink("sw2", `p${ordinal}`, `nic${ordinal}`, "p2");
-  }
-
-  addLink("sw1", "p6", "sw3", "p1");
-  addLink("sw2", "p6", "sw4", "p1");
-
-  for (let offset = 0; offset < rightEndSystemCount; offset += 1) {
-    const ordinal = leftEndSystemCount + middleEndSystemCount + offset + 1;
-    const switchPort = offset + 3;
-    addLink("sw3", `p${switchPort}`, `nic${ordinal}`, "p1");
-    addLink("sw4", `p${switchPort}`, `nic${ordinal}`, "p2");
-  }
-
-  const project: CanonicalTsnProjectV0 = {
-    schemaVersion: "tsn-agent.canonical.v0",
-    id: "project-aerospace-redundant",
-    name: projectName,
-    createdAt: now,
-    updatedAt: now,
-    topology: { nodes, links },
-    flows: [],
-    simulationHints: {
-      inetVersion: "INET 4.x",
-      nedPackage: "tsnagent.generated",
-      defaultDataRateMbps: dataRateMbps,
-      timeSynchronization: "assumed-synchronized",
-    },
-  };
+  const project = createProjectFromTopologyDomain({
+    templateId: "dual-plane-redundant",
+    params: createDualPlaneParams(intent, dataRateMbps) as unknown as Record<string, unknown>,
+    projectName,
+    projectId: "project-default",
+    timestamp: now,
+    defaultDataRateMbps: dataRateMbps,
+  });
 
   if (options.includeControlFlow === false) {
     return project;
@@ -221,7 +84,7 @@ export function createAerospaceRedundantTopologyProject(
 
   return {
     ...project,
-    flows: createAerospaceRedundantFlows(nodes, links, scenarioConfig.flowTemplates[0]),
+    flows: [createControlFlow(project.topology.nodes, project.topology.links, intent, scenarioConfig.flowTemplates[0])],
   };
 }
 
@@ -233,113 +96,83 @@ export function createLineTopologyProject(
   const scenarioConfig = resolveScenarioConfig(options.scenarioConfigId).config;
   const dataRateMbps = scenarioConfig.defaults.topology.dataRateMbps;
   const now = new Date().toISOString();
-  const nodes: TsnNode[] = [];
-  const links: TsnLink[] = [];
-  const switchIds: string[] = [];
-  let numericNodeId = 0;
-  let numericLinkId = 0;
-
-  for (let switchIndex = 1; switchIndex <= intent.switchCount; switchIndex += 1) {
-    const switchId = `sw${switchIndex}`;
-    const switchX = 80 + 300 * (switchIndex - 1);
-    switchIds.push(switchId);
-    nodes.push({
-      id: switchId,
-      numericId: numericNodeId,
-      name: `SW-${switchIndex}`,
-      type: "switch",
-      ports: createPorts(intent.endSystemsPerSwitch + 2),
-      position: { x: switchX, y: 220 },
-    });
-    numericNodeId += 1;
-  }
-
-  for (let switchIndex = 1; switchIndex <= intent.switchCount; switchIndex += 1) {
-    const switchId = `sw${switchIndex}`;
-
-    for (let hostIndex = 1; hostIndex <= intent.endSystemsPerSwitch; hostIndex += 1) {
-      const hostId = `es${switchIndex}-${hostIndex}`;
-      const hostOrdinal = (switchIndex - 1) * intent.endSystemsPerSwitch + hostIndex;
-      const switchX = 80 + 300 * (switchIndex - 1);
-      const yOffset = hostIndex % 2 === 0 ? 390 : 70;
-      const xJitter = (hostIndex - Math.ceil(intent.endSystemsPerSwitch / 2)) * 62;
-
-      nodes.push({
-        id: hostId,
-        numericId: numericNodeId,
-        name: `ES-${switchIndex}-${hostIndex}`,
-        type: "endSystem",
-        ports: createPorts(1),
-        position: {
-          x: switchX + xJitter,
-          y: yOffset,
-        },
-        macAddress: createMacAddress(hostOrdinal),
-        ipAddress: `10.0.${switchIndex}.${hostIndex}`,
-      });
-      numericNodeId += 1;
-
-      links.push(
-        createLink({
-          numericId: numericLinkId,
-          sourceNodeId: hostId,
-          sourcePortId: "p1",
-          targetNodeId: switchId,
-          targetPortId: `p${hostIndex}`,
-          dataRateMbps,
-        }),
-      );
-      numericLinkId += 1;
-    }
-  }
-
-  const switchInterconnectPortOffset = intent.endSystemsPerSwitch;
-
-  for (let index = 0; index < switchIds.length - 1; index += 1) {
-    links.push(
-      createLink({
-        numericId: numericLinkId,
-        sourceNodeId: switchIds[index],
-        sourcePortId: `p${switchInterconnectPortOffset + 1}`,
-        targetNodeId: switchIds[index + 1],
-        targetPortId: `p${switchInterconnectPortOffset + 2}`,
-        dataRateMbps,
-      }),
-    );
-    numericLinkId += 1;
-  }
-
-  if (intent.switchInterconnect === "ring" && switchIds.length > 2) {
-    links.push(
-      createLink({
-        numericId: numericLinkId,
-        sourceNodeId: switchIds[switchIds.length - 1],
-        sourcePortId: `p${switchInterconnectPortOffset + 1}`,
-        targetNodeId: switchIds[0],
-        targetPortId: `p${switchInterconnectPortOffset + 2}`,
-        dataRateMbps,
-      }),
-    );
-    numericLinkId += 1;
-  }
+  const project = createProjectFromTopologyDomain({
+    templateId: intent.switchInterconnect === "ring" ? "generic-ring" : "generic-line",
+    params: {
+      switchCount: intent.switchCount,
+      endSystemsPerSwitch: intent.endSystemsPerSwitch,
+      dataRateMbps,
+    },
+    projectName,
+    projectId: "project-default",
+    timestamp: now,
+    defaultDataRateMbps: dataRateMbps,
+  });
 
   const flows = options.includeControlFlow === false
     ? []
-    : [createControlFlow(nodes, links, intent, scenarioConfig.flowTemplates[0])];
+    : [createControlFlow(project.topology.nodes, project.topology.links, intent, scenarioConfig.flowTemplates[0])];
 
   return {
-    schemaVersion: "tsn-agent.canonical.v0",
-    id: "project-default",
-    name: projectName,
-    createdAt: now,
-    updatedAt: now,
-    topology: { nodes, links },
+    ...project,
     flows,
-    simulationHints: {
-      inetVersion: "INET 4.x",
-      nedPackage: "tsnagent.generated",
-      defaultDataRateMbps: dataRateMbps,
-      timeSynchronization: "assumed-synchronized",
+  };
+}
+
+function createDualPlaneParams(intent: TopologyIntent, dataRateMbps: number): DualPlaneRedundantParams {
+  const switchCount = intent.switchCount % 2 === 0 ? intent.switchCount : intent.switchCount + 1;
+  const groupCount = Math.max(1, Math.floor(switchCount / 2));
+  const switches = Array.from({ length: groupCount * 2 }, (_, index) => {
+    const groupOrdinal = Math.floor(index / 2) + 1;
+    const isPlaneA = index % 2 === 0;
+    return {
+      id: `sw${index + 1}`,
+      name: `SW-${groupOrdinal}${isPlaneA ? "A" : "B"}`,
+      plane: isPlaneA ? "A" as const : "B" as const,
+      groupId: `g${groupOrdinal}`,
+    };
+  });
+  const switchGroups = Array.from({ length: groupCount }, (_, index) => ({
+    id: `g${index + 1}`,
+    planeSwitches: {
+      A: `sw${index * 2 + 1}`,
+      B: `sw${index * 2 + 2}`,
+    },
+  }));
+  const endSystems = Array.from({ length: intent.switchCount * intent.endSystemsPerSwitch }, (_, index) => {
+    const switchOrdinal = Math.floor(index / intent.endSystemsPerSwitch) + 1;
+    const groupOrdinal = Math.ceil(switchOrdinal / 2);
+    const hostOrdinal = index % intent.endSystemsPerSwitch + 1;
+    const primarySwitchId = `sw${groupOrdinal * 2 - 1}`;
+    const backupSwitchId = `sw${groupOrdinal * 2}`;
+
+    return {
+      id: `es${switchOrdinal}-${hostOrdinal}`,
+      name: `ES-${switchOrdinal}-${hostOrdinal}`,
+      groupId: `g${groupOrdinal}`,
+      attachment: {
+        primary: { switchId: primarySwitchId, plane: "A" as const },
+        backup: { switchId: backupSwitchId, plane: "B" as const },
+      },
+    };
+  });
+
+  return {
+    dataRateMbps,
+    planes: [{ id: "A" }, { id: "B" }],
+    switches,
+    switchGroups,
+    endSystems,
+    backbone: {
+      mode: intent.switchInterconnect === "ring" ? "ring" : "line",
+      withinPlane: true,
+    },
+    crossPlaneLinks: {
+      mode: "none",
+    },
+    allocation: {
+      portStrategy: "first-free",
+      layoutStrategy: "dual-plane-grid",
     },
   };
 }
@@ -348,30 +181,6 @@ export function withDefaultControlFlow(
   project: CanonicalTsnProjectV0,
   options: TopologyFactoryOptions = {},
 ): CanonicalTsnProjectV0 {
-  if (isAerospaceRedundantProject(project)) {
-    const scenarioConfig = resolveScenarioConfig(options.scenarioConfigId ?? "aerospace-onboard").config;
-    const defaultFlows = createAerospaceRedundantFlows(
-      project.topology.nodes,
-      project.topology.links,
-      scenarioConfig.flowTemplates[0],
-    );
-    const defaultFlowIds = new Set(defaultFlows.map((flow) => flow.id));
-    const mergedFlows = [
-      ...defaultFlows.map((flow) => project.flows.find((candidate) => candidate.id === flow.id) ?? flow),
-      ...project.flows.filter((flow) => !defaultFlowIds.has(flow.id)),
-    ];
-
-    if (mergedFlows.length === project.flows.length) {
-      return project;
-    }
-
-    return {
-      ...project,
-      updatedAt: new Date().toISOString(),
-      flows: renumberFlows(mergedFlows),
-    };
-  }
-
   if (project.flows.some((flow) => flow.id === "flow-control-1")) {
     return project;
   }
@@ -401,40 +210,9 @@ export function withFlowsFromIntent(
     return project;
   }
 
-  const scenarioConfig = isAerospaceRedundantProject(project)
-    ? resolveScenarioConfig(options.scenarioConfigId ?? "aerospace-onboard").config
-    : resolveScenarioConfig(options.scenarioConfigId).config;
+  const scenarioConfig = resolveScenarioConfig(options.scenarioConfigId).config;
   const intent = inferIntentFromProject(project);
   const flows = [...project.flows];
-
-  if (isAerospaceRedundantProject(project)) {
-    if (flowIntent.controlFlow && !flows.some((flow) => flow.id === "flow-control-1")) {
-      flows.unshift(createAerospaceControlFlow(project.topology.nodes, project.topology.links, scenarioConfig.flowTemplates[0]));
-    }
-
-    if (flowIntent.heartbeatFlow && !flows.some((flow) => flow.id === "flow-heartbeat-1")) {
-      const controlFlowIndex = flows.findIndex((flow) => flow.id === "flow-control-1");
-      const heartbeatFlow = createAerospaceHeartbeatFlow(project.topology.nodes, project.topology.links);
-
-      if (controlFlowIndex >= 0) {
-        flows.splice(controlFlowIndex + 1, 0, heartbeatFlow);
-      } else {
-        flows.push(heartbeatFlow);
-      }
-    }
-
-    appendAerospaceVideoFlows(flows, flowIntent.videoFlowCount, project.topology.nodes, project.topology.links);
-
-    if (flows.length === project.flows.length) {
-      return project;
-    }
-
-    return {
-      ...project,
-      updatedAt: new Date().toISOString(),
-      flows: renumberFlows(flows),
-    };
-  }
 
   if (flowIntent.controlFlow && !flows.some((flow) => flow.id === "flow-control-1")) {
     flows.unshift(createControlFlow(project.topology.nodes, project.topology.links, intent, scenarioConfig.flowTemplates[0]));
@@ -554,47 +332,6 @@ function hasDistributedEndSystemTopologyRequest(text: string): boolean {
   return /(\d+)\s*(?:个|台)?\s*(?:网卡|端系统|终端|端(?!口)|host|end)s?\s*(?:，|,|\s)*(?:平均)?(?:分配|分到|分布|接入|连接)\s*(?:到|至)?\s*(\d+)?\s*(?:个|台)?\s*(?:系统\s*)?(?:交换机|switch)/i.test(text);
 }
 
-function matchAerospaceNetworkcardCount(text: string, fallbackCount?: number): number | undefined {
-  const values: number[] = [];
-  const endpointPattern = "(?:网卡|端系统|终端|端(?!口))";
-  const totalPatterns = [
-    new RegExp(`(?:从|由)?\\s*[一二两三四五六七八九十\\d]+\\s*(?:个|块|张|台)?\\s*${endpointPattern}\\s*(?:改成|改为|变为|调整为|设为|改至|到)\\s*([一二两三四五六七八九十\\d]+)\\s*(?:个|块|张|台)?\\s*${endpointPattern}?`, "gi"),
-    new RegExp(`([一二两三四五六七八九十\\d]+)\\s*(?:个|块|张|台)?\\s*${endpointPattern}`, "gi"),
-  ];
-
-  for (const pattern of totalPatterns) {
-    for (const match of text.matchAll(pattern)) {
-      values.push(parseChineseNumber(match[1]));
-    }
-  }
-
-  for (const match of text.matchAll(/(?:网卡|端系统|终端|端(?!口))\s*([一二两三四五六七八九十\d]+)/gi)) {
-    values.push(parseChineseNumber(match[1]));
-  }
-
-  for (const match of text.matchAll(/(?:网卡|端系统|终端|端(?!口))\s*((?:[一二两三四五六七八九十\d]+\s*(?:、|,|，|和|及|与)?\s*)+)/gi)) {
-    for (const value of match[1].matchAll(/[一二两三四五六七八九十\d]+/g)) {
-      values.push(parseChineseNumber(value[0]));
-    }
-  }
-
-  const addMatch = text.match(/(?:再加|再添加|新增|添加|加|增加)\s*([一二两三四五六七八九十\d]+)\s*(?:个|块|张|台)?\s*(?:网卡|端系统|终端|端(?!口))/i);
-  const addedCount = parseChineseNumber(addMatch?.[1]);
-  if (addMatch && fallbackCount !== undefined && Number.isFinite(fallbackCount)) {
-    values.push(fallbackCount + addedCount);
-  }
-
-  const validValues = values.filter((value) => Number.isFinite(value) && value > 0);
-  return validValues.length > 0 ? Math.max(...validValues) : undefined;
-}
-
-function hasAerospaceTemplateEditRequest(text: string): boolean {
-  return /(?:网卡|端系统|终端|端(?!口))\s*[一二两三四五六七八九十\d]+/i.test(text)
-    || /(?:再加|再添加|新增|添加|加|增加|删除|移除|减少|改成|改为|调整|变为).*?(?:网卡|端系统|终端|端(?!口))/i.test(text)
-    || /(?:网卡|端系统|终端|端(?!口)).*?(?:再加|再添加|新增|添加|加|增加|删除|移除|减少|改成|改为|调整|变为)/i.test(text)
-    || /双冗余|双平面|系统交换机|双归属|双以太网/i.test(text);
-}
-
 function matchSwitchInterconnect(text: string): TopologyIntent["switchInterconnect"] | undefined {
   if (/环形|环网|ring/i.test(text) || /闭环/.test(text) && !/闭环\s*(?:控制)?流/.test(text)) {
     return "ring";
@@ -608,16 +345,6 @@ function matchSwitchInterconnect(text: string): TopologyIntent["switchInterconne
 }
 
 function inferIntentFromProject(project: CanonicalTsnProjectV0): TopologyIntent {
-  if (isAerospaceRedundantProject(project)) {
-    return {
-      switchCount: 4,
-      endSystemsPerSwitch: 0,
-      switchInterconnect: "line",
-      topologyTemplate: "aerospace-redundant",
-      endSystemCount: project.topology.nodes.filter((node) => node.type === "endSystem").length,
-    };
-  }
-
   const switchCount = project.topology.nodes.filter((node) => node.type === "switch").length;
   const endSystemCount = project.topology.nodes.filter((node) => node.type === "endSystem").length;
   const switchLinkCount = project.topology.links.filter((link) =>
@@ -631,69 +358,45 @@ function inferIntentFromProject(project: CanonicalTsnProjectV0): TopologyIntent 
   };
 }
 
-function isAerospaceRedundantTopologyRequest(text: string, scenarioConfigId?: string): boolean {
-  const hasAerospaceSignal = /箭载|航天|火箭|飞控|箭机|级间/i.test(text) || scenarioConfigId === "aerospace-onboard";
-  const hasRedundantSignal = /双冗余|双平面|系统交换机|双归属|双以太网|(?:网卡|端系统|终端|端(?!口))\s*[一二两三四五六七八九十\d]+/i.test(text);
-  const hasDiagramScale = /4\s*(?:个|台)?\s*(?:系统\s*)?交换机/i.test(text)
-    && /7\s*(?:个|块|张|台)?\s*(?:网卡|端系统|终端|端(?!口))/i.test(text);
-  const hasNamedDiagramNodes = /(?:网卡|端系统|终端|端(?!口))\s*1/.test(text)
-    && /(?:网卡|端系统|终端|端(?!口))\s*7/.test(text)
-    && /交换机1/.test(text)
-    && /交换机4/.test(text);
-
-  return hasNamedDiagramNodes || hasDiagramScale && hasRedundantSignal || hasAerospaceSignal && hasRedundantSignal;
+function isDualPlaneTopologyRequest(text: string, scenarioConfigId?: string): boolean {
+  return scenarioConfigId === "aerospace-onboard"
+    || /双冗余|双平面|双归属|双以太网|A\/B|AB\s*平面/i.test(text);
 }
 
-function isAerospaceRedundantProject(project: CanonicalTsnProjectV0): boolean {
-  const nodeIds = new Set(project.topology.nodes.map((node) => node.id));
+function createProjectFromTopologyDomain(input: {
+  templateId: TopologyInitIntent["templateId"];
+  params: NonNullable<TopologyInitIntent["params"]>;
+  projectName: string;
+  projectId: string;
+  timestamp: string;
+  defaultDataRateMbps: number;
+}): CanonicalTsnProjectV0 {
+  const initialized = initializeTopology({
+    templateId: input.templateId,
+    params: input.params,
+    responseMode: "full",
+  });
 
-  return project.id === "project-aerospace-redundant"
-    || ["nic1", "nic2", "nic3", "nic4", "nic5", "nic6", "nic7", "sw1", "sw2", "sw3", "sw4"]
-      .every((nodeId) => nodeIds.has(nodeId));
-}
+  if (!initialized.ok || !initialized.full) {
+    throw new Error(`Topology initialization failed: ${initialized.ok ? "missing full payload" : initialized.errors.map((error) => error.message).join("; ")}`);
+  }
 
-function createPorts(count: number): TsnPort[] {
-  return Array.from({ length: count }, (_, index) => ({
-    id: `p${index + 1}`,
-    name: `eth${index}`,
-    index,
-  }));
-}
-
-function leftAerospaceY(ordinal: number): number {
-  return [40, 160, 300][ordinal - 1] ?? 40 + (ordinal - 1) * 120;
-}
-
-function middleAerospaceY(offset: number): number {
-  return [80, 210][offset] ?? 80 + offset * 130;
-}
-
-function rightAerospaceY(offset: number): number {
-  return [40, 195][offset] ?? 40 + offset * 95;
-}
-
-function createLink(input: {
-  numericId: number;
-  sourceNodeId: string;
-  sourcePortId: string;
-  targetNodeId: string;
-  targetPortId: string;
-  dataRateMbps: number;
-}): TsnLink {
-  return {
-    id: `link-${input.numericId}`,
-    numericId: input.numericId,
-    source: {
-      nodeId: input.sourceNodeId,
-      portId: input.sourcePortId,
+  const bridged = intermediateToCanonicalProject({
+    topology: initialized.full.topology,
+    options: {
+      projectId: input.projectId,
+      projectName: input.projectName,
+      timestamp: input.timestamp,
+      defaultDataRateMbps: input.defaultDataRateMbps,
+      responseMode: "full",
     },
-    target: {
-      nodeId: input.targetNodeId,
-      portId: input.targetPortId,
-    },
-    medium: "ethernet",
-    dataRateMbps: input.dataRateMbps,
-  };
+  });
+
+  if (!bridged.ok || !bridged.full) {
+    throw new Error(`Topology bridge failed: ${bridged.ok ? "missing full payload" : bridged.errors.map((error) => error.message).join("; ")}`);
+  }
+
+  return bridged.full.project;
 }
 
 function createControlFlow(
@@ -704,11 +407,7 @@ function createControlFlow(
 ): TsnFlow {
   const sourceNode = findNode(nodes, "es1-1");
   const destinationNode = findNode(nodes, `es${intent.switchCount}-1`);
-  const routeNodeIds = [
-    sourceNode.id,
-    ...Array.from({ length: intent.switchCount }, (_, index) => `sw${index + 1}`),
-    destinationNode.id,
-  ];
+  const routeNodeIds = findRouteNodeIds(sourceNode.id, destinationNode.id, links);
   const routeLinkIds = createRouteLinkIds(routeNodeIds, links);
 
   return {
@@ -779,11 +478,7 @@ function createVideoFlow(nodes: TsnNode[], links: TsnLink[], intent: TopologyInt
   const destinationNodeId = `es${intent.switchCount}-${hostIndex}`;
   const sourceNode = findNode(nodes, sourceNodeId);
   const destinationNode = findNode(nodes, destinationNodeId);
-  const routeNodeIds = [
-    sourceNode.id,
-    ...Array.from({ length: intent.switchCount }, (_, index) => `sw${index + 1}`),
-    destinationNode.id,
-  ];
+  const routeNodeIds = findRouteNodeIds(sourceNode.id, destinationNode.id, links);
   const routeLinkIds = createRouteLinkIds(routeNodeIds, links);
 
   return {
@@ -822,11 +517,7 @@ function createBestEffortFlow(nodes: TsnNode[], links: TsnLink[], intent: Topolo
   const destinationNodeId = `es${intent.switchCount}-${hostIndex}`;
   const sourceNode = findNode(nodes, sourceNodeId);
   const destinationNode = findNode(nodes, destinationNodeId);
-  const routeNodeIds = [
-    sourceNode.id,
-    ...Array.from({ length: intent.switchCount }, (_, index) => `sw${index + 1}`),
-    destinationNode.id,
-  ];
+  const routeNodeIds = findRouteNodeIds(sourceNode.id, destinationNode.id, links);
   const routeLinkIds = createRouteLinkIds(routeNodeIds, links);
 
   return {
@@ -859,137 +550,6 @@ function createBestEffortFlow(nodes: TsnNode[], links: TsnLink[], intent: Topolo
   };
 }
 
-function createAerospaceRedundantFlows(
-  nodes: TsnNode[],
-  links: TsnLink[],
-  template: ScenarioFlowTemplate,
-): TsnFlow[] {
-  return [
-    createAerospaceControlFlow(nodes, links, template),
-    createAerospaceHeartbeatFlow(nodes, links),
-  ];
-}
-
-function createAerospaceControlFlow(
-  nodes: TsnNode[],
-  links: TsnLink[],
-  template: ScenarioFlowTemplate,
-): TsnFlow {
-  const sourceNode = findNode(nodes, "nic1");
-  const destinationNode = findNode(nodes, "nic7");
-  const routeNodeIds = ["nic1", "sw1", "sw3", "nic7"];
-  const routeLinkIds = createRouteLinkIds(routeNodeIds, links);
-
-  return {
-    id: "flow-control-1",
-    numericId: 1,
-    name: template.name,
-    source: {
-      nodeId: sourceNode.id,
-      macAddress: sourceNode.macAddress ?? createMacAddress(1),
-      ipAddress: sourceNode.ipAddress ?? "10.10.0.1",
-      udpPort: 25563,
-    },
-    destination: {
-      nodeId: destinationNode.id,
-      macAddress: destinationNode.macAddress ?? createMacAddress(7),
-      ipAddress: destinationNode.ipAddress ?? "10.10.0.7",
-      udpPort: 26028,
-    },
-    periodUs: template.periodUs,
-    frameSizeBytes: template.frameSizeBytes,
-    pcp: template.pcp,
-    maxFramesPerInterval: 1,
-    earliestTransmitOffsetUs: 0,
-    latestTransmitOffsetUs: 50,
-    jitterRequirementUs: template.jitterRequirementUs,
-    latencyRequirementUs: template.latencyRequirementUs,
-    routeLinkIds,
-    routeNodeIds,
-    flowType: template.flowType,
-  };
-}
-
-function createAerospaceHeartbeatFlow(nodes: TsnNode[], links: TsnLink[]): TsnFlow {
-  const sourceNode = findNode(nodes, "nic2");
-  const destinationNode = findNode(nodes, "nic6");
-  const routeNodeIds = ["nic2", "sw2", "sw4", "nic6"];
-  const routeLinkIds = createRouteLinkIds(routeNodeIds, links);
-
-  return {
-    id: "flow-heartbeat-1",
-    numericId: 2,
-    name: "心跳消息-1",
-    source: {
-      nodeId: sourceNode.id,
-      macAddress: sourceNode.macAddress ?? createMacAddress(2),
-      ipAddress: sourceNode.ipAddress ?? "10.10.0.2",
-      udpPort: 25565,
-    },
-    destination: {
-      nodeId: destinationNode.id,
-      macAddress: destinationNode.macAddress ?? createMacAddress(6),
-      ipAddress: destinationNode.ipAddress ?? "10.10.0.6",
-      udpPort: 26030,
-    },
-    periodUs: 20_000,
-    frameSizeBytes: 10,
-    pcp: 6,
-    maxFramesPerInterval: 1,
-    earliestTransmitOffsetUs: 0,
-    latestTransmitOffsetUs: 100,
-    jitterRequirementUs: 0.5,
-    latencyRequirementUs: 1_000,
-    routeLinkIds,
-    routeNodeIds,
-    flowType: "ST",
-  };
-}
-
-function appendAerospaceVideoFlows(flows: TsnFlow[], requestedCount: number, nodes: TsnNode[], links: TsnLink[]): void {
-  const existingCount = countFlowsByPrefix(flows, "flow-video-");
-
-  for (let index = 1; index <= requestedCount; index += 1) {
-    flows.push(createAerospaceVideoFlow(nodes, links, existingCount + index));
-  }
-}
-
-function createAerospaceVideoFlow(nodes: TsnNode[], links: TsnLink[], ordinal = 1): TsnFlow {
-  const sourceNode = findNode(nodes, "nic5");
-  const destinationNode = findNode(nodes, "nic6");
-  const routeNodeIds = ["nic5", "sw2", "sw4", "nic6"];
-  const routeLinkIds = createRouteLinkIds(routeNodeIds, links);
-
-  return {
-    id: `flow-video-${ordinal}`,
-    numericId: 3,
-    name: `视频流-${ordinal}`,
-    source: {
-      nodeId: sourceNode.id,
-      macAddress: sourceNode.macAddress ?? createMacAddress(5),
-      ipAddress: sourceNode.ipAddress ?? "10.10.0.5",
-      udpPort: 25563 + ordinal,
-    },
-    destination: {
-      nodeId: destinationNode.id,
-      macAddress: destinationNode.macAddress ?? createMacAddress(6),
-      ipAddress: destinationNode.ipAddress ?? "10.10.0.6",
-      udpPort: 26028 + ordinal,
-    },
-    periodUs: 33_333,
-    frameSizeBytes: 1_500,
-    pcp: 4,
-    maxFramesPerInterval: 1,
-    earliestTransmitOffsetUs: 0,
-    latestTransmitOffsetUs: 1_000,
-    jitterRequirementUs: 1_000,
-    latencyRequirementUs: 5_000,
-    routeLinkIds,
-    routeNodeIds,
-    flowType: "ST",
-  };
-}
-
 function createRouteLinkIds(routeNodeIds: string[], links: TsnLink[]): string[] {
   const routeLinkIds: string[] = [];
 
@@ -1010,6 +570,52 @@ function createRouteLinkIds(routeNodeIds: string[], links: TsnLink[]): string[] 
   }
 
   return routeLinkIds;
+}
+
+function findRouteNodeIds(sourceNodeId: string, destinationNodeId: string, links: TsnLink[]): string[] {
+  const adjacency = new Map<string, string[]>();
+  for (const link of links) {
+    const sourceNeighbors = adjacency.get(link.source.nodeId) ?? [];
+    sourceNeighbors.push(link.target.nodeId);
+    adjacency.set(link.source.nodeId, sourceNeighbors);
+
+    const targetNeighbors = adjacency.get(link.target.nodeId) ?? [];
+    targetNeighbors.push(link.source.nodeId);
+    adjacency.set(link.target.nodeId, targetNeighbors);
+  }
+
+  const queue: string[] = [sourceNodeId];
+  const previous = new Map<string, string | undefined>([[sourceNodeId, undefined]]);
+
+  for (let index = 0; index < queue.length; index += 1) {
+    const current = queue[index];
+    if (current === destinationNodeId) {
+      break;
+    }
+
+    const neighbors = [...(adjacency.get(current) ?? [])].sort();
+    for (const neighbor of neighbors) {
+      if (previous.has(neighbor)) {
+        continue;
+      }
+
+      previous.set(neighbor, current);
+      queue.push(neighbor);
+    }
+  }
+
+  if (!previous.has(destinationNodeId)) {
+    throw new Error(`No route exists between ${sourceNodeId} and ${destinationNodeId}.`);
+  }
+
+  const route: string[] = [];
+  let current: string | undefined = destinationNodeId;
+  while (current) {
+    route.unshift(current);
+    current = previous.get(current);
+  }
+
+  return route;
 }
 
 function findNode(nodes: TsnNode[], nodeId: string): TsnNode {

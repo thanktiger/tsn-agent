@@ -60,15 +60,10 @@ runChecked('validate-mac-forwarding-table.js', [
   path.join(targetDir, 'mac-forwarding-table.json'),
 ]);
 
-const html = runChecked('render-mac-forwarding-html.js', [
-  path.join(targetDir, 'mac-forwarding-table.json'),
-]);
-fs.writeFileSync(path.join(targetDir, 'mac-forwarding-table.html'), html, 'utf8');
-
 process.stdout.write(JSON.stringify({
   ok: true,
   target_dir: targetDir,
-  files: [...Object.keys(files), 'mac-forwarding-table.html'],
+  files: Object.keys(files),
   display_names: built.display_names ?? [],
 }, null, 2));
 process.stdout.write('\n');

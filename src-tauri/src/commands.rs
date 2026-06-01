@@ -728,12 +728,14 @@ mod tests {
         assert!(tauri_config.contains(
             "../.claude/skills/tsn-topology/tools/validate-mac-forwarding-table.js"
         ));
-        assert!(tauri_config
-            .contains("../.claude/skills/tsn-topology/tools/render-mac-forwarding-html.js"));
+        assert!(!tauri_config.contains(
+            "../.claude/skills/tsn-topology/tools/render-mac-forwarding-html.js"
+        ));
         assert!(
             tauri_config.contains("../.claude/skills/tsn-topology/tools/run-topology-skill.js")
         );
         assert!(tauri_config.contains("../.claude/skills/tsn-flow-planning/SKILL.md"));
+        assert!(!tauri_config.contains("../src-node/dist/tsn-topology-server.mjs"));
     }
 
     #[test]

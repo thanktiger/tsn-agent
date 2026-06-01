@@ -3,6 +3,19 @@ import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { tmpdir } from "node:os";
+import { createTopologyWorkflowStageResult } from "../src/agent/topology-workflow-stage-result";
+
+const TOPOLOGY_MCP_SERVER_NAME = "tsn_topology";
+export const TOPOLOGY_MCP_ALLOWED_TOOLS = [
+  "mcp__tsn_topology__topology_describe_templates",
+  "mcp__tsn_topology__topology_initialize",
+  "mcp__tsn_topology__topology_inspect",
+  "mcp__tsn_topology__topology_describe_artifacts",
+  "mcp__tsn_topology__topology_validate_intermediate",
+  "mcp__tsn_topology__topology_build_artifacts",
+  "mcp__tsn_topology__topology_validate_artifacts",
+  "mcp__tsn_topology__topology_apply_operations",
+];
 
 export const responseSchema = {
   type: "object",
@@ -26,9 +39,22 @@ export async function runClaude(userPrompt, options = {}, queryFn = query) {
   const operationTraceLines = [];
   const operationTraceKeys = new Set();
   const toolUseNamesById = new Map();
+  const capturedStageResultKeys = new Set();
+  const capturedStageResults = [];
   const stageResultPath = resolvedOptions.stageResultPath ?? await createStageResultPath();
   const skillOutputDir = resolvedOptions.skillOutputDir ?? await createSkillOutputDir(stageResultPath);
   const stageRunnerPath = resolvedOptions.stageRunnerPath ?? resolveStageRunnerPath(cwd);
+  const topologyMcpServerPath = resolvedOptions.topologyMcpServerPath ?? resolveTopologyMcpServerPath(cwd);
+  const topologyMcpConfig = topologyMcpServerPath && existsSync(topologyMcpServerPath)
+    ? {
+        [TOPOLOGY_MCP_SERVER_NAME]: {
+          type: "stdio",
+          command: process.execPath,
+          args: [topologyMcpServerPath],
+          alwaysLoad: true,
+        },
+      }
+    : undefined;
   const stageRunnerInputPath = await writeStageRunnerInputFile(stageResultPath, resolvedOptions.stageRunnerInput);
   const finalPrompt = buildPrompt(
     userPrompt,
@@ -44,9 +70,10 @@ export async function runClaude(userPrompt, options = {}, queryFn = query) {
     settingSources: ["user", "project"],
     permissionMode: "dontAsk",
     tools: { type: "preset", preset: "claude_code" },
-    allowedTools: ["Skill", "Read", "Bash", "Edit", "Write"],
+    allowedTools: buildAllowedToolsForStage(resolvedOptions.stageRunnerInput, Boolean(topologyMcpConfig)),
     disallowedTools: [],
     skills: ["tsn-topology", "tsn-flow-planning"],
+    ...(topologyMcpConfig ? { mcpServers: topologyMcpConfig } : {}),
     env: {
       ...process.env,
       TSN_AGENT_STAGE_RESULT_PATH: stageResultPath,
@@ -54,13 +81,13 @@ export async function runClaude(userPrompt, options = {}, queryFn = query) {
       TSN_AGENT_STAGE_RUNNER_PATH: stageRunnerPath,
       ...(stageRunnerInputPath ? { TSN_AGENT_STAGE_RUNNER_INPUT_PATH: stageRunnerInputPath } : {}),
     },
-    maxTurns: resolvedOptions.maxTurns ?? 8,
+    maxTurns: resolvedOptions.maxTurns ?? 20,
     includePartialMessages: true,
     ...(typeof resolvedOptions.resumeSessionId === "string" && resolvedOptions.resumeSessionId.length > 0
       ? { resume: resolvedOptions.resumeSessionId }
       : {}),
     systemPrompt:
-      "你是 TSN Agent 的规划助手。你面向懂一点 TSN 但不了解具体参数的新手用户。回复必须是简体中文，保持工程化、具体、可执行。可以使用本轮启用的工具和 TSN 项目 skill，但工程状态只接受结构化校验结果。除 TSN_AGENT_SKILL_OUTPUT_DIR 和 TSN_AGENT_STAGE_RESULT_PATH 指向的位置外，不要写入仓库文件。固定阶段顺序是拓扑、时间同步、流量规划、模拟仿真；拓扑确认后必须进入时间同步。当前应用没有接入 OMNeT++/远程仿真 runner，不能声称已启动仿真、SSH 执行或稍后通知结果。",
+      buildSystemPromptForStage(resolvedOptions.stageRunnerInput),
   };
   const auditLog = await createAgentRunAuditLog({
     auditDir: resolvedOptions.auditDir,
@@ -94,6 +121,7 @@ export async function runClaude(userPrompt, options = {}, queryFn = query) {
       for (const trace of extractOperationTraceEvents(message, toolUseNamesById)) {
         emitOperationTrace(trace);
       }
+      captureTopologyStageResults(message);
 
       if (emittedText.length === 0) {
         for (const text of extractAssistantTextBlocks(message)) {
@@ -108,6 +136,7 @@ export async function runClaude(userPrompt, options = {}, queryFn = query) {
       for (const trace of extractOperationTraceEvents(message, toolUseNamesById)) {
         emitOperationTrace(trace);
       }
+      captureTopologyStageResults(message);
 
       for (const text of extractStreamEventText(message)) {
         emitAssistantChunk(text);
@@ -118,6 +147,7 @@ export async function runClaude(userPrompt, options = {}, queryFn = query) {
       for (const trace of extractOperationTraceEvents(message, toolUseNamesById)) {
         emitOperationTrace(trace);
       }
+      captureTopologyStageResults(message);
     }
 
     if (message.type === "result") {
@@ -135,6 +165,20 @@ export async function runClaude(userPrompt, options = {}, queryFn = query) {
       recordAuditPromptResult(auditLog, currentPromptRunId, {
         sessionId,
         resultText,
+      });
+    }
+  };
+  const captureTopologyStageResults = (message) => {
+    for (const extracted of extractTopologyWorkflowStageResults(message, toolUseNamesById, resolvedOptions.stageRunnerInput)) {
+      if (capturedStageResultKeys.has(extracted.key)) {
+        continue;
+      }
+
+      capturedStageResultKeys.add(extracted.key);
+      capturedStageResults.push(extracted.result);
+      emitOperationTrace({
+        key: `workflow-stage-result:${extracted.key}`,
+        text: `[阶段结果] 拓扑工具结果已生成：${summarizeStageResultForTrace(extracted.result)}`,
       });
     }
   };
@@ -166,7 +210,7 @@ export async function runClaude(userPrompt, options = {}, queryFn = query) {
       handleSdkMessage(message);
     }
   } catch (error) {
-    const stageResults = await readStageResults(stageResultPath, emitOperationTrace);
+    const stageResults = mergeStageResults(capturedStageResults, await readStageResults(stageResultPath, emitOperationTrace));
 
     if (hasRecoverableStageResult(stageResults)) {
       const recoveredText = prependOperationTrace(
@@ -202,7 +246,7 @@ export async function runClaude(userPrompt, options = {}, queryFn = query) {
     assistantText = emittedText.join("");
   }
 
-  const stageResults = await readStageResults(stageResultPath, emitOperationTrace);
+  const stageResults = mergeStageResults(capturedStageResults, await readStageResults(stageResultPath, emitOperationTrace));
   const stageResultRetry = getStageResultRetry(stageResults, resolvedOptions.stageRunnerInput);
   if (stageResultRetry) {
     const retryPrompt = buildStageResultRetryPrompt({
@@ -238,7 +282,7 @@ export async function runClaude(userPrompt, options = {}, queryFn = query) {
         handleSdkMessage(message);
       }
     } catch (error) {
-      const recoveredStageResults = await readStageResults(stageResultPath, emitOperationTrace);
+      const recoveredStageResults = mergeStageResults(capturedStageResults, await readStageResults(stageResultPath, emitOperationTrace));
       if (hasRecoverableStageResult(recoveredStageResults)) {
         const recoveredText = prependOperationTrace(
           buildRecoveredStageResultAssistantText(recoveredStageResults),
@@ -270,7 +314,7 @@ export async function runClaude(userPrompt, options = {}, queryFn = query) {
     }
   }
 
-  const finalStageResults = await readStageResults(stageResultPath, emitOperationTrace);
+  const finalStageResults = mergeStageResults(capturedStageResults, await readStageResults(stageResultPath, emitOperationTrace));
 
   if (!assistantText.trim() && hasRecoverableStageResult(finalStageResults)) {
     assistantText = buildRecoveredStageResultAssistantText(finalStageResults);
@@ -307,6 +351,10 @@ function getStageResultRetry(stageResults, stageRunnerInput) {
     return undefined;
   }
 
+  if (stageRunnerInput.stage === "topology") {
+    return undefined;
+  }
+
   if (stageResults.length === 0) {
     return { reason: "missing_stage_result", validationErrors: [] };
   }
@@ -328,6 +376,33 @@ function getStageResultRetry(stageResults, stageRunnerInput) {
   return { reason: "invalid_stage_result", validationErrors };
 }
 
+function buildAllowedToolsForStage(stageRunnerInput, hasTopologyMcpConfig) {
+  if (isRecord(stageRunnerInput) && stageRunnerInput.stage === "topology") {
+    return [
+      "Skill",
+      "Read",
+      ...(hasTopologyMcpConfig ? TOPOLOGY_MCP_ALLOWED_TOOLS : []),
+    ];
+  }
+
+  return [
+    "Skill",
+    "Read",
+    "Bash",
+    "Edit",
+    "Write",
+    ...(hasTopologyMcpConfig ? TOPOLOGY_MCP_ALLOWED_TOOLS : []),
+  ];
+}
+
+function buildSystemPromptForStage(stageRunnerInput) {
+  if (isRecord(stageRunnerInput) && stageRunnerInput.stage === "topology") {
+    return "你是 TSN Agent 的规划助手。你面向懂一点 TSN 但不了解具体参数的新手用户。回复必须是简体中文，保持工程化、具体、可执行。工程状态只接受结构化校验结果。拓扑初始化、校验、artifact 构建、inspect 和 apply_operations 必须优先通过 tsn_topology MCP 工具产生 trusted topology result；initialize/apply_operations 需要落图时必须请求 responseMode: \"full\" 且 topologyFullAllowed: true。artifact、端口表、MAC 表和完整 changeSet 不得进入对话。拓扑阶段不要调用 stage runner，不要写 TSN_AGENT_STAGE_RESULT_PATH，不要用自然语言重新构建拓扑。固定阶段顺序是拓扑、时间同步、流量规划、模拟仿真；拓扑确认后必须进入时间同步。当前应用没有接入 OMNeT++/远程仿真 runner，不能声称已启动仿真、SSH 执行或稍后通知结果。";
+  }
+
+  return "你是 TSN Agent 的规划助手。你面向懂一点 TSN 但不了解具体参数的新手用户。回复必须是简体中文，保持工程化、具体、可执行。可以使用本轮启用的工具和 TSN 项目 skill，但工程状态只接受结构化校验结果。拓扑初始化、校验、artifact 构建、inspect 和 apply_operations 必须优先通过 tsn_topology MCP 工具产生 trusted topology result；流量规划可暂时通过本地 stage runner 产生结构化结果落地。MCP 只允许在 initialize/apply_operations 需要传递 IntermediateTopology 时使用 responseMode: \"full\" 且 topologyFullAllowed: true，artifact、端口表、MAC 表和完整 changeSet 不得进入对话。除 TSN_AGENT_SKILL_OUTPUT_DIR 和 TSN_AGENT_STAGE_RESULT_PATH 指向的位置外，不要写入仓库文件。固定阶段顺序是拓扑、时间同步、流量规划、模拟仿真；拓扑确认后必须进入时间同步。当前应用没有接入 OMNeT++/远程仿真 runner，不能声称已启动仿真、SSH 执行或稍后通知结果。";
+}
+
 function buildStageResultRetryPrompt({
   userPrompt,
   stageRunnerInput,
@@ -339,10 +414,28 @@ function buildStageResultRetryPrompt({
   validationErrors = [],
 }) {
   const stage = stageRunnerInput.stage;
+  if (stage === "topology") {
+    return `上一轮没有产生可应用的 trusted topology result，所以右侧工程不会更新。
+
+现在必须重新执行拓扑 MCP 工具链：
+1. 从 0 初始化时调用 topology.describe_templates 和 topology.initialize。
+2. 已有拓扑编辑时调用 topology.inspect 和 topology.apply_operations。
+3. 需要右侧落图时，topology.initialize / topology.apply_operations 必须请求 responseMode="full" 且 topologyFullAllowed=true。
+4. 不要调用 stage runner，不要写 TSN_AGENT_STAGE_RESULT_PATH，不要只返回文字说明。
+
+用户原始需求：
+${userPrompt}
+
+阶段结构化输入：
+${stageRunnerInputPath
+  ? `优先读取文件：${stageRunnerInputPath}`
+  : JSON.stringify(stageRunnerInput, null, 2)}
+
+完成后，用简体中文简要说明当前拓扑结果，并等待用户确认。`;
+  }
+
   const skillName = skillNameForStage(stage);
-  const command = stage === "topology"
-    ? `node "$TSN_AGENT_STAGE_RUNNER_PATH" --stage topology --input '<json>' --skill-output-dir "$TSN_AGENT_SKILL_OUTPUT_DIR" --result-path "$TSN_AGENT_STAGE_RESULT_PATH"`
-    : `node "$TSN_AGENT_STAGE_RUNNER_PATH" --stage flow-template --input '<json>' --result-path "$TSN_AGENT_STAGE_RESULT_PATH"`;
+  const command = `node "$TSN_AGENT_STAGE_RUNNER_PATH" --stage flow-template --input '<json>' --result-path "$TSN_AGENT_STAGE_RESULT_PATH"`;
   const reasonText = reason === "invalid_stage_result"
     ? `上一轮已经写入 stage result，但校验未通过，所以右侧工程不会更新。\n\n校验错误：\n${validationErrors.length > 0 ? validationErrors.map((error) => `- ${error}`).join("\n") : "- 未提供具体错误"}`
     : "上一轮只返回了文字说明，但 TSN Agent 没有收到可应用的结构化 stage result，所以右侧工程不会更新。";
@@ -394,10 +487,42 @@ export function buildPrompt(
     ? `\n会话上下文：\n${conversationContext}\n`
     : "";
   const stageRunnerInputBlock = stageRunnerInput
-    ? `\nstage runner 结构化输入：\n${stageRunnerInputPath
+    ? `\n阶段结构化输入：\n${stageRunnerInputPath
       ? `- 已写入文件：${stageRunnerInputPath}\n- 调用 runner 时先读取该文件的 JSON 文本，再把 JSON 文本作为 --input 参数值。`
       : JSON.stringify(stageRunnerInput, null, 2)}\n`
     : "";
+  const isTopologyStage = isRecord(stageRunnerInput) && stageRunnerInput.stage === "topology";
+  const structuredResultInstructions = isTopologyStage
+    ? `结构化结果回传：
+- 当前阶段如果需要生成或修改拓扑，必须优先使用 tsn_topology MCP 工具。
+- 从 0 初始化拓扑时，先通过 topology.describe_templates 理解模板，再调用 topology.initialize；已有拓扑编辑时，调用 topology.inspect / topology.apply_operations。
+- 需要右侧落图时，topology.initialize / topology.apply_operations 必须请求 responseMode="full" 且 topologyFullAllowed=true，让 worker 捕获 full IntermediateTopology 并合成 WorkflowStageResult。
+- 不要调用 stage runner，不要写 TSN_AGENT_STAGE_RESULT_PATH，不要让模型复述完整拓扑 JSON，不要从 summary 文本反解析拓扑。
+- TSN_AGENT_SKILL_OUTPUT_DIR=${skillOutputDir}
+- 调用 tsn-topology skill 时，只能作为 MCP 使用指引；不要让 skill 维护独立 builder 或写 stage-result.json。`
+    : `结构化结果回传：
+- 当前阶段如果需要生成或修改拓扑，必须使用 tsn-topology skill。
+- 如果可用，拓扑模板目录、初始化、校验、artifact 构建、inspect 和 apply_operations 必须使用 tsn_topology MCP 工具；只有 initialize/apply_operations 为了把 IntermediateTopology 继续传给后续工具时，才允许请求 responseMode="full" 且 topologyFullAllowed=true；不要请求 full artifact、完整端口表、MAC 表或完整 changeSet。
+- 当前阶段如果需要生成或修改流量规划，必须使用 tsn-flow-planning skill。
+- 结构化结果必须由项目 runner 写入 TSN_AGENT_STAGE_RESULT_PATH。
+- TSN_AGENT_STAGE_RESULT_PATH=${stageResultPath}
+- TSN_AGENT_SKILL_OUTPUT_DIR=${skillOutputDir}
+- TSN_AGENT_STAGE_RUNNER_PATH=${stageRunnerPath}
+- TSN_AGENT_STAGE_RUNNER_INPUT_PATH=${stageRunnerInputPath ?? "未提供"}
+- 如果提供了 TSN_AGENT_STAGE_RUNNER_INPUT_PATH，调用 runner 时必须先读取该文件的 JSON 文本，再把 JSON 文本作为 --input 参数值；只可根据用户本轮需求补充缺失字段。`;
+  const executionInstructions = isTopologyStage
+    ? `执行顺序要求：
+1. 先完成 topology MCP 工具调用，确保 worker 能捕获 trusted topology result。
+2. 再生成左侧对话框要展示给用户的中文内容，不要输出 JSON。`
+    : `执行顺序要求：
+1. 先完成当前阶段需要的 skill 调用和 stage runner 调用，确保 TSN_AGENT_STAGE_RESULT_PATH 已写入结构化 JSON。
+2. 再生成左侧对话框要展示给用户的中文内容，不要输出 JSON。`;
+  const failureInstruction = isTopologyStage
+    ? "8. 如果当前阶段是拓扑，不能只返回文字说明；没有 trusted topology result 就不要声称阶段已生成。"
+    : "8. 如果当前阶段是流量规划，不能只返回文字说明；没有写入 TSN_AGENT_STAGE_RESULT_PATH 就不要声称阶段已生成。";
+  const fileInstruction = isTopologyStage
+    ? "5. 不要修改仓库文件；不要写 TSN_AGENT_STAGE_RESULT_PATH；不要输出 Markdown 表格。"
+    : "5. 不要修改仓库文件；如需生成拓扑中间产物，只允许写入 TSN_AGENT_SKILL_OUTPUT_DIR；结构化结果只允许写入 TSN_AGENT_STAGE_RESULT_PATH；不要输出 Markdown 表格。";
 
   return `用户正在通过 TSN Agent 桌面应用配置一个 TSN 网络。
 ${contextBlock}
@@ -406,31 +531,19 @@ ${stageRunnerInputBlock}
 用户原始需求：
 ${userPrompt}
 
-结构化结果回传：
-- 当前阶段如果需要生成或修改拓扑，必须使用 tsn-topology skill。
-- 当前阶段如果需要生成或修改流量规划，必须使用 tsn-flow-planning skill。
-- 结构化结果必须由项目 runner 写入 TSN_AGENT_STAGE_RESULT_PATH。
-- TSN_AGENT_STAGE_RESULT_PATH=${stageResultPath}
-- TSN_AGENT_SKILL_OUTPUT_DIR=${skillOutputDir}
-- TSN_AGENT_STAGE_RUNNER_PATH=${stageRunnerPath}
-- TSN_AGENT_STAGE_RUNNER_INPUT_PATH=${stageRunnerInputPath ?? "未提供"}
-- 调用 tsn-topology skill 时，把 target_dir 设置为 TSN_AGENT_SKILL_OUTPUT_DIR，并设置 overwrite=true。
-- tsn-topology skill 完成后，必须调用 runner：node "$TSN_AGENT_STAGE_RUNNER_PATH" --stage topology --input '<json>' --skill-output-dir "$TSN_AGENT_SKILL_OUTPUT_DIR" --result-path "$TSN_AGENT_STAGE_RESULT_PATH"。
-- 如果提供了 TSN_AGENT_STAGE_RUNNER_INPUT_PATH，调用 runner 时必须先读取该文件的 JSON 文本，再把 JSON 文本作为 --input 参数值；只可根据用户本轮需求补充缺失字段。
+${structuredResultInstructions}
 
-执行顺序要求：
-1. 先完成当前阶段需要的 skill 调用和 stage runner 调用，确保 TSN_AGENT_STAGE_RESULT_PATH 已写入结构化 JSON。
-2. 再生成左侧对话框要展示给用户的中文内容，不要输出 JSON。
+${executionInstructions}
 
 回复要求：
 1. 用新手能理解的语言解释你识别到了哪些拓扑规模和默认假设。
 2. 只描述当前阶段已经完成或正在等待确认的内容；不要提前宣称后续阶段的控制流、规划器输入或导出文件已经生成。
 3. 固定阶段顺序是“拓扑 -> 时间同步 -> 流量规划 -> 模拟仿真”。如果上下文显示当前阶段是时间同步，只能说明同步假设和等待确认，不能引导用户配置控制流。
 4. 当前应用没有接入 OMNeT++/远程服务器仿真 runner；遇到启动仿真、SSH、devserver 或远程运行请求时，必须说明当前不会实际执行，也不会后台通知结果。
-5. 不要修改仓库文件；如需生成拓扑中间产物，只允许写入 TSN_AGENT_SKILL_OUTPUT_DIR；结构化结果只允许写入 TSN_AGENT_STAGE_RESULT_PATH；不要输出 Markdown 表格。
+${fileInstruction}
 6. 如果需求缺少关键参数，请给出合理默认值并说明这些默认值后续可以调整。
 7. 通用分布式拓扑默认需要交换机互联：用户说“N 个交换机，每个交换机连接 M 个端系统/网卡/端”或“X 个端系统分配到 N 台交换机”时，除非用户明确说交换机相互独立、不互联或不连接，否则必须生成 N*M + (N-1) 条物理链路，其中 N-1 条是交换机线型互联链路。
-8. 如果当前阶段是拓扑或流量规划，不能只返回文字说明；没有写入 TSN_AGENT_STAGE_RESULT_PATH 就不要声称阶段已生成。`;
+${failureInstruction}`;
 }
 
 async function createStageResultPath() {
@@ -627,6 +740,17 @@ function summarizeSdkOptionsForAudit(options) {
     allowedTools: options.allowedTools,
     disallowedTools: options.disallowedTools,
     skills: options.skills,
+    mcpServers: options.mcpServers
+      ? Object.fromEntries(Object.entries(options.mcpServers).map(([name, config]) => [
+          name,
+          {
+            type: config.type,
+            command: basename(config.command ?? ""),
+            argCount: Array.isArray(config.args) ? config.args.length : 0,
+            alwaysLoad: config.alwaysLoad === true,
+          },
+        ]))
+      : undefined,
     maxTurns: options.maxTurns,
     includePartialMessages: options.includePartialMessages,
     hasResumeSession: typeof options.resume === "string" && options.resume.length > 0,
@@ -649,6 +773,8 @@ function buildAuditSummary(input) {
         .filter(isRecord)
         .map((result) => ({
           stage: result.stage,
+          schemaVersion: result.schemaVersion,
+          producer: summarizeProducerForAudit(result.producer),
           skillName: result.skillName,
           status: result.status,
           summary: typeof result.summary === "string" ? truncateForAudit(result.summary, 220) : undefined,
@@ -670,6 +796,18 @@ function buildAuditSummary(input) {
     completedAt: input.completedAt,
     error: input.error ? truncateForAudit(input.error, 220) : undefined,
   });
+}
+
+function summarizeProducerForAudit(producer) {
+  if (!isRecord(producer)) {
+    return undefined;
+  }
+
+  return {
+    type: typeof producer.type === "string" ? producer.type : undefined,
+    name: typeof producer.name === "string" ? producer.name : undefined,
+    tool: typeof producer.tool === "string" ? producer.tool : undefined,
+  };
 }
 
 function summarizePromptForAudit(prompt) {
@@ -755,6 +893,10 @@ function classifyToolTrace(text) {
     return "tool_result";
   }
 
+  if (text.startsWith("[阶段结果]")) {
+    return "stage_result";
+  }
+
   return "tool_use";
 }
 
@@ -770,6 +912,19 @@ async function readStageResults(stageResultPath, onTrace) {
         text: `[文件] 读取阶段结果 ${formatPathForDisplay(stageResultPath)}`,
       });
       for (const result of stageResults) {
+        const producer = isRecord(result) && isRecord(result.producer) ? result.producer : undefined;
+        if (producer && typeof producer.name === "string") {
+          const resultSummary = summarizeStageResultForTrace(result);
+          const producerName = typeof producer.tool === "string"
+            ? `${producer.name}:${producer.tool}`
+            : producer.name;
+          onTrace?.({
+            key: `workflow-stage-result:${isRecord(result) ? result.stage ?? "unknown" : "unknown"}:${producerName}`,
+            text: `[阶段结果] ${producerName} 结果已返回${resultSummary ? `：${resultSummary}` : ""}`,
+          });
+          continue;
+        }
+
         const skillName = isRecord(result) && typeof result.skillName === "string"
           ? result.skillName
           : skillNameForStage(isRecord(result) && typeof result.stage === "string" ? result.stage : undefined);
@@ -787,6 +942,29 @@ async function readStageResults(stageResultPath, onTrace) {
   } catch {
     return [];
   }
+}
+
+function mergeStageResults(...groups) {
+  const merged = [];
+  const seen = new Set();
+
+  for (const group of groups) {
+    if (!Array.isArray(group)) {
+      continue;
+    }
+
+    for (const result of group) {
+      const key = stableStringify(result);
+      if (seen.has(key)) {
+        continue;
+      }
+
+      seen.add(key);
+      merged.push(result);
+    }
+  }
+
+  return merged;
 }
 
 function summarizeStageResultForTrace(result) {
@@ -871,6 +1049,15 @@ function resolveStageRunnerPath(cwd) {
   return candidates.find((candidate) => existsSync(candidate)) ?? candidates[0];
 }
 
+function resolveTopologyMcpServerPath(cwd) {
+  const candidates = [
+    join(cwd, "src-node", "tsn-topology-server.mjs"),
+    join(cwd, "src-node", "dist", "tsn-topology-server.mjs"),
+  ];
+
+  return candidates.find((candidate) => existsSync(candidate));
+}
+
 export function extractAssistantTextBlocks(message) {
   const content = message.message?.content;
 
@@ -927,6 +1114,46 @@ export function extractOperationTraceEvents(message, toolUseNamesById = new Map(
   return traces.filter((trace) => trace.text);
 }
 
+export function extractTopologyWorkflowStageResults(message, toolUseNamesById = new Map(), stageRunnerInput) {
+  if (!isRecord(stageRunnerInput) || stageRunnerInput.stage !== "topology") {
+    return [];
+  }
+
+  const results = [];
+  const contentBlocks = collectContentBlocks(message);
+
+  for (const block of contentBlocks) {
+    if (block?.type !== "tool_result") {
+      continue;
+    }
+
+    const toolUseId = typeof block.tool_use_id === "string" ? block.tool_use_id : undefined;
+    const toolName = toolUseId ? toolUseNamesById.get(toolUseId) : undefined;
+    if (toolName !== "mcp__tsn_topology__topology_initialize" && toolName !== "mcp__tsn_topology__topology_apply_operations") {
+      continue;
+    }
+
+    const toolResult = extractJsonFromToolResultBlock(block);
+    if (!isTrustedTopologyToolResult(toolResult)) {
+      continue;
+    }
+
+    const workflowResult = createTopologyWorkflowStageResult(toolResult, {
+      producer: {
+        type: "mcp",
+        name: TOPOLOGY_MCP_SERVER_NAME,
+        tool: toolNameToTopologyToolName(toolName),
+      },
+    });
+    results.push({
+      key: `${toolUseId ?? toolName}:${toolName}:${stableStringify(toolResult.summary)}`,
+      result: workflowResult,
+    });
+  }
+
+  return results;
+}
+
 function collectContentBlocks(message) {
   const blocks = [];
 
@@ -952,6 +1179,63 @@ function collectContentBlocks(message) {
   }
 
   return blocks;
+}
+
+function extractJsonFromToolResultBlock(block) {
+  const content = block.content ?? block.toolUseResult;
+  if (typeof content === "string") {
+    return parseJsonOrUndefined(content);
+  }
+
+  if (Array.isArray(content)) {
+    for (const item of content) {
+      if (typeof item === "string") {
+        const parsed = parseJsonOrUndefined(item);
+        if (parsed !== undefined) {
+          return parsed;
+        }
+      }
+
+      if (isRecord(item) && item.type === "text" && typeof item.text === "string") {
+        const parsed = parseJsonOrUndefined(item.text);
+        if (parsed !== undefined) {
+          return parsed;
+        }
+      }
+    }
+  }
+
+  if (isRecord(content)) {
+    return content;
+  }
+
+  return undefined;
+}
+
+function parseJsonOrUndefined(text) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+}
+
+function isTrustedTopologyToolResult(value) {
+  return isRecord(value)
+    && value.ok === true
+    && isRecord(value.metadata)
+    && value.metadata.responseMode === "full"
+    && value.metadata.summaryOnly === false
+    && isRecord(value.full)
+    && isRecord(value.full.topology);
+}
+
+function toolNameToTopologyToolName(toolName) {
+  if (toolName === "mcp__tsn_topology__topology_apply_operations") {
+    return "topology.apply_operations";
+  }
+
+  return "topology.initialize";
 }
 
 function formatToolUseTrace(name, input) {

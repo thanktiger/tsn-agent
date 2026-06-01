@@ -17,7 +17,7 @@ async function main() {
     errors.push(`${skillRoot} must contain at least one project skill.`);
   }
 
-  if (!/allowedTools:\s*\[[^\]]*["']Skill["']/s.test(workerSource)) {
+  if (!workerAllowsSkill(workerSource)) {
     errors.push("src-node/claude-agent-worker.mjs must allow the Skill tool when project skills are configured.");
   }
 
@@ -25,6 +25,10 @@ async function main() {
     const skillPath = `${skillRoot}/${skillName}/SKILL.md`;
     const skillSource = await readFile(skillPath, "utf8");
     const frontmatterName = readFrontmatterName(skillSource);
+
+    if (skillName === "tsn-topology" && /topology\.render_mac_table_html|mac-forwarding-table\.html/.test(skillSource)) {
+      errors.push(`${skillPath} must not require topology.render_mac_table_html or mac-forwarding-table.html.`);
+    }
 
     if (frontmatterName !== skillName) {
       errors.push(`${skillPath} frontmatter name must be "${skillName}", got "${frontmatterName ?? "missing"}".`);
@@ -111,6 +115,12 @@ function readFrontmatterName(source) {
     .split(/\r?\n/)
     .map((line) => line.match(/^name:\s*(.+?)\s*$/)?.[1])
     .find(Boolean);
+}
+
+function workerAllowsSkill(source) {
+  return /allowedTools:\s*\[[^\]]*["']Skill["']/s.test(source)
+    || /allowedTools:\s*buildAllowedToolsForStage\(/.test(source)
+      && /return\s*\[[^\]]*["']Skill["']/s.test(source);
 }
 
 async function isGitIgnored(path) {

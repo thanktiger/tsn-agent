@@ -3,6 +3,8 @@ import { createProjectFromIntent } from "../domain/topology-factory";
 import type { DiagnosticLogRepository } from "../diagnostics/diagnostic-log-repository";
 import { createInitialWorkflowState } from "../project/project-state";
 import { STAGE_SKILL_SCHEMA_VERSION } from "./stage-skill-contract";
+import { initializeTopology } from "../topology/initialize";
+import { createTopologyWorkflowStageResult } from "./topology-workflow-stage-result";
 import { runFlowPlanningStage, runTopologyStage } from "../../src-node/stage-skills/tsn-stage-runner";
 
 const invokeMock = vi.hoisted(() => vi.fn());
@@ -41,7 +43,7 @@ describe("runTsnAgent", () => {
   it("uses the deterministic fake agent outside Tauri", async () => {
     const { runTsnAgent } = await import("./agent-adapter");
 
-    const result = await runTsnAgent("我需要4个交换机，每个交换机连接5个端系统");
+    const result = await runTsnAgent("我需要2个交换机，每个交换机连接2个端系统");
 
     expect(result.mode).toBe("fake");
     expect(invokeMock).not.toHaveBeenCalled();
@@ -106,35 +108,32 @@ describe("runTsnAgent", () => {
     );
   });
 
-  it("does not apply the corrected local aerospace topology candidate when Claude skips the topology runner", async () => {
+  it("does not apply the corrected local dual-plane topology candidate when Claude skips the topology runner", async () => {
     Object.defineProperty(window, "__TAURI_INTERNALS__", {
       configurable: true,
       value: {},
     });
     invokeMock.mockResolvedValue({
-      assistantText: "已识别 4 台交换机和 7 个端系统。",
+      assistantText: "已识别 4 台交换机和 8 个端系统。",
       sessionId: "claude-session-no-stage",
     });
     const { runTsnAgent } = await import("./agent-adapter");
 
     const result = await runTsnAgent([
-      "采用双冗余链路和两组系统交换机。",
-      "创建4台交换机和7个端系统，交换机1、交换机2为左侧系统交换机，交换机3、交换机4为右侧系统交换机。",
-      "端1、端2、端3、端4、端5分别双归属连接交换机1和交换机2；端6、端7分别双归属连接交换机3和交换机4。",
-      "主干链路为交换机1连接交换机3、交换机2连接交换机4，2台系统交换机为独立单机，不相互级联，链路速率不小于1000Mbps。",
+      "我需要4个交换机，每个交换机连接2个端系统，双平面冗余。",
     ].join(""));
 
     expect(result.mode).toBe("claude");
     expect(invokeMock).toHaveBeenCalledWith("run_claude_agent", {
       request: expect.objectContaining({
-        prompt: expect.stringContaining("创建4台交换机和7个端系统"),
-        conversationContext: expect.not.stringContaining("端系统：7"),
+        prompt: expect.stringContaining("4个交换机"),
+        conversationContext: expect.not.stringContaining("端系统：8"),
       }),
     });
-    expect(result.project.id).toBe("project-aerospace-redundant");
+    expect(result.project.id).toBe("project-default");
     expect(result.project.topology.nodes.filter((node) => node.type === "switch")).toHaveLength(4);
-    expect(result.project.topology.nodes.filter((node) => node.type === "endSystem")).toHaveLength(7);
-    expect(result.project.topology.links).toHaveLength(16);
+    expect(result.project.topology.nodes.filter((node) => node.type === "endSystem")).toHaveLength(8);
+    expect(result.project.topology.links).toHaveLength(18);
     expect(result.workflow.stages.topology.status).toBe("waiting_confirmation");
     expect(result.shouldApplyProject).toBe(false);
     expect(result.assistantText).toContain("没有拿到可应用的结构化结果");
@@ -154,25 +153,80 @@ describe("runTsnAgent", () => {
     });
     const { runTsnAgent } = await import("./agent-adapter");
 
-    const result = await runTsnAgent("我需要4个交换机，每个交换机连接5个端系统");
+    const result = await runTsnAgent("我需要2个交换机，每个交换机连接2个端系统");
 
     expect(result.mode).toBe("claude");
     expect(result.project.topology.nodes).toHaveLength(6);
     expect(result.project.topology.links).toHaveLength(5);
-    expect(result.workflow.stages.topology.skillResult).toMatchObject({
-      skillName: "tsn-topology",
+    expect(result.workflow.stages.topology.stageResult).toMatchObject({
+      producer: {
+        type: "legacy-skill",
+        name: "tsn-topology",
+      },
       validation: { ok: true, errors: [] },
     });
     expect(result.events).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           kind: "tool-availability",
-          content: expect.stringContaining("Read、Bash、Edit、Write"),
+          content: expect.stringContaining("tsn_topology available"),
         }),
         expect.objectContaining({
-          kind: "skill-result",
+          kind: "stage-result",
           skillName: "tsn-topology",
           content: expect.stringContaining("6 个节点"),
+        }),
+      ]),
+    );
+  });
+
+  it("applies a v1 MCP topology result instead of reparsing natural language defaults", async () => {
+    Object.defineProperty(window, "__TAURI_INTERNALS__", {
+      configurable: true,
+      value: {},
+    });
+    const topologyResult = createTopologyWorkflowStageResult(
+      initializeTopology({
+        templateId: "dual-plane-redundant",
+        params: dualPlaneParams(2),
+        responseMode: "full",
+      }),
+      {
+        producer: {
+          type: "mcp",
+          name: "tsn_topology",
+          tool: "topology.initialize",
+        },
+      },
+    );
+    invokeMock.mockResolvedValue({
+      assistantText: "已通过 topology.initialize 生成拓扑。",
+      sessionId: "claude-session-mcp-topology",
+      stageResults: [topologyResult],
+    });
+    const { runTsnAgent } = await import("./agent-adapter");
+
+    const result = await runTsnAgent("双平面冗余，四个交换机，每个交换机两个端系统");
+
+    expect(result.mode).toBe("claude");
+    expect(result.project.topology.nodes.filter((node) => node.type === "switch")).toHaveLength(4);
+    expect(result.project.topology.nodes.filter((node) => node.type === "endSystem")).toHaveLength(8);
+    expect(result.project.topology.nodes).toHaveLength(12);
+    expect(result.workflow.stages.topology.stageResult).toMatchObject({
+      producer: {
+        type: "mcp",
+        name: "tsn_topology",
+        tool: "topology.initialize",
+      },
+      validation: { ok: true, errors: [] },
+    });
+    expect(result.events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "stage-result",
+          skillName: "tsn_topology",
+          title: "拓扑工具结果",
+          content: expect.stringContaining("12 个节点"),
         }),
       ]),
     );
@@ -235,14 +289,17 @@ describe("runTsnAgent", () => {
       "视频流-4",
     ]);
     expect(result.workflow.currentStep).toBe("flow-template");
-    expect(result.workflow.stages["flow-template"].skillResult).toMatchObject({
-      skillName: "tsn-flow-planning",
+    expect(result.workflow.stages["flow-template"].stageResult).toMatchObject({
+      producer: {
+        type: "legacy-skill",
+        name: "tsn-flow-planning",
+      },
       validation: { ok: true, errors: [] },
     });
     expect(result.events).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
-          kind: "skill-result",
+          kind: "stage-result",
           skillName: "tsn-flow-planning",
           content: expect.stringContaining("已准备 6 条流"),
         }),
@@ -307,31 +364,31 @@ describe("runTsnAgent", () => {
     );
   });
 
-  it("rejects a stale topology skill result when the user adds networkcards 8 and 9", async () => {
+  it("rejects a stale topology skill result when the user changes dual-plane endpoint count", async () => {
     Object.defineProperty(window, "__TAURI_INTERNALS__", {
       configurable: true,
       value: {},
     });
-    const previousProject = createProjectFromIntent("我需要4台交换机和7个网卡，采用双冗余系统交换机拓扑", undefined, {
+    const previousProject = createProjectFromIntent("我需要4个交换机，每个交换机连接2个端系统，双平面冗余", undefined, {
       scenarioConfigId: "aerospace-onboard",
       includeControlFlow: false,
     });
     const staleStageResult = runTopologyStage({
-      userIntent: "我需要4台交换机和7个网卡，采用双冗余系统交换机拓扑",
+      userIntent: "我需要4个交换机，每个交换机连接2个端系统，双平面冗余",
       scenarioConfigId: "aerospace-onboard",
     });
     invokeMock.mockResolvedValue({
-      assistantText: "已添加网卡8和9。",
-      sessionId: "claude-session-stale-aerospace",
+      assistantText: "已改成每台 3 个端系统。",
+      sessionId: "claude-session-stale-dual-plane",
       stageResults: [staleStageResult],
     });
     const { runTsnAgent } = await import("./agent-adapter");
 
     const result = await runTsnAgent({
-      userIntent: "交换机3和4那里，我希望再添加网卡8和9",
+      userIntent: "每个交换机改成3个端系统，保持双平面冗余",
       session: {
-        id: "session-stale-aerospace",
-        title: "箭载双冗余拓扑",
+        id: "session-stale-dual-plane",
+        title: "双平面冗余拓扑",
         createdAt: "2026-05-20T00:00:00.000Z",
         updatedAt: "2026-05-20T00:00:00.000Z",
         messages: [],
@@ -341,15 +398,15 @@ describe("runTsnAgent", () => {
       },
     });
 
-    expect(result.project.topology.nodes.filter((node) => node.type === "endSystem")).toHaveLength(7);
-    expect(result.project.topology.links).toHaveLength(16);
+    expect(result.project.topology.nodes.filter((node) => node.type === "endSystem")).toHaveLength(8);
+    expect(result.project.topology.links).toHaveLength(18);
     expect(result.shouldApplyProject).toBe(false);
     expect(result.assistantText).toContain("不会自动 fallback 到默认拓扑");
     expect(result.events).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           kind: "error",
-          content: expect.stringContaining("用户请求 9 个网卡/端系统"),
+          content: expect.stringContaining("用户请求 12 个网卡/端系统"),
         }),
       ]),
     );
@@ -521,6 +578,9 @@ describe("runTsnAgent", () => {
           message: "智能助手请求完成",
           details: expect.objectContaining({
             claudeSessionId: "claude-session-logs",
+            topologyRuntime: expect.objectContaining({
+              serverName: "tsn_topology",
+            }),
           }),
         }),
       ]),
@@ -739,7 +799,7 @@ describe("runTsnAgent", () => {
     });
     const { runTsnAgent } = await import("./agent-adapter");
     const topologyProject = createProjectFromIntent(
-      "采用双冗余链路和两组系统交换机。创建4台交换机和7个端系统，端1、端2、端3、端4、端5分别双归属连接交换机1和交换机2；端6、端7分别双归属连接交换机3和交换机4。",
+      "我需要4个交换机，每个交换机连接2个端系统，双平面冗余。",
       undefined,
       { includeControlFlow: false },
     );
@@ -748,7 +808,7 @@ describe("runTsnAgent", () => {
     workflow.stages.topology = {
       ...workflow.stages.topology,
       status: "waiting_confirmation",
-      summary: "识别到箭载双冗余拓扑：4 个交换机，7 个网卡。",
+      summary: "识别到双平面冗余拓扑：4 个交换机，每个交换机连接 2 个端系统。",
     };
 
     const result = await runTsnAgent({
@@ -769,7 +829,7 @@ describe("runTsnAgent", () => {
     expect(result.mode).toBe("fake");
     expect(result.workflow.currentStep).toBe("time-sync");
     expect(result.project.topology.nodes.filter((node) => node.type === "switch")).toHaveLength(4);
-    expect(result.project.topology.nodes.filter((node) => node.type === "endSystem")).toHaveLength(7);
+    expect(result.project.topology.nodes.filter((node) => node.type === "endSystem")).toHaveLength(8);
   });
 
   it("does not send simulation requests to Claude because no runner is implemented", async () => {
@@ -852,3 +912,35 @@ describe("runTsnAgent", () => {
     expect(result.assistantText).toContain("sdk failed");
   });
 });
+
+function dualPlaneParams(endSystemsPerSwitch: number) {
+  return {
+    planes: [{ id: "A" }, { id: "B" }],
+    switches: [
+      { id: "sw1", name: "SW-1A", plane: "A", groupId: "g1" },
+      { id: "sw2", name: "SW-1B", plane: "B", groupId: "g1" },
+      { id: "sw3", name: "SW-2A", plane: "A", groupId: "g2" },
+      { id: "sw4", name: "SW-2B", plane: "B", groupId: "g2" },
+    ],
+    switchGroups: [
+      { id: "g1", planeSwitches: { A: "sw1", B: "sw2" } },
+      { id: "g2", planeSwitches: { A: "sw3", B: "sw4" } },
+    ],
+    endSystems: Array.from({ length: 4 * endSystemsPerSwitch }, (_, index) => {
+      const switchOrdinal = Math.floor(index / endSystemsPerSwitch) + 1;
+      const hostOrdinal = index % endSystemsPerSwitch + 1;
+      const groupOrdinal = Math.ceil(switchOrdinal / 2);
+      return {
+        id: `es${switchOrdinal}-${hostOrdinal}`,
+        groupId: `g${groupOrdinal}`,
+        attachment: {
+          primary: { switchId: groupOrdinal === 1 ? "sw1" : "sw3", plane: "A" },
+          backup: { switchId: groupOrdinal === 1 ? "sw2" : "sw4", plane: "B" },
+        },
+      };
+    }),
+    backbone: { mode: "line", withinPlane: true },
+    crossPlaneLinks: { mode: "none" },
+    dataRateMbps: 1_000,
+  };
+}

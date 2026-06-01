@@ -385,7 +385,7 @@
   <main class="page">
     <header>
       <div>
-        <div class="kicker">Architecture Summary</div>
+        <div class="kicker">架构摘要</div>
         <h1>TSN Topology MCP 目标架构摘要</h1>
         <p>这份 HTML 只保留当前最关键的架构判断：自然语言如何落到确定性拓扑服务、从 0 初始化和已有拓扑修改如何分工、哪些能力不属于 topology MCP、以及生产 sidecar 的架构决策门。</p>
       </div>
@@ -712,7 +712,7 @@
         </div>
         <div class="panel">
           <h3>full 只留在本地</h3>
-          <p>完整 topology、端口占用、MAC 表、artifact 和 full changeSet 只进入 project/client 层或用户显式允许的本地 full 模式。</p>
+          <p>完整 artifact、端口占用、MAC 表和 full changeSet 只进入 project/client 层；full topology 仅在授权后作为结构化工具链输入输出。</p>
         </div>
         <div class="panel">
           <h3>MCP 不保存长期句柄</h3>

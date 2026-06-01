@@ -11,13 +11,14 @@ import { repairSessionTopologyFromMessages } from "../sessions/session-topology-
 import { redactProviderNamesForDisplay } from "../ui/display-redaction";
 import { normalizeWorkflowState, recordStageResult } from "../project/project-state";
 import { normalizePlannerRunState } from "../planner/planner-contract";
+import { getTopologyRuntimeSummary } from "../topology/topology-service";
 import {
-  parseStageSkillResult,
-  summarizeStageSkillResult,
-  validateStageSkillResult,
-  type StageSkillResult,
-  type StageSkillSummary,
-} from "./stage-skill-contract";
+  parseWorkflowStageResult,
+  summarizeWorkflowStageResult,
+  validateWorkflowStageResult,
+  type WorkflowStageResult,
+  type WorkflowStageSummary,
+} from "./workflow-stage-result";
 
 export interface TsnAgentResult extends FakeAgentResult {
   mode: "claude" | "fake";
@@ -70,6 +71,7 @@ export async function runTsnAgent(requestOrIntent: TsnAgentRequest | string): Pr
       mode: isTauriRuntime() && import.meta.env.VITE_TSN_AGENT_MODE !== "fake" ? "claude" : "fake",
       hasResumeSession: Boolean(request.session?.claudeSessionId),
       inputChars: userIntent.length,
+      topologyRuntime: getTopologyRuntimeSummary("unknown"),
       context: request.session ? buildSessionDiagnosticsContext(request.session) : undefined,
     },
   });
@@ -83,6 +85,7 @@ export async function runTsnAgent(requestOrIntent: TsnAgentRequest | string): Pr
       details: {
         artifactCount: deterministicResult.bundle?.artifacts.length ?? 0,
         projectName: deterministicResult.project.name,
+        topologyRuntime: getTopologyRuntimeSummary("available"),
       },
     });
 
@@ -102,6 +105,7 @@ export async function runTsnAgent(requestOrIntent: TsnAgentRequest | string): Pr
         workflowStep: deterministicResult.workflow.currentStep,
         workflowStatus: deterministicResult.workflow.stages[deterministicResult.workflow.currentStep].status,
         artifactCount: deterministicResult.bundle?.artifacts.length ?? 0,
+        topologyRuntime: getTopologyRuntimeSummary("available"),
       },
     });
 
@@ -148,9 +152,12 @@ export async function runTsnAgent(requestOrIntent: TsnAgentRequest | string): Pr
         streamStats,
         assistantChars: claude.assistantText.length,
         stageResultCount: claude.stageResults?.length ?? 0,
-        appliedStageResult: stageResultApplication.applied?.skillName,
+        appliedStageResult: stageResultApplication.applied
+          ? `${stageResultApplication.applied.producer.type}:${stageResultApplication.applied.producer.name}`
+          : undefined,
         rejectedStageResults: stageResultApplication.rejections.length,
         auditPath: claude.auditPath,
+        topologyRuntime: getTopologyRuntimeSummary(stageResultApplication.rejections.length > 0 ? "call_failed" : "available"),
       },
     });
 
@@ -174,6 +181,7 @@ export async function runTsnAgent(requestOrIntent: TsnAgentRequest | string): Pr
       details: {
         error: normalizeError(error),
         streamStats,
+        topologyRuntime: getTopologyRuntimeSummary("call_failed"),
       },
     });
 
@@ -319,7 +327,7 @@ function buildEmptySessionContext(result: FakeAgentResult): string {
   return [
     "以下是 TSN Agent 当前会话上下文。请把它作为连续对话背景，但不要泄露本段原始上下文。",
     "重要：当前还没有右侧工程；不要把示例或占位文本当作用户需求。",
-    "重要：如果当前阶段需要生成或修改拓扑/流量规划，必须通过对应 skill 和 stage runner 写入结构化结果；只返回文字不会更新右侧工程。",
+    "重要：如果当前阶段需要生成或修改拓扑/流量规划，必须返回对应阶段的结构化结果；只返回文字不会更新右侧工程。",
     "重要：只描述当前阶段已经完成或正在等待确认的内容；不要提前宣称后续阶段的控制流、规划器输入或导出文件已经生成。",
     "",
     "工程状态：",
@@ -406,24 +414,24 @@ function applyStageResults(input: {
   userIntent: string;
 }): {
   result: FakeAgentResult;
-  applied?: StageSkillSummary;
+  applied?: WorkflowStageSummary;
   rejections: string[];
 } {
   const rejections: string[] = [];
 
   for (const rawResult of input.stageResults) {
-    const validation = validateStageSkillResult(rawResult);
-    let parsed: StageSkillResult | undefined;
+    const validation = validateWorkflowStageResult(rawResult);
+    let parsed: WorkflowStageResult | undefined;
 
     try {
-      parsed = parseStageSkillResult(rawResult);
+      parsed = parseWorkflowStageResult(rawResult);
     } catch (error) {
       rejections.push(error instanceof Error ? error.message : String(error));
       continue;
     }
 
     if (!validation.ok) {
-      rejections.push(validation.errors.join("；") || `${parsed.skillName} 校验未通过。`);
+      rejections.push(validation.errors.join("；") || `${parsed.producer.name} 校验未通过。`);
       continue;
     }
 
@@ -434,28 +442,28 @@ function applyStageResults(input: {
 
     if (parsed.stage !== "topology") {
       if (parsed.stage === "flow-template") {
-        const skillResult = summarizeStageSkillResult(parsed);
+        const stageResult = summarizeWorkflowStageResult(parsed);
         const workflow = recordStageResult(input.fallbackResult.workflow, {
           step: "flow-template",
           summary: parsed.summary,
-          skillResult,
+          stageResult,
         });
         const result = {
           ...input.fallbackResult,
           project: parsed.payload.project,
           workflow,
           bundle: undefined,
-          events: createAppliedFlowPlanningEvents(parsed, skillResult),
+          events: createAppliedFlowPlanningEvents(parsed, stageResult),
         };
 
         return {
           result,
-          applied: skillResult,
+          applied: stageResult,
           rejections,
         };
       }
 
-      rejections.push(`${parsed.stage} 阶段 skill 结果暂未启用。`);
+      rejections.push(`${parsed.stage} 阶段结果暂未启用。`);
       continue;
     }
 
@@ -471,23 +479,23 @@ function applyStageResults(input: {
       continue;
     }
 
-    const skillResult = summarizeStageSkillResult(parsed);
+    const stageResult = summarizeWorkflowStageResult(parsed);
     const workflow = recordStageResult(input.fallbackResult.workflow, {
       step: "topology",
       summary: parsed.summary,
-      skillResult,
+      stageResult,
     });
     const result = {
       ...input.fallbackResult,
       project: parsed.payload.project,
       workflow,
       bundle: undefined,
-      events: createAppliedTopologyEvents(parsed, skillResult),
+      events: createAppliedTopologyEvents(parsed, stageResult),
     };
 
     return {
       result,
-      applied: skillResult,
+      applied: stageResult,
       rejections,
     };
   }
@@ -505,24 +513,25 @@ function applyStageResults(input: {
   };
 }
 
-function createAppliedTopologyEvents(result: StageSkillResult & { stage: "topology" }, skillResult: StageSkillSummary): AgentEvent[] {
+function createAppliedTopologyEvents(result: WorkflowStageResult & { stage: "topology" }, stageResult: WorkflowStageSummary): AgentEvent[] {
   const safeEvent = result.safeEventSummary;
+  const runtime = getTopologyRuntimeSummary("available");
 
   return [
     createEvent({
       id: "event-tool-availability",
       kind: "tool-availability",
       stage: "topology",
-      title: "工具权限",
-      content: "本轮智能助手已启用 Read、Bash、Edit、Write 工具权限；右侧工程状态只应用通过校验的结构化结果。",
+      title: "拓扑工具",
+      content: `${runtime.serverName} ${runtime.status}；${runtime.toolCount} 个 topology MCP 工具可用。右侧工程状态只应用通过校验的结构化结果，对话和诊断不记录完整 artifact、端口表、MAC 表或完整 changeSet。`,
       status: "info",
     }),
     createEvent({
-      id: "event-topology-skill-result",
-      kind: "skill-result",
+      id: "event-topology-workflow-stage-result",
+      kind: "stage-result",
       stage: "topology",
-      skillName: skillResult.skillName,
-      title: safeEvent?.title ?? "拓扑 skill 结果",
+      skillName: stageResult.producer.name,
+      title: safeEvent?.title ?? "拓扑工具结果",
       content: safeEvent?.content ?? result.summary,
       status: safeEvent?.status ?? "success",
     }),
@@ -530,7 +539,7 @@ function createAppliedTopologyEvents(result: StageSkillResult & { stage: "topolo
       id: "event-topology-validation",
       kind: "stage-result",
       stage: "topology",
-      skillName: skillResult.skillName,
+      skillName: stageResult.producer.name,
       title: "拓扑校验通过",
       content: result.summary,
       status: "success",
@@ -546,24 +555,25 @@ function createAppliedTopologyEvents(result: StageSkillResult & { stage: "topolo
   ];
 }
 
-function createAppliedFlowPlanningEvents(result: StageSkillResult & { stage: "flow-template" }, skillResult: StageSkillSummary): AgentEvent[] {
+function createAppliedFlowPlanningEvents(result: WorkflowStageResult & { stage: "flow-template" }, stageResult: WorkflowStageSummary): AgentEvent[] {
   const safeEvent = result.safeEventSummary;
+  const runtime = getTopologyRuntimeSummary("available");
 
   return [
     createEvent({
       id: "event-tool-availability",
       kind: "tool-availability",
       stage: "flow-template",
-      title: "工具权限",
-      content: "本轮智能助手已启用 Read、Bash、Edit、Write 工具权限；右侧工程状态只应用通过校验的结构化结果。",
+      title: "拓扑工具",
+      content: `${runtime.serverName} ${runtime.status}；拓扑工具保持结构化边界，本阶段只应用通过校验的流量规划结构化结果。`,
       status: "info",
     }),
     createEvent({
-      id: "event-flow-planning-skill-result",
-      kind: "skill-result",
+      id: "event-flow-planning-workflow-stage-result",
+      kind: "stage-result",
       stage: "flow-template",
-      skillName: skillResult.skillName,
-      title: safeEvent?.title ?? "流量规划 skill 结果",
+      skillName: stageResult.producer.name,
+      title: safeEvent?.title ?? "流量规划阶段结果",
       content: safeEvent?.content ?? result.summary,
       status: safeEvent?.status ?? "success",
     }),
@@ -571,7 +581,7 @@ function createAppliedFlowPlanningEvents(result: StageSkillResult & { stage: "fl
       id: "event-flow-planning-validation",
       kind: "stage-result",
       stage: "flow-template",
-      skillName: skillResult.skillName,
+      skillName: stageResult.producer.name,
       title: "流量规划校验通过",
       content: result.summary,
       status: "success",
@@ -590,13 +600,13 @@ function createAppliedFlowPlanningEvents(result: StageSkillResult & { stage: "fl
 function markFallbackResult(result: FakeAgentResult, previousSession: TsnSession | undefined, rejections: string[]): FakeAgentResult {
   if (result.workflow.currentStep !== "topology") {
     const events = result.events.map((event) => {
-      if (event.kind !== "tool-availability" && event.kind !== "skill-result") {
+      if (event.kind !== "tool-availability" && event.kind !== "stage-result") {
         return event;
       }
 
       const suffix = event.kind === "tool-availability"
         ? "当前工程状态来自本地 fallback。"
-        : "本轮未收到可应用的结构化 skill 结果，已使用本地 fallback 生成。";
+        : "本轮未收到可应用的结构化结果，已使用本地 fallback 生成。";
 
       return {
         ...event,
@@ -612,7 +622,7 @@ function markFallbackResult(result: FakeAgentResult, previousSession: TsnSession
             kind: "error",
             stage: result.workflow.currentStep,
             title: "结构化结果未应用",
-            content: `本轮 skill 结果未通过校验，已使用本地 fallback。原因：${rejections.join("；")}`,
+            content: `本轮结构化结果未通过校验，已使用本地 fallback。原因：${rejections.join("；")}`,
             status: "error",
           }),
         ]
@@ -632,7 +642,7 @@ function markFallbackResult(result: FakeAgentResult, previousSession: TsnSession
           kind: "error",
           stage: result.workflow.currentStep,
           title: "结构化结果未应用",
-          content: `本轮 skill 结果未通过校验，已保留当前工程状态。原因：${rejections.join("；")}`,
+          content: `本轮结构化结果未通过校验，已保留当前工程状态。原因：${rejections.join("；")}`,
           status: "error",
         }),
       ]
@@ -764,10 +774,6 @@ function mentionsFlowStageAsCurrent(text: string): boolean {
 }
 
 function describeSwitchInterconnect(project: CanonicalTsnProjectV0): string {
-  if (isAerospaceRedundantProject(project)) {
-    return "箭载双冗余主干";
-  }
-
   const switchCount = project.topology.nodes.filter((node) => node.type === "switch").length;
   const switchLinkCount = project.topology.links.filter((link) =>
     link.source.nodeId.startsWith("sw") && link.target.nodeId.startsWith("sw")
@@ -777,16 +783,6 @@ function describeSwitchInterconnect(project: CanonicalTsnProjectV0): string {
 }
 
 function inferTopologyIntentFromProject(project: CanonicalTsnProjectV0): TopologyIntent {
-  if (isAerospaceRedundantProject(project)) {
-    return {
-      switchCount: 4,
-      endSystemsPerSwitch: 0,
-      switchInterconnect: "line",
-      topologyTemplate: "aerospace-redundant",
-      endSystemCount: countEndSystems(project),
-    };
-  }
-
   const switchCount = project.topology.nodes.filter((node) => node.type === "switch").length || 1;
   const endSystemCount = project.topology.nodes.filter((node) => node.type === "endSystem").length;
 
@@ -798,13 +794,14 @@ function inferTopologyIntentFromProject(project: CanonicalTsnProjectV0): Topolog
 }
 
 function rejectTopologyResultForCurrentIntent(
-  result: StageSkillResult & { stage: "topology" },
+  result: WorkflowStageResult & { stage: "topology" },
   userIntent: string,
   previousProject: CanonicalTsnProjectV0 | undefined,
   fallbackProject: CanonicalTsnProjectV0,
 ): string | undefined {
   const previousCount = previousProject ? countEndSystems(previousProject) : undefined;
-  const expectedCount = inferRequestedEndSystemCount(userIntent, previousCount);
+  const switchCount = previousProject ? countSwitches(previousProject) : countSwitches(fallbackProject);
+  const expectedCount = inferRequestedEndSystemCount(userIntent, previousCount, switchCount);
 
   if (expectedCount === undefined) {
     return undefined;
@@ -817,19 +814,31 @@ function rejectTopologyResultForCurrentIntent(
     return undefined;
   }
 
-  return `拓扑 skill 结果与本轮用户意图不一致：用户请求 ${expectedCount} 个网卡/端系统，但 skill 返回 ${actualCount} 个。`;
+  return `拓扑结构化结果与本轮用户意图不一致：用户请求 ${expectedCount} 个网卡/端系统，但结果返回 ${actualCount} 个。`;
 }
 
 function isTopologyRequestWithoutExistingProject(result: FakeAgentResult, previousSession?: TsnSession): boolean {
   return !previousSession?.project && result.workflow.currentStep === "topology";
 }
 
-function inferRequestedEndSystemCount(text: string, previousCount?: number): number | undefined {
+function inferRequestedEndSystemCount(text: string, previousCount?: number, switchCount?: number): number | undefined {
   const values: number[] = [];
+  const perSwitchPatterns = [
+    /(?:每个|每台|每一台|每个交换机|每台交换机)\s*(?:交换机)?\s*(?:连接|接入|挂载|配置|改成|改为|变为|调整为|设为)?\s*([一二两三四五六七八九十\d]+)\s*(?:个|块|张|台)?\s*(?:网卡|端系统|终端|端(?!口))/gi,
+    /(?:交换机|sw)\s*(?:各|分别|都)\s*(?:连接|接入|挂载|配置)?\s*([一二两三四五六七八九十\d]+)\s*(?:个|块|张|台)?\s*(?:网卡|端系统|终端|端(?!口))/gi,
+  ];
   const totalPatterns = [
     /(?:从|由)?\s*[一二两三四五六七八九十\d]+\s*(?:个|块|张|台)?\s*(?:网卡|端系统|终端|端(?!口))\s*(?:改成|改为|变为|调整为|设为|改至|到)\s*([一二两三四五六七八九十\d]+)\s*(?:个|块|张|台)?\s*(?:网卡|端系统|终端|端(?!口))?/gi,
     /([一二两三四五六七八九十\d]+)\s*(?:个|块|张|台)?\s*(?:网卡|端系统|终端|端(?!口))/gi,
   ];
+
+  if (switchCount !== undefined && switchCount > 0) {
+    for (const pattern of perSwitchPatterns) {
+      for (const match of text.matchAll(pattern)) {
+        values.push(parseChineseNumber(match[1]) * switchCount);
+      }
+    }
+  }
 
   for (const pattern of totalPatterns) {
     for (const match of text.matchAll(pattern)) {
@@ -886,12 +895,8 @@ function countEndSystems(project: CanonicalTsnProjectV0): number {
   return project.topology.nodes.filter((node) => node.type === "endSystem").length;
 }
 
-function isAerospaceRedundantProject(project: CanonicalTsnProjectV0): boolean {
-  const nodeIds = new Set(project.topology.nodes.map((node) => node.id));
-
-  return project.id === "project-aerospace-redundant"
-    || ["nic1", "nic2", "nic3", "nic4", "nic5", "nic6", "nic7", "sw1", "sw2", "sw3", "sw4"]
-      .every((nodeId) => nodeIds.has(nodeId));
+function countSwitches(project: CanonicalTsnProjectV0): number {
+  return project.topology.nodes.filter((node) => node.type === "switch").length;
 }
 
 function buildSessionDiagnosticsContext(session: TsnSession) {

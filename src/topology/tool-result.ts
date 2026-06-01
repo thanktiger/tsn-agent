@@ -5,7 +5,7 @@ export interface TopologyError {
   message: string;
   path: string;
   severity: TopologyErrorSeverity;
-  details?: Record<string, unknown>;
+  details: Record<string, unknown>;
   retryable: boolean;
   requiresUserClarification: boolean;
 }
@@ -56,7 +56,7 @@ export function topologyError(input: {
     message: input.message,
     path: input.path ?? "$",
     severity: input.severity ?? "error",
-    details: input.details,
+    details: input.details ?? {},
     retryable: input.retryable ?? false,
     requiresUserClarification: input.requiresUserClarification ?? false,
   };
@@ -115,7 +115,7 @@ export function failResult<TSummary = never, TFull = never>(input: {
 export function forbiddenFullResponseError(path = "$.responseMode"): TopologyError {
   return topologyError({
     code: "FORBIDDEN_RESPONSE_MODE",
-    message: "Agent-facing topology MCP tools do not return full topology, artifact, port table or changeSet payloads.",
+    message: "Agent-facing topology MCP tools only allow full topology payloads for explicitly authorized initialize/apply_operations calls; artifacts, port tables and full changeSets stay local.",
     path,
     retryable: false,
   });

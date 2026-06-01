@@ -89,8 +89,7 @@ export interface TopologyIntent {
   switchCount: number;
   endSystemsPerSwitch: number;
   switchInterconnect?: "line" | "ring";
-  topologyTemplate?: "aerospace-redundant";
-  endSystemCount?: number;
+  topologyTemplate?: "dual-plane-redundant";
 }
 
 export function isSwitch(node: TsnNode): boolean {

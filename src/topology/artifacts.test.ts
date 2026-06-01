@@ -90,11 +90,45 @@ describe("topology artifacts", () => {
       artifacts: {
         "topology.json": built.full!.artifacts["topology.json"].data,
         "topo_feature.json": built.full!.artifacts["topo_feature.json"].data,
+        "data-server.json": built.full!.artifacts["data-server.json"].data,
         "mac-forwarding-table.json": built.full!.artifacts["mac-forwarding-table.json"].data,
       },
     });
 
     expect(validation.ok).toBe(true);
+  });
+
+  it("rejects missing data-server.json during artifact validation", () => {
+    const initialized = initializeTopology({
+      templateId: "generic-line",
+      params: { switchCount: 1, endSystemsPerSwitch: 1 },
+      responseMode: "full",
+    });
+    expect(initialized.ok).toBe(true);
+    if (!initialized.ok) {
+      return;
+    }
+    const built = buildTopologyArtifacts({ topology: initialized.full!.topology, responseMode: "full" });
+    expect(built.ok).toBe(true);
+    if (!built.ok) {
+      return;
+    }
+
+    const validation = validateTopologyArtifacts({
+      artifacts: {
+        "topology.json": built.full!.artifacts["topology.json"].data,
+        "topo_feature.json": built.full!.artifacts["topo_feature.json"].data,
+        "mac-forwarding-table.json": built.full!.artifacts["mac-forwarding-table.json"].data,
+      },
+    });
+
+    expect(validation.ok).toBe(false);
+    if (!validation.ok) {
+      expect(validation.errors).toContainEqual(expect.objectContaining({
+        code: "INVALID_ARTIFACT",
+        path: "$.artifacts['data-server.json']",
+      }));
+    }
   });
 
   it("projects custom intermediate port ids through stable port indexes", () => {

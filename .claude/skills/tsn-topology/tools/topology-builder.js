@@ -596,7 +596,6 @@ function printHelp() {
     `    "mac_forwarding_table_text": "<canonical mac-forwarding-table.json>",\n` +
     `    "display_names": [str, ...]\n` +
     `  }\n\n` +
-    `mac-forwarding-table.html 需在 mac-forwarding-table.json 校验通过后，使用 render-mac-forwarding-html.js 单独渲染。\n\n` +
     `错误输出 (stderr, JSON):\n` +
     `  {"ok": false, "stage": "build", "error": {"type": str, "message": str}}\n\n` +
     `退出码:\n` +

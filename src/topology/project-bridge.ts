@@ -144,17 +144,9 @@ function toCanonicalLink(link: IntermediateLink): TsnLink {
 }
 
 function defaultProjectId(topology: IntermediateTopology): string {
-  if (topology.metadata.templateId === "aerospace-redundant") {
-    return "project-aerospace-redundant";
-  }
-
   return "project-default";
 }
 
 function defaultProjectName(topology: IntermediateTopology): string {
-  if (topology.metadata.templateId === "aerospace-redundant") {
-    return "箭载双冗余拓扑";
-  }
-
   return "当前规划";
 }

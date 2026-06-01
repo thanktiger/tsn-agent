@@ -1,8 +1,6 @@
 import { TOPOLOGY_LIMITS } from "./limits";
 import {
   INTERMEDIATE_TOPOLOGY_SCHEMA_VERSION,
-  sortLinksByNumericId,
-  sortNodesByNumericId,
   type IntermediateLink,
   type IntermediateNode,
   type IntermediateTopology,
@@ -13,10 +11,7 @@ import { validateIntermediateTopology } from "./validate";
 export type TopologyOperation =
   | { op: "link.delete"; linkId: string }
   | { op: "node.add"; node: IntermediateNode }
-  | { op: "link.add"; link: IntermediateLink }
-  | { op: "node.update"; nodeId: string; patch: Partial<IntermediateNode> }
-  | { op: "node.delete"; nodeId: string }
-  | { op: "link.update"; linkId: string; patch: Partial<IntermediateLink> };
+  | { op: "link.add"; link: IntermediateLink };
 
 export interface TopologyApplyOperationsRequest {
   topology: IntermediateTopology;
@@ -24,6 +19,8 @@ export interface TopologyApplyOperationsRequest {
   dryRun?: boolean;
   responseMode?: TopologyResponseMode;
 }
+
+type IncomingTopologyOperation = TopologyOperation | { op?: unknown };
 
 export interface TopologyChangeSet {
   dryRun: boolean;
@@ -43,7 +40,18 @@ export interface TopologyApplySummary {
   dryRun: boolean;
   nodeCount: number;
   linkCount: number;
-  changeSet: TopologyChangeSet;
+  changeSet: {
+    addedNodeCount: number;
+    removedNodeCount: number;
+    addedLinkCount: number;
+    removedLinkCount: number;
+    allocatedPortCount: number;
+    releasedPortCount: number;
+    flowImpact: {
+      removedLinkCount: number;
+      addedLinkCount: number;
+    };
+  };
 }
 
 export interface TopologyApplyFull {
@@ -92,7 +100,8 @@ export function applyTopologyOperations(
     });
   }
 
-  const unsupported = request.operations.find((operation) =>
+  const operations = request.operations as IncomingTopologyOperation[];
+  const unsupported = operations.find((operation) =>
     operation.op !== "link.delete" && operation.op !== "node.add" && operation.op !== "link.add"
   );
 
@@ -103,7 +112,7 @@ export function applyTopologyOperations(
         topologyError({
           code: "UNSUPPORTED_OPERATION",
           message: `${unsupported.op} is not supported in topology.apply_operations P0.`,
-          path: `$.operations[${request.operations.indexOf(unsupported)}].op`,
+          path: `$.operations[${operations.indexOf(unsupported)}].op`,
         }),
       ],
     });
@@ -130,7 +139,7 @@ export function applyTopologyOperations(
       dryRun: request.dryRun === true,
       nodeCount: simulation.topology.nodes.length,
       linkCount: simulation.topology.links.length,
-      changeSet,
+      changeSet: summarizeChangeSet(changeSet),
     },
     full: {
       topology: simulation.topology,
@@ -144,8 +153,8 @@ function simulateOperations(
   topology: IntermediateTopology,
   operations: TopologyOperation[],
 ): { ok: true; topology: IntermediateTopology; changeSet: TopologyChangeSet } | { ok: false; errors: ReturnType<typeof topologyError>[] } {
-  const nodes = sortNodesByNumericId(topology.nodes);
-  const links = sortLinksByNumericId(topology.links);
+  const nodes = [...topology.nodes];
+  const links = [...topology.links];
   const nodeById = new Map(nodes.map((node) => [node.id, node]));
   const linkById = new Map(links.map((link) => [link.id, link]));
   const errors: ReturnType<typeof topologyError>[] = [];
@@ -171,6 +180,7 @@ function simulateOperations(
       }
 
       linkById.delete(operation.linkId);
+      links.splice(links.findIndex((link) => link.id === operation.linkId), 1);
       removedLinkIds.push(operation.linkId);
       releasedPorts.push(
         { nodeId: link.source.nodeId, portId: link.source.portId, linkId: link.id },
@@ -190,6 +200,7 @@ function simulateOperations(
       }
 
       nodeById.set(operation.node.id, operation.node);
+      nodes.push(operation.node);
       addedNodeIds.push(operation.node.id);
       continue;
     }
@@ -221,6 +232,7 @@ function simulateOperations(
       }
 
       linkById.set(operation.link.id, operation.link);
+      links.push(operation.link);
       addedLinkIds.push(operation.link.id);
       allocatedPorts.push(
         { nodeId: operation.link.source.nodeId, portId: operation.link.source.portId, linkId: operation.link.id },
@@ -239,20 +251,8 @@ function simulateOperations(
       ...topology.metadata,
       source: "operations",
     },
-    nodes: [...nodeById.values()].sort((left, right) => {
-      if (left.numericId !== right.numericId) {
-        return left.numericId - right.numericId;
-      }
-
-      return left.id.localeCompare(right.id);
-    }),
-    links: [...linkById.values()].sort((left, right) => {
-      if (left.numericId !== right.numericId) {
-        return left.numericId - right.numericId;
-      }
-
-      return left.id.localeCompare(right.id);
-    }),
+    nodes,
+    links,
     diagnostics: topology.diagnostics,
   };
   const changeSet: TopologyChangeSet = {
@@ -273,5 +273,20 @@ function simulateOperations(
     ok: true,
     topology: updatedTopology,
     changeSet,
+  };
+}
+
+function summarizeChangeSet(changeSet: TopologyChangeSet): TopologyApplySummary["changeSet"] {
+  return {
+    addedNodeCount: changeSet.addedNodeIds.length,
+    removedNodeCount: changeSet.removedNodeIds.length,
+    addedLinkCount: changeSet.addedLinkIds.length,
+    removedLinkCount: changeSet.removedLinkIds.length,
+    allocatedPortCount: changeSet.allocatedPorts.length,
+    releasedPortCount: changeSet.releasedPorts.length,
+    flowImpact: {
+      removedLinkCount: changeSet.flowImpact.removedLinkIds.length,
+      addedLinkCount: changeSet.flowImpact.addedLinkIds.length,
+    },
   };
 }

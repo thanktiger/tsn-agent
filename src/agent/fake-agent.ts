@@ -1,5 +1,6 @@
 import type { CanonicalTsnProjectV0, TopologyIntent } from "../domain/canonical";
 import { getScenarioConfig } from "../domain/scenario-config";
+import { getTopologyRuntimeSummary } from "../topology/topology-service";
 import {
   createProjectFromIntent,
   parseTopologyIntent,
@@ -473,16 +474,6 @@ function hasSwitchInterconnectIntent(text: string): boolean {
 }
 
 function inferIntentFromProject(project: CanonicalTsnProjectV0): TopologyIntent {
-  if (isAerospaceRedundantProject(project)) {
-    return {
-      switchCount: 4,
-      endSystemsPerSwitch: 0,
-      switchInterconnect: "line",
-      topologyTemplate: "aerospace-redundant",
-      endSystemCount: project.topology.nodes.filter((node) => node.type === "endSystem").length,
-    };
-  }
-
   const switchCount = project.topology.nodes.filter((node) => node.type === "switch").length;
   const endSystemCount = project.topology.nodes.filter((node) => node.type === "endSystem").length;
   const switchLinkCount = project.topology.links.filter((link) =>
@@ -497,27 +488,19 @@ function inferIntentFromProject(project: CanonicalTsnProjectV0): TopologyIntent 
 }
 
 function describeTopologyIntent(intent: TopologyIntent): string {
-  if (intent.topologyTemplate === "aerospace-redundant") {
-    return `识别到箭载双冗余拓扑：${intent.switchCount} 个交换机，${intent.endSystemCount ?? 7} 个网卡。`;
+  if (intent.topologyTemplate === "dual-plane-redundant") {
+    return `识别到双平面冗余拓扑：${intent.switchCount} 个交换机，每个交换机连接 ${intent.endSystemsPerSwitch} 个端系统。`;
   }
 
   return `识别到 ${intent.switchCount} 个交换机，每个交换机连接 ${intent.endSystemsPerSwitch} 个端系统。`;
 }
 
 function describeTopologyInterconnect(intent: TopologyIntent): string {
-  if (intent.topologyTemplate === "aerospace-redundant") {
-    return "左右两组系统交换机不级联，通过双冗余主干链路互联，网卡双归属接入。";
+  if (intent.topologyTemplate === "dual-plane-redundant") {
+    return "交换机按 A/B 双平面成对分组，端系统双归属接入对应故障域。";
   }
 
   return intent.switchInterconnect === "ring" ? "交换机采用环形互联。" : "交换机采用线型互联。";
-}
-
-function isAerospaceRedundantProject(project: CanonicalTsnProjectV0): boolean {
-  const nodeIds = new Set(project.topology.nodes.map((node) => node.id));
-
-  return project.id === "project-aerospace-redundant"
-    || ["nic1", "nic2", "nic3", "nic4", "nic5", "nic6", "nic7", "sw1", "sw2", "sw3", "sw4"]
-      .every((nodeId) => nodeIds.has(nodeId));
 }
 
 function refreshProject(project: CanonicalTsnProjectV0): CanonicalTsnProjectV0 {
@@ -553,11 +536,13 @@ function describeFlow(flow: CanonicalTsnProjectV0["flows"][number]): string {
 }
 
 function createToolAvailabilityEvent(): AgentEvent {
+  const runtime = getTopologyRuntimeSummary("available");
+
   return {
     id: "event-tool-availability",
     kind: "tool-availability",
-    title: "本地规划器",
-    content: "本轮使用本地确定性 TSN 生成器和安全摘要事件。",
+    title: "拓扑工具",
+    content: `${runtime.serverName} ${runtime.status}；${runtime.toolCount} 个 topology MCP 工具可用于模板、初始化、校验、artifact、inspect 和 operations。本轮不会把完整 artifact、端口表、MAC 表或完整 changeSet 写入对话。`,
     status: "info",
   };
 }

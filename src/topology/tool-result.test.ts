@@ -49,7 +49,7 @@ describe("topology tool result envelope", () => {
         message: "invalid input",
         path: "$.x",
         severity: "error",
-        details: undefined,
+        details: {},
         retryable: false,
         requiresUserClarification: true,
       });

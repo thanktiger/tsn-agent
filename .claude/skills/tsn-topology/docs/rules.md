@@ -1,7 +1,7 @@
 # TSN 拓扑生成 — 业务规则参考
 
-> **用途**：供 `tools/topology-builder.js`、`tools/validate-topology.js`、`tools/validate-mac-forwarding-table.js`、`tools/render-mac-forwarding-html.js` 与 `SKILL.md` 参照。
-> **范围**：覆盖 `topology.json`、`topo_feature.json`、`data-server.json`、`mac-forwarding-table.json` 与由转发表 JSON 派生的 `mac-forwarding-table.html`。
+> **用途**：供 `tools/topology-builder.js`、`tools/validate-topology.js`、`tools/validate-mac-forwarding-table.js` 与 `SKILL.md` 参照。
+> **范围**：覆盖 `topology.json`、`topo_feature.json`、`data-server.json` 与 `mac-forwarding-table.json` 四份 JSON。
 > **来源**：代码（FormModal / index.jsx / converter）+ 真实样例（`project1225/`）。
 
 ---
@@ -356,7 +356,7 @@ LabelUI 是 Qunee 渲染端口数字标签的位置/字体元数据。`$offsetX 
 
 ## 6.6 `mac-forwarding-table.json` 字段契约（标准 MAC 转发表）
 
-`mac-forwarding-table.json` 是 MAC 转发表的 canonical source。`mac-forwarding-table.html` **必须**从已通过 `tools/validate-mac-forwarding-table.js` 校验的 JSON 派生，不能把 HTML 当作源数据。
+`mac-forwarding-table.json` 是 MAC 转发表的 canonical source。迁移后的拓扑路径不再生成转发表 HTML。
 
 **根对象**：
 
@@ -390,24 +390,12 @@ Canonical key 顺序：`switch_node → switch_imac → switch_name → destinat
 
 - 只为 `node_type = "switch"` 的节点生成转发表项。
 - 对每个交换机，遍历所有可达的其他节点；不可达目的节点不生成 entry。
-- 每个 entry 表示标准 MAC 转发表记录：`destination_mac -> egress_port`，附带 node/imac/display_name 字段供 validator 核对。人读 HTML 只展示 `Switch`、`Destination MAC`、`Destination`、`端口号` 四列。
+- 每个 entry 表示标准 MAC 转发表记录：`destination_mac -> egress_port`，附带 node/imac/display_name 字段供 validator 核对。
 - `destination_mac` 基于目的节点 `node_id` 用 §3 公式派生，不基于 `imac`。
 - `egress_port` 是从该交换机出发到目的节点的确定性最短路径 first hop 所使用的交换机端口；直接相连目的节点使用直连链路上的交换机端口。
 - 转发表 entry 数量按可达目的 MAC 计算，不按交换机已连接端口数计算；多个目的 MAC 可以共用同一个 `egress_port`。
 - 等长路径 tie-break 按 builder 的 canonical 顺序：节点 ID 升序、端口升序。
 - 无交换机拓扑输出空 `entries` 数组。
-
-### 6.6.3 `mac-forwarding-table.html`
-
-HTML 是人读展示文件，不参与后续机器消费，只展示 `Switch`、`Destination MAC`、`Destination`、`端口号` 四列。生成顺序必须是：
-
-1. builder 生成 `mac-forwarding-table.json`
-2. `tools/validate-mac-forwarding-table.js` 校验 `topology.json + mac-forwarding-table.json`
-3. 校验通过后，`tools/render-mac-forwarding-html.js` 从 JSON 渲染 HTML
-
-HTML 中所有来自 JSON 的文本字段必须转义，避免用户提供的 `display_name` 破坏 markup。
-
----
 
 ## 7. 坐标布局规则
 

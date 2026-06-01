@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { z } from "zod";
+import { realpathSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { createTopologyToolRegistry } from "./topology-tools";
 
 export const TSN_TOPOLOGY_MCP_SERVER_NAME = "tsn_topology" as const;
@@ -17,7 +18,7 @@ export function createTsnTopologyMcpServer(): McpServer {
       {
         title: tool.title,
         description: tool.description,
-        inputSchema: z.object({}).catchall(z.unknown()),
+        inputSchema: tool.inputSchema,
       },
       async (args) => tool.handler(args ?? {}),
     );
@@ -33,9 +34,21 @@ export async function runTsnTopologyMcpServer(): Promise<void> {
   await server.connect(transport);
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (isCliEntrypoint()) {
   runTsnTopologyMcpServer().catch((error) => {
     console.error(error instanceof Error ? error.message : String(error));
     process.exitCode = 1;
   });
+}
+
+export function isCliEntrypoint(argvPath = process.argv[1], moduleUrl = import.meta.url): boolean {
+  if (!argvPath) {
+    return false;
+  }
+
+  try {
+    return realpathSync(fileURLToPath(moduleUrl)) === realpathSync(argvPath);
+  } catch {
+    return fileURLToPath(moduleUrl) === argvPath;
+  }
 }
