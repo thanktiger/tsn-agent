@@ -184,7 +184,7 @@ pub async fn remove_session(
 }
 
 impl SessionStore {
-    async fn pool(&self, app: &tauri::AppHandle) -> Result<&Pool<Sqlite>, String> {
+    pub(crate) async fn pool(&self, app: &tauri::AppHandle) -> Result<&Pool<Sqlite>, String> {
         self.pool
             .get_or_try_init(|| async { connect_app_database(app).await })
             .await

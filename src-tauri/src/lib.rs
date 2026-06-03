@@ -5,6 +5,7 @@ mod log_file_writer;
 mod planner_client;
 mod project_writer;
 mod redaction;
+mod session_export;
 mod session_store;
 mod skill_files;
 mod topology_sidecar;
@@ -47,6 +48,7 @@ pub fn run() {
             project_writer::open_project_export_dir,
             project_writer::suggest_project_export_dir,
             project_writer::write_project_artifacts,
+            session_export::export_session,
             session_store::get_current_session,
             session_store::list_sessions,
             session_store::remove_session,
