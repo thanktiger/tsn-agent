@@ -576,47 +576,9 @@ fn first_non_empty<'a>(left: &'a str, right: &'a str) -> &'a str {
     }
 }
 
-fn redact_error(value: &str) -> String {
-    value
-        .replace("claude-run-", "agent-run-")
-        .replace("Claude Code", "智能助手工具")
-        .replace("Claude Agent SDK", "智能助手运行时")
-        .replace("Claude Agent", "智能助手")
-        .replace("Claude SDK", "智能助手运行时")
-        .replace("Claude", "智能助手")
-        .replace("智能助手-run-", "agent-run-")
-        .replace("claude_api_key", "agent_api_key")
-        .replace("sk-ant-", "sk-ant-[redacted]-")
-        .split_whitespace()
-        .map(redact_token_like_word)
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-fn redact_token_like_word(word: &str) -> String {
-    let lower = word.to_ascii_lowercase();
-    let sensitive_keys = [
-        "api_key",
-        "apikey",
-        "token",
-        "secret",
-        "password",
-        "claude_api_key",
-    ];
-
-    if let Some(separator_index) = word.find('=').or_else(|| word.find(':')) {
-        let key = &lower[..separator_index];
-
-        if sensitive_keys
-            .iter()
-            .any(|sensitive_key| key.contains(sensitive_key))
-        {
-            return format!("{}[redacted]", &word[..separator_index + 1]);
-        }
-    }
-
-    word.to_string()
-}
+// `redact_error` / `redact_token_like_word` 实现 plan v3 U2b 已统一到
+// `crate::redaction`；本文件继续通过 re-export 引用原名以避免大面积改 call site。
+use crate::redaction::redact_error;
 
 fn validate_prompt(prompt: &str) -> Result<(), String> {
     if prompt.chars().count() > MAX_PROMPT_CHARS {

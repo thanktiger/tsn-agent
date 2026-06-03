@@ -3,6 +3,7 @@ mod db;
 mod diagnostic_store;
 mod planner_client;
 mod project_writer;
+mod redaction;
 mod session_store;
 mod skill_files;
 

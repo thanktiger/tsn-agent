@@ -192,43 +192,9 @@ pub fn redact_and_truncate(value: &str, max_chars: usize) -> String {
     )
 }
 
-pub fn redact_secrets(value: &str) -> String {
-    value
-        .split_whitespace()
-        .map(redact_token_like_word)
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-fn redact_token_like_word(word: &str) -> String {
-    let lower = word.to_ascii_lowercase();
-    let sensitive_keys = [
-        "api_key",
-        "apikey",
-        "token",
-        "secret",
-        "password",
-        "claude_api_key",
-        "authorization",
-    ];
-
-    if lower.contains("sk-ant-") {
-        return "[redacted]".to_string();
-    }
-
-    if let Some(separator_index) = word.find('=').or_else(|| word.find(':')) {
-        let key = &lower[..separator_index];
-
-        if sensitive_keys
-            .iter()
-            .any(|sensitive_key| key.contains(sensitive_key))
-        {
-            return format!("{}[redacted]", &word[..separator_index + 1]);
-        }
-    }
-
-    word.to_string()
-}
+// `redact_secrets` 与底层 `redact_token_like_word` 实现 plan v3 U2b 已统一到
+// `crate::redaction`；此处 re-export 保留既有 import path 兼容。
+pub use crate::redaction::redact_secrets;
 
 fn db_error(error: sqlx::Error) -> String {
     format!("diagnostic database error: {error}")
