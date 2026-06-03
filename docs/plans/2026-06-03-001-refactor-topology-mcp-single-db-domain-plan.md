@@ -37,7 +37,7 @@ Plan 入口需要 boss 提供 4 件套对应表的字段草案（U1 pre-conditio
 - **R6-R9**: MCP 工具契约（`tsn_topology` 名保留、env 注入 sessionId、`validate_intermediate→topology.validate`、**`build_artifacts` 仍返完整 4 件套 JSON**）
 - **R10-R12**: 事务与一致性（sqlx Transaction + 单 session 1 个写 tx + 5s timeout）
 - **R13-R16**: RPC 通道与安全（axum 127.0.0.1 IPv4 only + `OsRng` token + `setup()` 同步起 + UI 走 Tauri command + `session_db_changed` 事件 + mutationId 缓存补漏）
-- **R17-R19**: 复现与导出（byte-equal spike + Export/Import Session 命令；Export 必须 scrub `sessions.payload` blob；**Import 走 ops 白名单**）
+- **R17-R19**: 复现与导出（**canonical byte-equal** spike + Export/Import Session 命令；Export 必须 scrub `sessions.payload` blob；**Import 走 ops 白名单**）。注：原文件 byte-equal 不可能（CDT JSON 含 4-space indent 等格式化细节）；R17 实际语义是 RFC 8785 canonical form byte-equal（Spike A 已在 BFE fixture 验证）
 - **R20a-R20g**: Migration Phase A/B 时序
 - **R21-R22**: 安全约束（fail-closed + 继承既有 `diagnostic_store` allowlist + redact 模块集中）
 
@@ -255,7 +255,7 @@ RELEASE Phase B
 - Update: 本 plan 顶部 Overview — 加 boss sign-off 段（在 boss 同意后落地）
 
 **Approach:**
-- **Spike A (byte-equal)**: 跑 generic-line / generic-ring / dual-plane-redundant 三 fixture；Rust 脚本 sqlite + ORDER BY + canonical JSON 比对
+- **Spike A (canonical byte-equal)**: ✅ **已通过 (2026-06-03)** — BFE fixture (4 nodes / 2 links / sparse node) 在 15 张 P0 表 round-trip 后 canonical byte-equal 一致；见 `docs/plans/2026-06-03-001-spike-a-report.md`。建议后续提供 1-2 个更密集 fixture (含 gcl/psfg) 做 diversity 覆盖，但**不阻塞 U2a 启动**
 - **Spike A escalation**（time-boxed）:
   - Pass: 三 fixture 全 byte-equal → 进 Phase A
   - 第 1 次 fail：boss 在 1 周内 PR 选 (a) 调 schema 加 ORDER BY 辅助列 / (b) 接受 SC 降级 "语义等价 + planner_exporter 字节 accept" / (c) 取消重构
@@ -849,7 +849,7 @@ flowchart TB
 
 | Risk | Mitigation type | Mitigation |
 |---|---|---|
-| byte-equal spike 失败 | engineering | U1 Spike A 必先；time-boxed escalation (a)/(b)/(c) 三选 |
+| byte-equal spike 失败 | engineering | ✅ Spike A 已通过 (BFE fixture canonical byte-equal)；time-boxed escalation 未触发 |
 | Agent SDK env 透传 bug | engineering | U1 Spike B 验；强制 env: {} + delete CLAUDECODE |
 | WAL 升级既有 db 兼容 | engineering | U1 Spike C 验；WAL 升级是**单向门**，rollback 需重装 + 备份恢复 |
 | plugin_migration vs connect_app_database 路径不同 | engineering | U1 Spike C 验后选一条 |
@@ -900,7 +900,9 @@ flowchart TB
 - **Spike B report (env passthrough):** [docs/plans/2026-06-03-001-spike-b-report.md](./2026-06-03-001-spike-b-report.md) — confirms `mcpServers.env` must be explicit + delete CLAUDECODE
 - **Spike C report (WAL + plugin migration + IPv4):** [docs/plans/2026-06-03-001-spike-c-report.md](./2026-06-03-001-spike-c-report.md) — WAL already default, plugin migration uses `_sqlx_migrations` not `user_version`, plugin + connect_app_database same db, 127.0.0.1 IPv4 literal works
 - **U1 Schema draft:** [docs/plans/2026-06-03-001-schema-draft.md](./2026-06-03-001-schema-draft.md) — CDT-derived schema (15 P0 tables); revises plan v3 R1 (4-piece set now = topology + topo_feature + node + flow_plan; data-server/mac-forwarding dropped)
+- **Spike A report (canonical byte-equal):** [docs/plans/2026-06-03-001-spike-a-report.md](./2026-06-03-001-spike-a-report.md) — ✅ PASS on BFE fixture; schema NULLABLE corrections noted (topology_nodes.node_type / topology_links.name / nodes base_info columns)
 - **CDT JSON analysis (source):** `/Users/jiabozhang/Documents/Develop/TSN-BIT/CDT/docs/analysis/json-generation-analysis.html`
+- **CDT BFE fixture (source for Spike A):** `~/Library/Application Support/FPGA_CDT/files/bfe/`
 - **Superseded:** [docs/brainstorms/2026-05-27-tsn-topology-mcp-requirements.md](../brainstorms/2026-05-27-tsn-topology-mcp-requirements.md)（Phase B U9c 加 deprecation header）
 - **Phase A/B 模板:** [docs/plans/2026-05-21-001-feat-real-stage-skills-inet-smoke-plan.md](./2026-05-21-001-feat-real-stage-skills-inet-smoke-plan.md):207-228
 - **UI event 模板:** [docs/plans/2026-06-01-002-feat-agent-runtime-and-session-experience-plan.md](./2026-06-01-002-feat-agent-runtime-and-session-experience-plan.md) U3b
