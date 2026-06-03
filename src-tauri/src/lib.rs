@@ -8,6 +8,8 @@ mod redaction;
 mod session_export;
 mod session_store;
 mod skill_files;
+mod topology_mutation_buffer;
+mod topology_mutations_command;
 mod topology_sidecar;
 mod topology_sidecar_routes;
 
@@ -29,6 +31,7 @@ pub fn run() {
         )
         .manage(session_store::SessionStore::default())
         .manage(diagnostic_store::DiagnosticStore::default())
+        .manage(topology_mutation_buffer::TopologyMutationBuffer::default())
         .setup(|app| {
             // Plan v3 U3：sidecar 在 setup() 内同步起，bind 失败直接 panic（fail-closed）。
             let handle = tauri::async_runtime::block_on(topology_sidecar::launch());
@@ -49,6 +52,7 @@ pub fn run() {
             project_writer::suggest_project_export_dir,
             project_writer::write_project_artifacts,
             session_export::export_session,
+            topology_mutations_command::get_topology_mutations_since,
             session_store::get_current_session,
             session_store::list_sessions,
             session_store::remove_session,
