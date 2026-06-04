@@ -31,12 +31,11 @@
 
 - `src/app/App.tsx`：主界面、聊天输入、阶段确认、步骤导航、artifact 显示和导出按钮门禁。Phase A 起 flow-template / planning-export 阶段 UI 灰掉。
 - `src/app/App.css`：主界面样式。
-- `src/agent/agent-adapter.ts`：真实 Claude agent 与 fake agent 的适配层，负责 session/workflow 透传和诊断日志。
-- `src/agent/fake-agent.ts`：Web/E2E 环境的确定性 agent，实现分阶段推进、确认、快速路径和 agent event。
+- `src/agent/agent-adapter.ts`：Tauri-only agent 适配层，负责 session/workflow 透传、stage result（仅携带 mutationId）和诊断日志；非 Tauri（Web）fail-closed 返回「需要桌面版」，无 fake-agent 兜底。
+- `src/agent/agent-types.ts`：`AgentEvent` / `TsnAgentRequest` / `TsnAgentResult` 类型（自已删除的 fake-agent.ts 移入）。
 - `src/domain/scenario-config.ts`：轻量场景配置。新增应用场景时优先扩展这里，不要复制核心 workflow。
 - `src/domain/topology-factory.ts`：（@deprecated Phase B）历史 in-process 创建 canonical TSN project 入口；新代码应通过 MCP `topology.initialize` + sidecar。
 - `src/project/project-state.ts`：workflow state、阶段状态、确认、请求修改、旧 session 归一化。
-- `src/project/project-exporter.ts`、`src/project/project-writer.ts`、`src-tauri/src/project_writer.rs`：导出边界和写盘实现。
 - `src/sessions/session-repository.ts`、`src-tauri/src/session_store.rs`：Web localStorage 与 Tauri SQLite 会话保存。
 - `src/diagnostics/*`、`src/ui/diagnostics/DiagnosticsDrawer.tsx`：脱敏诊断日志和日志抽屉。
 - `src-node/claude-agent-worker.mjs`：Tauri 中通过本机 Node worker 调用官方 `@anthropic-ai/claude-agent-sdk`。
@@ -89,14 +88,17 @@
 
 ## 导出边界
 
-- 当前导出文件包括：
+> **Phase A 状态**：`flow-template` / `planning-export` 阶段在 UI 灰掉，项目导出整条链路（含 `project-exporter.ts` / `project-writer.ts` / `export-manifest.ts`，已删除）暂时下线，Phase B 回归。下列契约为 Phase B 目标，当前不可达。
+
+- Phase B 目标导出文件包括：
   - `tsnagent/generated/network.ned`
   - `omnetpp.ini`
   - `react-flow-topology.json`
   - `flow_plan_1.json`
   - `manifest.json`
-- `omnetpp.ini` 当前只承诺最小 INET/OMNeT++ 可加载运行；gPTP、TAS/GCL、调度器选择、业务流应用和规划结果回写是后续扩展。
+- `omnetpp.ini` 只承诺最小 INET/OMNeT++ 可加载运行；gPTP、TAS/GCL、调度器选择、业务流应用和规划结果回写是后续扩展。
 - 导出实现需要继续拒绝危险目录，例如 repo 根目录、home 根目录、应用配置目录、根目录和 symlink 目标。
+- 拓扑数据不再走文件导出落盘：sidecar `topology.apply_operations` 直接写 SQLite P0 表，UI 通过 `query_topology` Tauri command 读取。
 
 ## 验证命令
 
