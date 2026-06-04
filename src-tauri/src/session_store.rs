@@ -107,13 +107,31 @@ pub async fn save_session(
     let pool = store.pool(&app).await?;
     let session = request.session;
 
+    upsert_session(pool, &session).await?;
+    set_current_session_id(pool, &session.id).await
+}
+
+/// UPSERT 而非 INSERT OR REPLACE：REPLACE 是 DELETE+INSERT，DELETE 会触发
+/// P0 拓扑表的 ON DELETE CASCADE，导致每次保存会话即清空该 session 的
+/// topology_nodes/topology_links（agent 写入的拓扑随下一条消息丢失）。
+async fn upsert_session(pool: &Pool<Sqlite>, session: &SessionPayload) -> Result<(), String> {
     sqlx::query(
         r#"
-        INSERT OR REPLACE INTO sessions (
+        INSERT INTO sessions (
             id, title, created_at, updated_at, message_count, event_count,
             has_project, project_name, bundle_file_count, payload
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            title = excluded.title,
+            created_at = excluded.created_at,
+            updated_at = excluded.updated_at,
+            message_count = excluded.message_count,
+            event_count = excluded.event_count,
+            has_project = excluded.has_project,
+            project_name = excluded.project_name,
+            bundle_file_count = excluded.bundle_file_count,
+            payload = excluded.payload
         "#,
     )
     .bind(&session.id)
@@ -130,7 +148,7 @@ pub async fn save_session(
     .await
     .map_err(db_error)?;
 
-    set_current_session_id(pool, &session.id).await
+    Ok(())
 }
 
 #[tauri::command]
@@ -303,6 +321,7 @@ fn db_error(error: sqlx::Error) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::{upsert_session, SessionPayload};
     use sqlx::sqlite::SqlitePoolOptions;
     use sqlx::{Pool, Row, Sqlite};
 
@@ -427,6 +446,71 @@ mod tests {
             .await
             .expect("safety_net_schema_sql executes");
         pool
+    }
+
+    fn sample_session_payload(id: &str, title: &str) -> SessionPayload {
+        SessionPayload {
+            id: id.to_string(),
+            title: title.to_string(),
+            created_at: "2026-06-04T00:00:00.000Z".to_string(),
+            updated_at: "2026-06-04T00:00:00.000Z".to_string(),
+            message_count: 1,
+            event_count: 0,
+            has_project: true,
+            project_name: None,
+            bundle_file_count: 0,
+            payload: "{}".to_string(),
+        }
+    }
+
+    #[test]
+    fn upsert_session_keeps_topology_rows_on_resave() {
+        // 回归：INSERT OR REPLACE 的 DELETE 会触发 ON DELETE CASCADE，
+        // 把该 session 的 P0 拓扑行清空；UPSERT 不得有此副作用。
+        tauri::async_runtime::block_on(async {
+            let pool = fresh_memory_pool().await;
+            upsert_session(&pool, &sample_session_payload("s1", "t1"))
+                .await
+                .expect("initial insert");
+            sqlx::query(
+                "INSERT INTO topology_nodes (session_id, imac, sync_name, x, y, sync_type, insert_order) \
+                 VALUES ('s1', 1, '0', 0.0, 0.0, '{}', 0)",
+            )
+            .execute(&pool)
+            .await
+            .expect("seed topology node");
+            sqlx::query(
+                "INSERT INTO topology_links (session_id, link_seq, src_imac, dst_imac, styles_json) \
+                 VALUES ('s1', 0, 1, 1, '{}')",
+            )
+            .execute(&pool)
+            .await
+            .expect("seed topology link");
+
+            // 模拟用户发下一条消息后的会话保存。
+            upsert_session(&pool, &sample_session_payload("s1", "t1-updated"))
+                .await
+                .expect("resave");
+
+            let node_count: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM topology_nodes WHERE session_id = 's1'")
+                    .fetch_one(&pool)
+                    .await
+                    .expect("count nodes");
+            let link_count: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM topology_links WHERE session_id = 's1'")
+                    .fetch_one(&pool)
+                    .await
+                    .expect("count links");
+            let title: String = sqlx::query_scalar("SELECT title FROM sessions WHERE id = 's1'")
+                .fetch_one(&pool)
+                .await
+                .expect("title");
+
+            assert_eq!(node_count, 1, "resave must not cascade-delete topology nodes");
+            assert_eq!(link_count, 1, "resave must not cascade-delete topology links");
+            assert_eq!(title, "t1-updated");
+        });
     }
 
     async fn list_tables(pool: &Pool<Sqlite>) -> Vec<String> {
