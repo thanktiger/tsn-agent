@@ -12,7 +12,7 @@ description: TSN Agent 拓扑阶段指引。拓扑固定规则通过 tsn_topolog
 - 拓扑模板、初始化、校验、artifact 构建、inspect 和 P0 `apply_operations` 由 `tsn_topology` MCP 工具或项目本地 topology domain 执行。
 - 自然语言理解、模板选择、selector 消歧、用户澄清和阶段推进仍由 Agent / Project 层负责。
 - `generate_project`、time sync、flow planning、simulation、export 不属于 topology MCP。
-- MCP tool 返回值已是 sidecar 结构化领域响应（不再需要 `responseMode` / `topologyFullAllowed` 字段）；`topology.apply_operations` 落 P0 表后响应携带 `summary.mutationId`，worker 据此合成 `WorkflowStageResult`。
+- MCP tool 返回值已是 sidecar 结构化领域响应（不再需要 `responseMode` / `topologyFullAllowed` 字段）；`topology.initialize`（整表重建）与 `topology.apply_operations`（增量编辑）落 P0 表后响应携带 `summary.mutationId`，worker 据此合成 `WorkflowStageResult`。
 - 不要把完整 artifact、端口表、MAC 表或完整 changeSet 写进对话。
 - 最终工程状态只接受 worker/app-runtime 基于 trusted topology result 合成的结构化 `WorkflowStageResult`；不要让模型写 `stage-result.json`。
 
@@ -22,7 +22,7 @@ description: TSN Agent 拓扑阶段指引。拓扑固定规则通过 tsn_topolog
 
 1. 从用户需求和场景默认值提取结构化参数。
 2. 调用 `mcp__tsn_topology__topology_describe_templates` 获取可用模板目录。
-3. 选择明确的 `templateId` 和参数后调用 `mcp__tsn_topology__topology_initialize`；再调用 `mcp__tsn_topology__topology_apply_operations` 写入工程数据库（右侧落图依赖返回的 `mutationId`）。
+3. 选择明确的 `templateId` 和参数后调用 `mcp__tsn_topology__topology_initialize`；它会直接写入工程数据库并返回 `mutationId`（右侧据此落图），同时替换该会话已有拓扑。
 4. 必要时调用 `mcp__tsn_topology__topology_validate` 和 `mcp__tsn_topology__topology_build_artifacts` 获取 summary。
 5. 用中文说明当前拓扑摘要并等待用户确认；不要输出完整 topology JSON 或 stage result JSON。
 

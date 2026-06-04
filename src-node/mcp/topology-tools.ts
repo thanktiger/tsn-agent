@@ -44,7 +44,7 @@ export function createTopologyToolRegistry(): TopologyMcpToolDefinition[] {
       name: "topology.initialize",
       allowedToolName: "mcp__tsn_topology__topology_initialize",
       title: "Initialize topology",
-      description: "Create an IntermediateTopology from a structured template id and params.",
+      description: "Compute a topology from a template and persist it into the project DB, replacing the session's current topology. Returns summary.mutationId; use topology.inspect to query the persisted result.",
       inputSchema: initializeInputSchema(),
       handler: async (args) => callSidecarTool(
         "/db/topology/initialize",

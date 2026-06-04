@@ -18,12 +18,14 @@ use serde_json::{json, Value};
 use sqlx::Row;
 use std::sync::Arc;
 
+use crate::topology_backfill::{legacy_class_path, legacy_node_type};
 use crate::topology_compute::{
     build_topology_artifacts, describe_templates_catalog, describe_topology_artifacts,
     initialize_topology as compute_initialize, inspect_topology as compute_inspect,
     validate_intermediate_topology, validate_topology_artifacts, InitializeIntent,
     InspectRequestBody,
 };
+use crate::topology_intermediate::{IntermediateNodeType, IntermediateTopology};
 use crate::topology_mutation_buffer::{MutationRecord, TopologyMutationBuffer};
 use crate::topology_ops::{apply_op, TopologyOp};
 
@@ -197,13 +199,125 @@ pub async fn initialize(
         template_id: req.template_id,
         params: req.params,
     };
-    match compute_initialize(&intent) {
-        Ok((topology, summary)) => ok_summary_with_full(
-            serde_json::to_value(&summary).unwrap_or(Value::Null),
-            json!({ "topology": topology }),
-        ),
-        Err(errors) => fail_with_errors(errors),
+    let (topology, summary) = match compute_initialize(&intent) {
+        Ok(result) => result,
+        Err(errors) => return fail_with_errors(errors),
+    };
+
+    // 计算 + 落库一步完成：替换该 session 的 P0 拓扑行并 mint mutationId。
+    // initialize 不再返回 full topology（agent 用 inspect 查询切片），
+    // 也不再依赖模型「记得」追加调用 apply_operations 才能落图。
+    if let Err(message) = persist_initialized_topology(&state.pool, &req.session_id, &topology).await {
+        return structured_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "PERSIST_FAILED",
+            &message,
+            true,
+        );
     }
+
+    let record = state
+        .mutation_buffer
+        .push(req.session_id.clone(), "topology".to_string());
+    (state.emit)(record.clone());
+
+    let mut summary_value = serde_json::to_value(&summary).unwrap_or(Value::Null);
+    if let Value::Object(ref mut map) = summary_value {
+        map.insert("sessionId".to_string(), Value::String(req.session_id));
+        map.insert("mutationId".to_string(), json!(record.mutation_id));
+        map.insert("persisted".to_string(), Value::Bool(true));
+    }
+    ok_summary(summary_value)
+}
+
+/// 把 initialize 计算出的 IntermediateTopology 重建到该 session 的 P0 表。
+/// 映射规则与 backfill walker 对齐：imac = 100 + insert_order（按 numericId 升序），
+/// sync_name = numericId，sync_type = {"_classPath": legacy_class_path}。
+async fn persist_initialized_topology(
+    pool: &sqlx::Pool<sqlx::Sqlite>,
+    session_id: &str,
+    topology: &IntermediateTopology,
+) -> Result<(), String> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| format!("begin failed: {e}"))?;
+    let conn: &mut sqlx::SqliteConnection = &mut tx;
+
+    for table in ["topology_nodes", "topology_links", "topology_refs"] {
+        sqlx::query(&format!("DELETE FROM {table} WHERE session_id = ?"))
+            .bind(session_id)
+            .execute(&mut *conn)
+            .await
+            .map_err(|e| format!("{table} delete failed: {e}"))?;
+    }
+
+    let mut sorted_nodes: Vec<&crate::topology_intermediate::IntermediateNode> =
+        topology.nodes.iter().collect();
+    sorted_nodes.sort_by_key(|node| node.numeric_id);
+
+    let mut imac_by_node_id: std::collections::HashMap<&str, i64> = std::collections::HashMap::new();
+    for (index, node) in sorted_nodes.iter().enumerate() {
+        let imac = 100 + index as i64;
+        let type_str = match node.node_type {
+            IntermediateNodeType::Switch => "switch",
+            IntermediateNodeType::EndSystem => "endSystem",
+            IntermediateNodeType::Server => "server",
+        };
+        let sync_type = json!({ "_classPath": legacy_class_path(type_str) }).to_string();
+        sqlx::query(
+            r#"INSERT INTO topology_nodes
+               (session_id, imac, sync_name, x, y, sync_type, node_type, insert_order)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)"#,
+        )
+        .bind(session_id)
+        .bind(imac)
+        .bind(node.numeric_id.to_string())
+        .bind(node.position.x)
+        .bind(node.position.y)
+        .bind(&sync_type)
+        .bind(legacy_node_type(type_str))
+        .bind(index as i64)
+        .execute(&mut *conn)
+        .await
+        .map_err(|e| format!("topology_nodes insert failed: {e}"))?;
+        imac_by_node_id.insert(node.id.as_str(), imac);
+    }
+
+    let mut sorted_links: Vec<&crate::topology_intermediate::IntermediateLink> =
+        topology.links.iter().collect();
+    sorted_links.sort_by_key(|link| link.numeric_id);
+
+    for (index, link) in sorted_links.iter().enumerate() {
+        let src_imac = *imac_by_node_id
+            .get(link.source.node_id.as_str())
+            .ok_or_else(|| format!("link {} references unknown source node", link.id))?;
+        let dst_imac = *imac_by_node_id
+            .get(link.target.node_id.as_str())
+            .ok_or_else(|| format!("link {} references unknown target node", link.id))?;
+        let styles_json = json!({
+            "leftLabel": link.source.port_id,
+            "rightLabel": link.target.port_id,
+            "speed": link.data_rate_mbps,
+        })
+        .to_string();
+        sqlx::query(
+            r#"INSERT INTO topology_links
+               (session_id, link_seq, name, src_imac, dst_imac, styles_json)
+               VALUES (?, ?, ?, ?, ?, ?)"#,
+        )
+        .bind(session_id)
+        .bind(index as i64)
+        .bind(&link.id)
+        .bind(src_imac)
+        .bind(dst_imac)
+        .bind(&styles_json)
+        .execute(&mut *conn)
+        .await
+        .map_err(|e| format!("topology_links insert failed: {e}"))?;
+    }
+
+    tx.commit().await.map_err(|e| format!("commit failed: {e}"))
 }
 
 // ---------- inspect ----------

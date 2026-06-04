@@ -356,6 +356,83 @@ mod tests {
     }
 
     #[test]
+    fn initialize_persists_topology_and_mints_mutation_id() {
+        tauri::async_runtime::block_on(async {
+            let (pool, buf) = test_state().await;
+            sqlx::query("INSERT INTO sessions (id, title, created_at, updated_at, payload) VALUES ('s1','t','now','now','{}')")
+                .execute(&pool).await.unwrap();
+            let (router, token) = build_test_router_with_pool(pool.clone(), buf.clone()).await;
+
+            let body = serde_json::json!({
+                "sessionId": "s1",
+                "templateId": "generic-line",
+                "params": { "switchCount": 2, "endSystemsPerSwitch": 2 }
+            }).to_string();
+            let resp = router
+                .oneshot(Request::builder().method("POST").uri("/db/topology/initialize")
+                    .header("Authorization", format!("Bearer {}", token.expose()))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(body)).unwrap())
+                .await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+
+            let bytes = to_bytes(resp.into_body(), 16_384).await.unwrap();
+            let parsed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(parsed["ok"], true);
+            assert_eq!(parsed["summary"]["mutationId"], 1);
+            assert_eq!(parsed["summary"]["persisted"], true);
+            assert_eq!(parsed["summary"]["sessionId"], "s1");
+            // 不再返回 full topology（agent 用 inspect 查询切片）。
+            assert!(parsed.get("full").is_none());
+
+            // 2 交换机 + 4 端系统 = 6 节点；1 条骨干 + 4 条接入 = 5 链路。
+            let node_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM topology_nodes WHERE session_id='s1'")
+                .fetch_one(&pool).await.unwrap();
+            let link_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM topology_links WHERE session_id='s1'")
+                .fetch_one(&pool).await.unwrap();
+            assert_eq!(node_count, 6);
+            assert_eq!(link_count, 5);
+
+            // ring buffer 推进。
+            assert_eq!(buf.since("s1", 0).latest, 1);
+        });
+    }
+
+    #[test]
+    fn initialize_replaces_previous_topology_on_reinitialize() {
+        tauri::async_runtime::block_on(async {
+            let (pool, buf) = test_state().await;
+            sqlx::query("INSERT INTO sessions (id, title, created_at, updated_at, payload) VALUES ('s1','t','now','now','{}')")
+                .execute(&pool).await.unwrap();
+            let (router, token) = build_test_router_with_pool(pool.clone(), buf.clone()).await;
+
+            for params in [
+                serde_json::json!({ "switchCount": 4, "endSystemsPerSwitch": 5 }),
+                serde_json::json!({ "switchCount": 2, "endSystemsPerSwitch": 2 }),
+            ] {
+                let body = serde_json::json!({
+                    "sessionId": "s1",
+                    "templateId": "generic-line",
+                    "params": params,
+                }).to_string();
+                let resp = router.clone()
+                    .oneshot(Request::builder().method("POST").uri("/db/topology/initialize")
+                        .header("Authorization", format!("Bearer {}", token.expose()))
+                        .header("Content-Type", "application/json")
+                        .body(Body::from(body)).unwrap())
+                    .await.unwrap();
+                assert_eq!(resp.status(), StatusCode::OK);
+            }
+
+            // 第二次 initialize 整表重建为 2×2。
+            let node_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM topology_nodes WHERE session_id='s1'")
+                .fetch_one(&pool).await.unwrap();
+            assert_eq!(node_count, 6);
+            assert_eq!(buf.since("s1", 0).latest, 2);
+        });
+    }
+
+    #[test]
     fn apply_operations_inserts_and_mints_mutation_id() {
         tauri::async_runtime::block_on(async {
             let (pool, buf) = test_state().await;

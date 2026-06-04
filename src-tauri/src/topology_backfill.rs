@@ -343,7 +343,7 @@ async fn apply_canonical_to_db(
     Ok(())
 }
 
-fn legacy_node_type(canonical: &str) -> &'static str {
+pub(crate) fn legacy_node_type(canonical: &str) -> &'static str {
     match canonical {
         "switch" => "switch",
         "endSystem" => "networkcard",
@@ -352,7 +352,7 @@ fn legacy_node_type(canonical: &str) -> &'static str {
     }
 }
 
-fn legacy_class_path(canonical: &str) -> &'static str {
+pub(crate) fn legacy_class_path(canonical: &str) -> &'static str {
     match canonical {
         "switch" => "Q.Graphs.exchanger2",
         "server" => "Q.Graphs.server",
