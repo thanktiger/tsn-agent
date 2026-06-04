@@ -1,3 +1,14 @@
+/**
+ * @deprecated Phase B (plan v3 U9b 范围)：sidecar 已成为 topology 写权威，
+ * `IntermediateTopology` 不再是事实源。当前文件保留是因为 ~12 个 consumer
+ * (agent-adapter / fake-agent / session-repository / project-* / App.tsx /
+ * topology-factory) 仍在解析 / 序列化此类型；完整删除需要重写 agent runtime
+ * + UI 端 topology hydrate 路径，是 Phase B 后续 PR 范围。
+ *
+ * **不要在新代码里 import 这个文件**。新代码应：
+ * - 写：通过 MCP `topology.apply_operations` 走 sidecar；
+ * - 读：调用 `query_topology` Tauri command 拉 `{ nodes, links }` flat slice。
+ */
 import type { TopologyError, TopologyWarning } from "./tool-result";
 
 export const INTERMEDIATE_TOPOLOGY_SCHEMA_VERSION = "tsn-agent.topology.intermediate.v0" as const;

@@ -1057,15 +1057,35 @@ export function App() {
             </span>
           </div>
 
+          {/* Phase B-α (plan v3 U9c)：流量规划暂下线告知 banner。具体回归版本号由 boss
+              在 Phase B release 时确定后填入；保留 v0.X 占位以便 grep 替换。 */}
+          <div
+            className="phase-b-banner"
+            role="note"
+            aria-live="polite"
+          >
+            流量规划与规划导出在当前版本暂时下线，预计 v0.X 随 Phase B 回归。
+          </div>
+
           <div className="chat-stepper" aria-label="配置步骤">
-            {(["topology", "time-sync", "flow-template", "planning-export"] as const).map((step, index, steps) => (
-              <Fragment key={step}>
-                <Step index={`${index + 1}`} label={scenarioConfig.stageLabels[step]} status={workflow.stages[step].status} />
-                {index < steps.length - 1 && (
-                  <span className={workflow.stages[step].status === "confirmed" ? "stepper-conn active" : "stepper-conn"} />
-                )}
-              </Fragment>
-            ))}
+            {(["topology", "time-sync", "flow-template", "planning-export"] as const).map((step, index, steps) => {
+              // Phase B-α：flow-template / planning-export 阶段 aria-disabled + tooltip
+              const isFlowStage = step === "flow-template" || step === "planning-export";
+              return (
+                <Fragment key={step}>
+                  <Step
+                    index={`${index + 1}`}
+                    label={scenarioConfig.stageLabels[step]}
+                    status={workflow.stages[step].status}
+                    disabled={isFlowStage}
+                    disabledReason={isFlowStage ? "流量规划与规划导出在当前版本暂时下线，预计 v0.X 回归" : undefined}
+                  />
+                  {index < steps.length - 1 && (
+                    <span className={workflow.stages[step].status === "confirmed" ? "stepper-conn active" : "stepper-conn"} />
+                  )}
+                </Fragment>
+              );
+            })}
           </div>
 
           <div className="messages" aria-live="polite" ref={messagesContainerRef}>
@@ -1771,15 +1791,25 @@ function Step({
   index,
   label,
   status,
+  disabled,
+  disabledReason,
 }: {
   index: string;
   label: string;
   status: "locked" | "current" | "waiting_confirmation" | "confirmed" | "error";
+  /** Phase B-α (plan v3 U9c)：标记暂下线阶段（flow-template / planning-export）。 */
+  disabled?: boolean;
+  /** tooltip 文案，鼠标 hover + screen reader 都可以读。 */
+  disabledReason?: string;
 }) {
   const className = status === "confirmed" ? "passed" : status;
 
   return (
-    <div className={`stepper-item ${className}`}>
+    <div
+      className={`stepper-item ${className}${disabled ? " disabled" : ""}`}
+      aria-disabled={disabled || undefined}
+      title={disabled ? disabledReason : undefined}
+    >
       <span className="si-num">{index}</span>
       <span className="si-label">{label}</span>
     </div>

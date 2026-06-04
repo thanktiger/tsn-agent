@@ -1,7 +1,26 @@
 ---
 date: 2026-05-27
 topic: tsn-topology-mcp
+status: superseded
+superseded_by: docs/brainstorms/2026-06-03-session-db-mcp-requirements.md
+plan: docs/plans/2026-06-03-001-refactor-topology-mcp-single-db-domain-plan.md
 ---
+
+> **⚠️ Deprecated（2026-06-04）**
+>
+> 本 brainstorm 描述的是 P0 in-process topology MCP 设计（`IntermediateTopology` /
+> `CanonicalTsnProjectV0` / 4 件套 JSON 三层模型）。Plan v3 已落地 sidecar + 单 SQLite
+> 领域表重构（参见 `docs/plans/2026-06-03-001-refactor-topology-mcp-single-db-domain-plan.md`），
+> 本 brainstorm 中以下关键设计被推翻：
+>
+> 1. **`IntermediateTopology` 不再是 MCP wire 协议**：MCP handler 通过 sidecar HTTP 写 SQLite，
+>    `topology_compute.rs` 1:1 镜像本算法但只在 sidecar 内部使用。
+> 2. **`responseMode` / `topologyFullAllowed` 字段已删除**：返回值已是结构化领域响应。
+> 3. **`topology.validate_intermediate` 重命名为 `topology.validate`**。
+> 4. **`CanonicalTsnProjectV0` 不再是 writable 事实源**：sidecar 写 P0 15 张表；payload 字段
+>    仅作为 session 序列化 schema 保留（Phase B 后续 PR 进一步清理）。
+>
+> 历史保留，仅供溯源；新接入逻辑参见 `docs/topology-mcp.md` + 上述 plan 文档。
 
 # TSN Topology MCP 服务化需求
 

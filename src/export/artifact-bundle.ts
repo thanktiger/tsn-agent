@@ -1,3 +1,9 @@
+/**
+ * @deprecated Phase B (plan v3 U9b 范围)：artifact bundle 仍在 UI 总入口（App.tsx）
+ * 与 project-exporter / app-diagnostics 使用，整体改造（拆分为 sidecar-driven artifact
+ * + summary）是 Phase B 后续 PR 范围。当前 UI 中 flow 相关 bundle 字段在
+ * Phase B-α 已 grayscale，artifact bundle 仅留 topology / ned / react-flow 三件套。
+ */
 import type { CanonicalTsnProjectV0 } from "../domain/canonical";
 import { validateCanonicalProject } from "../domain/validation";
 import { exportOmnetppIni } from "./ini-exporter";

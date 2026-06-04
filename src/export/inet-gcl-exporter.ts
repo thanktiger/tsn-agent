@@ -1,3 +1,7 @@
+/**
+ * @deprecated Phase B (plan v3 U9b 范围)：GCL 流量导出在 P0 暂下线，boss P1 重建。
+ * Phase B-α 仅打标；完整删除是 Phase B 后续 PR。
+ */
 import type { CanonicalTsnProjectV0 } from "../domain/canonical";
 import type { PlannerResultSnapshot } from "../planner/planner-contract";
 
