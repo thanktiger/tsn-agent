@@ -250,6 +250,62 @@ pub fn safety_net_schema_sql() -> String {
     )
 }
 
+/// Export/Import 共享的 session 域数据表清单（表名 + 列清单，首列恒为 session_id）。
+/// 单一事实源：导出切片（session_export）与导入复制（session_import）都遍历此清单，
+/// 防两端漂移 —— 导出写了 import 不收的表 = 静默丢数据。
+/// `sessions` 行本身不在清单内（两端都有特殊处理：导出置 payload、导入改写 id）。
+pub const SESSION_SCOPED_TABLES: &[(&str, &[&str])] = &[
+    ("topology_refs", &["session_id", "ref_json"]),
+    (
+        "topology_nodes",
+        &["session_id", "imac", "sync_name", "x", "y", "sync_type", "node_type", "insert_order"],
+    ),
+    (
+        "topology_links",
+        &["session_id", "link_seq", "name", "src_imac", "dst_imac", "styles_json"],
+    ),
+    (
+        "topo_feature_links",
+        &[
+            "session_id", "link_id", "src_node", "src_port", "dst_node", "dst_port", "speed",
+            "st_queues", "macrotick",
+        ],
+    ),
+    (
+        "nodes",
+        &[
+            "session_id", "node_id", "is_global", "node_name", "node_type", "queue_num",
+            "buffer_num", "port_num", "mac_address", "ip", "config_file_name", "device_id",
+            "test_port",
+        ],
+    ),
+    ("nodes_oss_cfg", &["session_id", "node_id", "cfg_json"]),
+    (
+        "nodes_sdu_table_cfg",
+        &["session_id", "node_id", "port_id", "traffic_class", "sdu_size"],
+    ),
+    (
+        "nodes_gcl_cfg",
+        &[
+            "session_id", "node_id", "port_id", "slot_index", "operation_name",
+            "gate_state_value", "time_interval_value",
+        ],
+    ),
+    ("nodes_time_cfg", &["session_id", "node_id", "cfg_json"]),
+    (
+        "nodes_psfg_stream_filters",
+        &["session_id", "node_id", "filter_id", "spec_json", "flow_meter_id", "stream_gate_id"],
+    ),
+    ("nodes_psfg_flow_meters", &["session_id", "node_id", "meter_id", "spec_json"]),
+    ("nodes_psfg_stream_gates", &["session_id", "node_id", "gate_id", "spec_json"]),
+    ("nodes_frer_cfg", &["session_id", "node_id", "cfg_json"]),
+    (
+        "nodes_array_cfg",
+        &["session_id", "node_id", "cfg_kind", "entry_seq", "entry_json"],
+    ),
+    ("nodes_object_cfg", &["session_id", "node_id", "cfg_kind", "cfg_json"]),
+];
+
 /// Plan v3 U_R5：lazy migration。旧 v1 db 含 `diagnostic_logs` 表 + 索引；
 /// 升级到 v3 时一次性 `DROP TABLE IF EXISTS`，数据直接丢弃（脱敏摘要，
 /// 不属用户数据，参考 KTD）。新写入 jsonl 由 `log_file_writer` 负责。

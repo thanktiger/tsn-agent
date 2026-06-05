@@ -308,7 +308,8 @@ pub(crate) async fn perform_import(
 
 /// 动态 bind：根据列名读源 row 类型 → bind 到目标 query。
 /// 处理所有 P0 schema 用到的 SQLite 类型：TEXT / INTEGER / REAL / NULL。
-fn bind_dynamic<'q>(
+/// pub(crate)：session_export 的切片写入复用同一 bind 逻辑。
+pub(crate) fn bind_dynamic<'q>(
     q: sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'q>>,
     row: &sqlx::sqlite::SqliteRow,
     col: &str,
