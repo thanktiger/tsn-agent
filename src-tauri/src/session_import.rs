@@ -668,6 +668,74 @@ mod tests {
     }
 
     #[test]
+    fn import_rejects_remaining_limit_variants() {
+        tauri::async_runtime::block_on(async {
+            let (dir, main_pool) = seed_main_pool().await;
+
+            // links > MAX_LINKS → 拒。
+            let src_pool = source_pool(dir.path()).await;
+            sqlx::query("INSERT INTO sessions (id, title, created_at, updated_at, payload) VALUES ('orig', 't', 'now', 'now', '{}')")
+                .execute(&src_pool).await.unwrap();
+            sqlx::query("INSERT INTO topology_nodes (session_id, imac, sync_name, x, y, sync_type, insert_order) VALUES ('orig', 1, '0', 0.0, 0.0, '{}', 0), ('orig', 2, '1', 1.0, 1.0, '{}', 1)")
+                .execute(&src_pool).await.unwrap();
+            let mut values = Vec::new();
+            for i in 0..=(MAX_LINKS as i64) {
+                values.push(format!("('orig', {i}, 1, 2, '{{}}')"));
+            }
+            let sql = format!(
+                "INSERT INTO topology_links (session_id, link_seq, src_imac, dst_imac, styles_json) VALUES {}",
+                values.join(", ")
+            );
+            sqlx::query(&sql).execute(&src_pool).await.unwrap();
+            let links_path = dir.path().join("links.db");
+            crate::session_export::perform_single_session_export(&src_pool, "orig", links_path.to_str().unwrap())
+                .await.unwrap();
+            let err = perform_import(&main_pool, &links_path, Some("links")).await.unwrap_err();
+            assert!(err.contains("链路数"), "err={err}");
+
+            // project_name > 256B → 拒(手工切片)。
+            let pn_path = dir.path().join("pn.db");
+            let opts = sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(&pn_path).create_if_missing(true);
+            let pn_pool = SqlitePoolOptions::new().max_connections(1).connect_with(opts).await.unwrap();
+            sqlx::query(&crate::db::safety_net_schema_sql()).execute(&pn_pool).await.unwrap();
+            sqlx::query("INSERT INTO sessions (id, title, created_at, updated_at, project_name, payload) VALUES ('orig', 't', 'now', 'now', ?, '{}')")
+                .bind("p".repeat(300))
+                .execute(&pn_pool).await.unwrap();
+            pn_pool.close().await;
+            let err = perform_import(&main_pool, &pn_path, Some("pn")).await.unwrap_err();
+            assert!(err.contains("project_name"), "err={err}");
+
+            // 总行数 > MAX_TOTAL_SCOPED_ROWS → 拒(子表塞行;手工切片绕过 FK）。
+            let rows_path = dir.path().join("rows.db");
+            let opts = sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(&rows_path).create_if_missing(true);
+            let rows_pool = SqlitePoolOptions::new().max_connections(1).connect_with(opts).await.unwrap();
+            sqlx::query(&crate::db::safety_net_schema_sql()).execute(&rows_pool).await.unwrap();
+            sqlx::query("INSERT INTO sessions (id, title, created_at, updated_at, payload) VALUES ('orig', 't', 'now', 'now', '{}')")
+                .execute(&rows_pool).await.unwrap();
+            sqlx::query("PRAGMA foreign_keys = OFF").execute(&rows_pool).await.unwrap();
+            // nodes 表（PK 含 node_id）灌入超过总上限的行数。
+            let mut batch = Vec::with_capacity(2000);
+            for i in 0..=MAX_TOTAL_SCOPED_ROWS {
+                batch.push(format!("('orig', 'n{i}')"));
+                if batch.len() == 2000 {
+                    let sql = format!("INSERT INTO nodes (session_id, node_id) VALUES {}", batch.join(", "));
+                    sqlx::query(&sql).execute(&rows_pool).await.unwrap();
+                    batch.clear();
+                }
+            }
+            if !batch.is_empty() {
+                let sql = format!("INSERT INTO nodes (session_id, node_id) VALUES {}", batch.join(", "));
+                sqlx::query(&sql).execute(&rows_pool).await.unwrap();
+            }
+            rows_pool.close().await;
+            let err = perform_import(&main_pool, &rows_path, Some("rows")).await.unwrap_err();
+            assert!(err.contains("总行数"), "err={err}");
+        });
+    }
+
+    #[test]
     fn import_accepts_exact_limit_counts() {
         tauri::async_runtime::block_on(async {
             let (dir, main_pool) = seed_main_pool().await;
