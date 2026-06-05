@@ -481,8 +481,9 @@ pub struct ApplyOpsSummary {
     mutation_id: Option<u64>,
 }
 
-/// 与 MCP 层 `src/topology/limits.ts` 的 `maxOperations` 对齐；
-/// sidecar 端兜底，防止绕过 MCP 的本机调用方提交超大批次占住写事务。
+/// 唯一的 operations 数量 enforcement 点（上限值沿用 MCP 层
+/// `src/topology/limits.ts` 的 `maxOperations` 常量语义；MCP ingress 只校验
+/// 字节数/深度），防止本机调用方提交超大批次占住写事务。
 const MAX_OPERATIONS_PER_REQUEST: usize = 32;
 
 pub async fn apply_operations(

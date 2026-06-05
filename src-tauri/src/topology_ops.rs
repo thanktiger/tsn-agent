@@ -82,6 +82,8 @@ pub struct OpResultSummary {
 /// 标记为 retryable，而第一次调用可能已 commit。因此写操作必须重试安全：
 ///   - node.add / link.add 使用 UPSERT（重放同值无害）
 ///   - node.delete / link.delete 删除不存在的目标是 no-op（rows_affected=0）
+///   - node.update 重放安全（目标在重放场景必然存在）；更新真正不存在的
+///     目标仍报 NOT_FOUND —— 那是逻辑错误，不是重试。
 ///   - link.add 前校验两端节点存在（悬空链路进不了 DB）
 ///   - node.delete 拒绝仍有链路引用的节点（先 link.delete）
 pub async fn apply_op(
