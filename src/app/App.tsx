@@ -91,7 +91,7 @@ export function App() {
   const [activeConfigTab, setActiveConfigTab] = useState<ConfigTabId>("node-detail");
   const [selectedTopologyItem, setSelectedTopologyItem] = useState<SelectedTopologyItem | undefined>();
   const messagesContainerRef = useRef<HTMLDivElement | null>(null);
-  const topologySnapshot = useTopologySnapshot(currentSession.id);
+  const { snapshot: topologySnapshot } = useTopologySnapshot(currentSession.id);
 
   useEffect(() => {
     let cancelled = false;

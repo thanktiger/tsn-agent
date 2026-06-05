@@ -2296,3 +2296,66 @@ textarea:focus-visible {
     grid-template-columns: 1fr;
   }
 }
+
+/* ConfirmDialog（plan 2026-06-05-002 U3）：轻量确认弹窗，独立挂载不影响既有布局 */
+.confirm-dialog-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.confirm-dialog {
+  background: #fff;
+  border-radius: 12px;
+  padding: 20px 24px;
+  max-width: 420px;
+  width: calc(100% - 48px);
+  box-shadow: 0 12px 40px rgba(15, 23, 42, 0.25);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.confirm-dialog-title {
+  font-size: 15px;
+  color: #0f172a;
+}
+
+.confirm-dialog-body {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.6;
+  color: #475569;
+}
+
+.confirm-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.confirm-dialog-actions button {
+  border-radius: 8px;
+  padding: 6px 14px;
+  font-size: 13px;
+  cursor: pointer;
+  border: 1px solid #cbd5e1;
+  background: #fff;
+  color: #334155;
+}
+
+.confirm-dialog-confirm {
+  border-color: #2563eb;
+  background: #2563eb;
+  color: #fff;
+}
+
+.confirm-dialog-confirm.danger {
+  border-color: #dc2626;
+  background: #dc2626;
+  color: #fff;
+}

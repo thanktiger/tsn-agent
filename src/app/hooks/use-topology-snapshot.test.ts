@@ -62,9 +62,23 @@ describe("useTopologySnapshot", () => {
     const { result } = renderHook(() => useTopologySnapshot("s1"));
 
     await waitFor(() => {
-      expect(result.current?.sessionId).toBe("s1");
+      expect(result.current.snapshot?.sessionId).toBe("s1");
     });
-    expect(result.current?.nodes).toHaveLength(2);
+    expect(result.current.snapshot?.nodes).toHaveLength(2);
+  });
+
+  it("refetch imperatively reloads the snapshot", async () => {
+    let nodeCount = 1;
+    mockCommands(async (sessionId) => snapshotFor(sessionId, nodeCount));
+
+    const { result } = renderHook(() => useTopologySnapshot("s1"));
+    await waitFor(() => expect(result.current.snapshot?.nodes).toHaveLength(1));
+
+    // 数据在外部变化（如 retry_backfill 重建）→ 调用方显式 refetch。
+    nodeCount = 5;
+    await result.current.refetch();
+
+    await waitFor(() => expect(result.current.snapshot?.nodes).toHaveLength(5));
   });
 
   it("discards a stale in-flight response after the session switches", async () => {
@@ -87,13 +101,13 @@ describe("useTopologySnapshot", () => {
 
     // s2 先返回 → 应用；迟到的 s1 响应必须被 requestSeq 守卫丢弃。
     pending.get("s2")!.resolve(snapshotFor("s2", 3));
-    await waitFor(() => expect(result.current?.sessionId).toBe("s2"));
+    await waitFor(() => expect(result.current.snapshot?.sessionId).toBe("s2"));
 
     pending.get("s1")!.resolve(snapshotFor("s1", 9));
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    expect(result.current?.sessionId).toBe("s2");
-    expect(result.current?.nodes).toHaveLength(3);
+    expect(result.current.snapshot?.sessionId).toBe("s2");
+    expect(result.current.snapshot?.nodes).toHaveLength(3);
   });
 
   it("keeps the snapshot undefined when the query rejects", async () => {
@@ -107,7 +121,7 @@ describe("useTopologySnapshot", () => {
     await waitFor(() => {
       expect(warn).toHaveBeenCalled();
     });
-    expect(result.current).toBeUndefined();
+    expect(result.current.snapshot).toBeUndefined();
     warn.mockRestore();
   });
 
@@ -117,7 +131,7 @@ describe("useTopologySnapshot", () => {
     const { result } = renderHook(() => useTopologySnapshot("s1"));
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    expect(result.current).toBeUndefined();
+    expect(result.current.snapshot).toBeUndefined();
     expect(invokeMock).not.toHaveBeenCalled();
   });
 });

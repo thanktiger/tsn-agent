@@ -16,37 +16,44 @@ function isTauriRuntime(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
 
-export function useTopologySnapshot(sessionId: string | undefined): TopologyRowSnapshot | undefined {
+export interface UseTopologySnapshotResult {
+  snapshot: TopologyRowSnapshot | undefined;
+  /** 命令式刷新：retry_backfill / import 等非 mutation-buffer 写路径后由调用方显式触发。 */
+  refetch: () => Promise<void>;
+}
+
+export function useTopologySnapshot(sessionId: string | undefined): UseTopologySnapshotResult {
   const [snapshot, setSnapshot] = useState<TopologyRowSnapshot | undefined>(undefined);
   const requestSeqRef = useRef(0);
 
-  const refetch = useCallback(() => {
+  const refetch = useCallback(async (): Promise<void> => {
     if (!isTauriRuntime() || !sessionId) {
       return;
     }
 
     const requestSeq = ++requestSeqRef.current;
-    void invoke<TopologyRowSnapshot>("query_topology", { request: { sessionId } })
-      .then((next) => {
-        // 丢弃过期响应（session 已切换或有更新请求在途）。
-        if (requestSeqRef.current === requestSeq && next.sessionId === sessionId) {
-          setSnapshot(next);
-        }
-      })
-      .catch((err) => {
-        console.warn("query_topology 失败", err);
-      });
+    try {
+      const next = await invoke<TopologyRowSnapshot>("query_topology", { request: { sessionId } });
+      // 丢弃过期响应（session 已切换或有更新请求在途）。
+      if (requestSeqRef.current === requestSeq && next.sessionId === sessionId) {
+        setSnapshot(next);
+      }
+    } catch (err) {
+      console.warn("query_topology 失败", err);
+    }
   }, [sessionId]);
 
   useEffect(() => {
     setSnapshot(undefined);
-    refetch();
+    void refetch();
   }, [refetch]);
 
   useSessionDbListener({
     sessionId: isTauriRuntime() ? sessionId : undefined,
-    onChange: refetch,
+    onChange: () => {
+      void refetch();
+    },
   });
 
-  return snapshot;
+  return { snapshot, refetch };
 }
