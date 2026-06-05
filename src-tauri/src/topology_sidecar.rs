@@ -463,6 +463,38 @@ mod tests {
     }
 
     #[test]
+    fn apply_operations_rejects_malformed_op_with_invalid_operation_envelope() {
+        tauri::async_runtime::block_on(async {
+            let (pool, buf) = test_state().await;
+            sqlx::query("INSERT INTO sessions (id, title, created_at, updated_at, payload) VALUES ('s1','t','now','now','{}')")
+                .execute(&pool).await.unwrap();
+            let (router, token) = build_test_router_with_pool(pool, buf).await;
+
+            // 轮 3 真机错误输入：模型发明的 {"kind":"insert-switch"}。
+            let body = serde_json::json!({
+                "sessionId": "s1",
+                "operations": [{ "kind": "insert-switch" }]
+            }).to_string();
+            let resp = router
+                .oneshot(Request::builder().method("POST").uri("/db/topology/apply_operations")
+                    .header("Authorization", format!("Bearer {}", token.expose()))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(body)).unwrap())
+                .await.unwrap();
+            assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+            let bytes = to_bytes(resp.into_body(), 8192).await.unwrap();
+            let parsed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(parsed["ok"], false);
+            assert_eq!(parsed["code"], "INVALID_OPERATION");
+            assert_eq!(parsed["retryable"], false);
+            // 不再是裸 "Unprocessable Entity"：message 列出合法 op。
+            let message = parsed["message"].as_str().unwrap();
+            assert!(message.contains("node_add"), "message={message}");
+            assert!(message.contains("link_delete"), "message={message}");
+        });
+    }
+
+    #[test]
     fn apply_operations_inserts_and_mints_mutation_id() {
         tauri::async_runtime::block_on(async {
             let (pool, buf) = test_state().await;

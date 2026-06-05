@@ -527,8 +527,24 @@ const MAX_OPERATIONS_PER_REQUEST: usize = 32;
 
 pub async fn apply_operations(
     State(state): State<Arc<RouteState>>,
-    Json(req): Json<ApplyOpsRequest>,
+    Json(raw): Json<Value>,
 ) -> Response {
+    // 两段式解析（纵深防御）：axum 只负责取 JSON，serde 失败时返回带合法 op
+    // 列表的结构化信封，而不是裸 422 "Unprocessable Entity"。正常路径模型在
+    // MCP zod 层已被拦截，这里兜底直连 sidecar 的非法 payload。
+    let req: ApplyOpsRequest = match serde_json::from_value(raw) {
+        Ok(req) => req,
+        Err(e) => {
+            return structured_error(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "INVALID_OPERATION",
+                &format!(
+                    "{e} | 合法 op: node_add/node_update/node_delete/link_add/link_delete，字段见 apply_operations 工具 schema"
+                ),
+                false,
+            )
+        }
+    };
     if let Err(resp) = require_session(&state.pool, &req.session_id).await {
         return resp;
     }
