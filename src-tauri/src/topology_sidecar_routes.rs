@@ -21,13 +21,13 @@ use std::sync::Arc;
 use crate::topology_backfill::{legacy_class_path, legacy_node_type};
 use crate::topology_compute::{
     build_topology_artifacts, describe_templates_catalog, describe_topology_artifacts,
-    initialize_topology as compute_initialize, inspect_topology as compute_inspect,
-    validate_intermediate_topology, validate_topology_artifacts, InitializeIntent,
-    InspectRequestBody,
+    initialize_topology as compute_initialize, validate_intermediate_topology,
+    validate_topology_artifacts, InitializeIntent,
 };
 use crate::topology_intermediate::{IntermediateNodeType, IntermediateTopology};
 use crate::topology_mutation_buffer::{MutationRecord, TopologyMutationBuffer};
 use crate::topology_ops::{apply_op, TopologyOp};
+use crate::topology_query_command::{TopologyLinkRow, TopologyNodeRow};
 
 /// 闭包形式的 mutation 发射器：生产用 Tauri AppHandle wrap，测试用 no-op。
 /// 通过 trait object 解耦 runtime 泛型，避免 `RouteState` 被 `MockRuntime` 污染。
@@ -326,14 +326,14 @@ async fn persist_initialized_topology(
 #[serde(rename_all = "camelCase")]
 pub struct InspectRequest {
     session_id: String,
-    #[serde(default)]
-    topology: Option<Value>,
-    #[serde(default)]
-    selectors: Vec<Value>,
-    #[serde(default)]
-    include_adjacency: Option<bool>,
 }
 
+/// DB-backed 全量 rows：agent 一次 inspect 拿到构造 ops batch 所需的全部细节
+/// （imac/linkSeq/syncType/stylesJson 原文）。无 selector —— P0 表没有 string id，
+/// 模型直接在 rows 里定位目标。出向规模有界：数据只能经 initialize（compute 校验
+/// ≤200 节点）与 apply_operations（单批 ≤32 op）进入。
+/// SQL 与排序镜像 `topology_query_command.rs`（UI 读路径），行 shape 直接复用其
+/// serde camelCase struct，保证两条读路径零命名漂移。
 pub async fn inspect(
     State(state): State<Arc<RouteState>>,
     Json(req): Json<InspectRequest>,
@@ -341,39 +341,78 @@ pub async fn inspect(
     if let Err(resp) = require_session(&state.pool, &req.session_id).await {
         return resp;
     }
-    // 兼容：agent 不传 topology 时，沿用 U4a-1 行为返 P0 表 count 摘要。
-    let Some(topology) = req.topology else {
-        let node_count: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM topology_nodes WHERE session_id = ?")
-                .bind(&req.session_id)
-                .fetch_one(&state.pool)
-                .await
-                .unwrap_or(0);
-        let link_count: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM topology_links WHERE session_id = ?")
-                .bind(&req.session_id)
-                .fetch_one(&state.pool)
-                .await
-                .unwrap_or(0);
-        return ok_summary(json!({
-            "sessionId": req.session_id,
-            "nodeCount": node_count,
-            "linkCount": link_count,
-            "selectedNodeIds": Vec::<String>::new(),
-            "selectedLinkIds": Vec::<String>::new(),
-            "adjacency": Vec::<Value>::new(),
-            "source": "p0_tables",
-        }));
+
+    let node_rows = sqlx::query(
+        r#"SELECT imac, sync_name, x, y, sync_type, node_type, insert_order
+           FROM topology_nodes
+           WHERE session_id = ?
+           ORDER BY insert_order, imac"#,
+    )
+    .bind(&req.session_id)
+    .fetch_all(&state.pool)
+    .await;
+    let node_rows = match node_rows {
+        Ok(rows) => rows,
+        Err(e) => {
+            return structured_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &e.to_string(),
+                true,
+            )
+        }
     };
-    let body = InspectRequestBody {
-        topology,
-        selectors: req.selectors,
-        include_adjacency: req.include_adjacency.unwrap_or(true),
+    let link_rows = sqlx::query(
+        r#"SELECT link_seq, name, src_imac, dst_imac, styles_json
+           FROM topology_links
+           WHERE session_id = ?
+           ORDER BY link_seq"#,
+    )
+    .bind(&req.session_id)
+    .fetch_all(&state.pool)
+    .await;
+    let link_rows = match link_rows {
+        Ok(rows) => rows,
+        Err(e) => {
+            return structured_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &e.to_string(),
+                true,
+            )
+        }
     };
-    match compute_inspect(&body) {
-        Ok((summary, _warnings)) => ok_summary(serde_json::to_value(&summary).unwrap_or(Value::Null)),
-        Err(errors) => fail_with_errors(errors),
-    }
+
+    let nodes: Vec<TopologyNodeRow> = node_rows
+        .into_iter()
+        .map(|r| TopologyNodeRow {
+            imac: r.get("imac"),
+            sync_name: r.get("sync_name"),
+            x: r.get("x"),
+            y: r.get("y"),
+            sync_type: r.get("sync_type"),
+            node_type: r.get("node_type"),
+            insert_order: r.get("insert_order"),
+        })
+        .collect();
+    let links: Vec<TopologyLinkRow> = link_rows
+        .into_iter()
+        .map(|r| TopologyLinkRow {
+            link_seq: r.get("link_seq"),
+            name: r.get("name"),
+            src_imac: r.get("src_imac"),
+            dst_imac: r.get("dst_imac"),
+            styles_json: r.get("styles_json"),
+        })
+        .collect();
+
+    ok_summary(json!({
+        "sessionId": req.session_id,
+        "nodeCount": nodes.len(),
+        "linkCount": links.len(),
+        "nodes": nodes,
+        "links": links,
+    }))
 }
 
 // ---------- validate ----------

@@ -555,27 +555,102 @@ mod tests {
         });
     }
 
+    /// inspect 路由的 oneshot helper：POST {sessionId} 并解析响应体。
+    /// 全量 rows 响应体超过既有 4096 惯用上限，统一用 65536（U1/U6 共用）。
+    async fn inspect_session(
+        router: axum::Router,
+        token: &SecretToken,
+        session_id: &str,
+    ) -> (StatusCode, serde_json::Value) {
+        let body = serde_json::json!({ "sessionId": session_id }).to_string();
+        let resp = router
+            .oneshot(Request::builder().method("POST").uri("/db/topology/inspect")
+                .header("Authorization", format!("Bearer {}", token.expose()))
+                .header("Content-Type", "application/json")
+                .body(Body::from(body)).unwrap())
+            .await.unwrap();
+        let status = resp.status();
+        let bytes = to_bytes(resp.into_body(), 65_536).await.unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap())
+    }
+
     #[test]
-    fn inspect_returns_counts_for_session() {
+    fn inspect_returns_full_rows_for_session() {
         tauri::async_runtime::block_on(async {
             let (pool, buf) = test_state().await;
             sqlx::query("INSERT INTO sessions (id, title, created_at, updated_at, payload) VALUES ('s1','t','now','now','{}')")
                 .execute(&pool).await.unwrap();
-            sqlx::query("INSERT INTO topology_nodes (session_id, imac, sync_name, x, y, sync_type, insert_order) VALUES ('s1', 1, '0', 0, 0, '{}', 0), ('s1', 2, '1', 1, 1, '{}', 1)")
+            // 故意乱序插入，断言响应按 insert_order / link_seq 排序。
+            sqlx::query(r#"INSERT INTO topology_nodes (session_id, imac, sync_name, x, y, sync_type, node_type, insert_order) VALUES
+                ('s1', 102, '2', 200.0, 80.0, '{"_classPath":"Q.Graphs.pc"}', 'endSystem', 2),
+                ('s1', 100, '0', 0.0, 0.0, '{"_classPath":"Q.Graphs.exchanger2"}', 'switch', 0),
+                ('s1', 101, '1', 100.0, 0.0, '{"_classPath":"Q.Graphs.exchanger2"}', 'switch', 1)"#)
+                .execute(&pool).await.unwrap();
+            sqlx::query(r#"INSERT INTO topology_links (session_id, link_seq, name, src_imac, dst_imac, styles_json) VALUES
+                ('s1', 1, 'l-acc', 101, 102, '{"leftLabel":"P2","rightLabel":"P1","speed":100}'),
+                ('s1', 0, 'l-bb', 100, 101, '{"leftLabel":"P1","rightLabel":"P1","speed":1000}')"#)
                 .execute(&pool).await.unwrap();
             let (router, token) = build_test_router_with_pool(pool, buf).await;
-            let body = serde_json::json!({ "sessionId": "s1" }).to_string();
-            let resp = router
-                .oneshot(Request::builder().method("POST").uri("/db/topology/inspect")
-                    .header("Authorization", format!("Bearer {}", token.expose()))
-                    .header("Content-Type", "application/json")
-                    .body(Body::from(body)).unwrap())
-                .await.unwrap();
-            assert_eq!(resp.status(), StatusCode::OK);
-            let bytes = to_bytes(resp.into_body(), 4096).await.unwrap();
-            let parsed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-            assert_eq!(parsed["summary"]["nodeCount"], 2);
-            assert_eq!(parsed["summary"]["linkCount"], 0);
+
+            let (status, parsed) = inspect_session(router, &token, "s1").await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(parsed["ok"], true);
+            let summary = &parsed["summary"];
+            assert_eq!(summary["sessionId"], "s1");
+            assert_eq!(summary["nodeCount"], 3);
+            assert_eq!(summary["linkCount"], 2);
+
+            // nodes 按 insert_order 排序，字段 camelCase、syncType 原文。
+            let nodes = summary["nodes"].as_array().unwrap();
+            assert_eq!(nodes.len(), 3);
+            assert_eq!(nodes[0]["imac"], 100);
+            assert_eq!(nodes[0]["syncName"], "0");
+            assert_eq!(nodes[0]["nodeType"], "switch");
+            assert_eq!(nodes[0]["syncType"], r#"{"_classPath":"Q.Graphs.exchanger2"}"#);
+            assert_eq!(nodes[0]["x"], 0.0);
+            assert_eq!(nodes[0]["insertOrder"], 0);
+            assert_eq!(nodes[2]["imac"], 102);
+            assert_eq!(nodes[2]["nodeType"], "endSystem");
+
+            // links 按 link_seq 排序，stylesJson 原文。
+            let links = summary["links"].as_array().unwrap();
+            assert_eq!(links.len(), 2);
+            assert_eq!(links[0]["linkSeq"], 0);
+            assert_eq!(links[0]["name"], "l-bb");
+            assert_eq!(links[0]["srcImac"], 100);
+            assert_eq!(links[0]["dstImac"], 101);
+            assert_eq!(links[0]["stylesJson"], r#"{"leftLabel":"P1","rightLabel":"P1","speed":1000}"#);
+            assert_eq!(links[1]["linkSeq"], 1);
+        });
+    }
+
+    #[test]
+    fn inspect_returns_empty_arrays_for_empty_topology() {
+        tauri::async_runtime::block_on(async {
+            let (pool, buf) = test_state().await;
+            sqlx::query("INSERT INTO sessions (id, title, created_at, updated_at, payload) VALUES ('s1','t','now','now','{}')")
+                .execute(&pool).await.unwrap();
+            let (router, token) = build_test_router_with_pool(pool, buf).await;
+
+            let (status, parsed) = inspect_session(router, &token, "s1").await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(parsed["ok"], true);
+            assert_eq!(parsed["summary"]["nodeCount"], 0);
+            assert_eq!(parsed["summary"]["nodes"].as_array().unwrap().len(), 0);
+            assert_eq!(parsed["summary"]["links"].as_array().unwrap().len(), 0);
+        });
+    }
+
+    #[test]
+    fn inspect_rejects_unknown_session() {
+        tauri::async_runtime::block_on(async {
+            let (pool, buf) = test_state().await;
+            let (router, token) = build_test_router_with_pool(pool, buf).await;
+
+            let (status, parsed) = inspect_session(router, &token, "ghost").await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+            assert_eq!(parsed["ok"], false);
+            assert_eq!(parsed["code"], "FORBIDDEN_OPERATION");
         });
     }
 
