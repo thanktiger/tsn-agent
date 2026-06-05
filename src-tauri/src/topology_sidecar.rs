@@ -686,6 +686,208 @@ mod tests {
         });
     }
 
+    /// apply_operations 路由的 oneshot helper。
+    async fn apply_ops(
+        router: axum::Router,
+        token: &SecretToken,
+        session_id: &str,
+        operations: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        let body = serde_json::json!({ "sessionId": session_id, "operations": operations }).to_string();
+        let resp = router
+            .oneshot(Request::builder().method("POST").uri("/db/topology/apply_operations")
+                .header("Authorization", format!("Bearer {}", token.expose()))
+                .header("Content-Type", "application/json")
+                .body(Body::from(body)).unwrap())
+            .await.unwrap();
+        let status = resp.status();
+        let bytes = to_bytes(resp.into_body(), 65_536).await.unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    /// initialize 路由的 oneshot helper（generic-line A×B）。
+    async fn initialize_generic_line(
+        router: axum::Router,
+        token: &SecretToken,
+        session_id: &str,
+        switch_count: i64,
+        end_systems_per_switch: i64,
+    ) {
+        let body = serde_json::json!({
+            "sessionId": session_id,
+            "templateId": "generic-line",
+            "params": { "switchCount": switch_count, "endSystemsPerSwitch": end_systems_per_switch }
+        }).to_string();
+        let resp = router
+            .oneshot(Request::builder().method("POST").uri("/db/topology/initialize")
+                .header("Authorization", format!("Bearer {}", token.expose()))
+                .header("Content-Type", "application/json")
+                .body(Body::from(body)).unwrap())
+            .await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// 模拟模型读 inspect rows：定位第一条骨干链路（两端皆 switch）与建新行参照。
+    /// 返回 (backbone_seq, sw1_imac, sw2_imac, styles_json, switch_sync_type,
+    ///        next_imac, next_link_seq, next_insert_order)。
+    fn locate_insert_site(summary: &serde_json::Value) -> (i64, i64, i64, String, String, i64, i64, i64) {
+        let nodes = summary["nodes"].as_array().unwrap();
+        let links = summary["links"].as_array().unwrap();
+        let switch_imacs: std::collections::HashSet<i64> = nodes.iter()
+            .filter(|n| n["nodeType"] == "switch")
+            .map(|n| n["imac"].as_i64().unwrap())
+            .collect();
+        let backbone = links.iter()
+            .find(|l| switch_imacs.contains(&l["srcImac"].as_i64().unwrap())
+                && switch_imacs.contains(&l["dstImac"].as_i64().unwrap()))
+            .expect("generic-line must have a switch-switch backbone link");
+        let switch_sync_type = nodes.iter()
+            .find(|n| n["nodeType"] == "switch")
+            .and_then(|n| n["syncType"].as_str())
+            .unwrap()
+            .to_string();
+        (
+            backbone["linkSeq"].as_i64().unwrap(),
+            backbone["srcImac"].as_i64().unwrap(),
+            backbone["dstImac"].as_i64().unwrap(),
+            backbone["stylesJson"].as_str().unwrap().to_string(),
+            switch_sync_type,
+            nodes.iter().map(|n| n["imac"].as_i64().unwrap()).max().unwrap() + 1,
+            links.iter().map(|l| l["linkSeq"].as_i64().unwrap()).max().unwrap() + 1,
+            nodes.iter().map(|n| n["insertOrder"].as_i64().unwrap()).max().unwrap() + 1,
+        )
+    }
+
+    /// 轮 3 真机失败场景的回归（plan 2026-06-05-001 U6）：「SW-1/SW-2 之间插一台
+    /// 交换机」经 inspect → 构造原子 ops → apply 全程可走通，且原节点身份保持
+    /// 不变 —— 这正是轮 5 退化为 initialize 整表重建时破坏的性质。
+    /// 边界声明：本测试证明机制（apply 路径保持节点身份）；「agent 实际选择
+    /// apply 而非 initialize」由 U5 prompt 规则 + ship 后真机重放覆盖。
+    #[test]
+    fn insert_switch_via_inspect_then_apply_round_trip() {
+        tauri::async_runtime::block_on(async {
+            let (pool, buf) = test_state().await;
+            sqlx::query("INSERT INTO sessions (id, title, created_at, updated_at, payload) VALUES ('s1','t','now','now','{}')")
+                .execute(&pool).await.unwrap();
+            let (router, token) = build_test_router_with_pool(pool, buf).await;
+
+            // initialize 4×5 → 24 节点 23 链路（mutationId=1）。
+            initialize_generic_line(router.clone(), &token, "s1", 4, 5).await;
+
+            // inspect 全量 → 程序化定位 sw1-sw2 骨干与新行参照（模拟模型行为）。
+            let (status, parsed) = inspect_session(router.clone(), &token, "s1").await;
+            assert_eq!(status, StatusCode::OK);
+            let before = parsed["summary"].clone();
+            assert_eq!(before["nodeCount"], 24);
+            assert_eq!(before["linkCount"], 23);
+            let original_identity: Vec<(i64, String)> = before["nodes"].as_array().unwrap().iter()
+                .map(|n| (n["imac"].as_i64().unwrap(), n["syncName"].as_str().unwrap().to_string()))
+                .collect();
+
+            let (backbone_seq, sw1, sw2, styles, sync_type, new_imac, new_seq, new_order) =
+                locate_insert_site(&before);
+
+            // 构造 [link_delete, node_add, link_add×2]（syncType/stylesJson 复制原文）。
+            let batch = serde_json::json!([
+                { "op": "link_delete", "linkSeq": backbone_seq },
+                { "op": "node_add", "imac": new_imac, "syncName": new_imac.to_string(),
+                  "x": 150.0, "y": 40.0, "syncType": sync_type, "nodeType": "switch",
+                  "insertOrder": new_order },
+                { "op": "link_add", "linkSeq": new_seq, "srcImac": sw1, "dstImac": new_imac,
+                  "stylesJson": styles },
+                { "op": "link_add", "linkSeq": new_seq + 1, "srcImac": new_imac, "dstImac": sw2,
+                  "stylesJson": styles },
+            ]);
+            let (status, parsed) = apply_ops(router.clone(), &token, "s1", batch).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(parsed["ok"], true);
+            // mutationId 递增：initialize=1 → apply=2。
+            assert_eq!(parsed["summary"]["mutationId"], 2);
+
+            // 再次 inspect：25 节点 24 链路，新交换机与两条新链路在 rows 中。
+            let (_, parsed) = inspect_session(router.clone(), &token, "s1").await;
+            let after = &parsed["summary"];
+            assert_eq!(after["nodeCount"], 25);
+            assert_eq!(after["linkCount"], 24);
+            let after_nodes = after["nodes"].as_array().unwrap();
+            assert!(after_nodes.iter().any(|n| n["imac"].as_i64() == Some(new_imac)));
+            let after_links = after["links"].as_array().unwrap();
+            assert!(after_links.iter().any(|l| l["linkSeq"].as_i64() == Some(new_seq)));
+            assert!(after_links.iter().any(|l| l["linkSeq"].as_i64() == Some(new_seq + 1)));
+            assert!(!after_links.iter().any(|l| l["linkSeq"].as_i64() == Some(backbone_seq)));
+
+            // 原有 24 节点的 imac/syncName 逐一保持不变（轮 5 整表重建破坏的性质）。
+            for (imac, sync_name) in &original_identity {
+                let preserved = after_nodes.iter().any(|n| {
+                    n["imac"].as_i64() == Some(*imac) && n["syncName"].as_str() == Some(sync_name)
+                });
+                assert!(preserved, "node imac={imac} syncName={sync_name} lost identity");
+            }
+
+            // Error path：已占用 imac + 异值 → IMAC_TAKEN，message 含 node_update
+            // 指引，原节点不变（U7 三态防护在路由层可见）。
+            let collision = serde_json::json!([
+                { "op": "node_add", "imac": sw1, "syncName": "hijack", "x": 9.0, "y": 9.0,
+                  "syncType": "{}", "nodeType": "switch", "insertOrder": 99 },
+            ]);
+            let (status, parsed) = apply_ops(router.clone(), &token, "s1", collision).await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+            assert_eq!(parsed["code"], "IMAC_TAKEN");
+            assert!(parsed["message"].as_str().unwrap().contains("node_update"));
+            let (_, parsed) = inspect_session(router, &token, "s1").await;
+            let sw1_row = parsed["summary"]["nodes"].as_array().unwrap().iter()
+                .find(|n| n["imac"].as_i64() == Some(sw1)).unwrap().clone();
+            assert_ne!(sw1_row["syncName"], "hijack");
+        });
+    }
+
+    /// Known-boundary 负向测试（plan 2026-06-05-001 U6 / KTD 三态边界）：三态
+    /// 写入只防同 key 碰撞 —— 重放 insert-switch batch 时若 link_add 重新分配
+    /// linkSeq（全新主键），整批成功并产生平行链路。数据库视角这是合法形态
+    /// （TSN dual-plane 同端点对平行链路合法，不能全局拦截）；此即 U5 prompt
+    /// 规则 8「重试必须逐字节复用上一次的同一 batch」存在的原因。
+    #[test]
+    fn replayed_batch_with_fresh_link_seqs_creates_parallel_links() {
+        tauri::async_runtime::block_on(async {
+            let (pool, buf) = test_state().await;
+            sqlx::query("INSERT INTO sessions (id, title, created_at, updated_at, payload) VALUES ('s1','t','now','now','{}')")
+                .execute(&pool).await.unwrap();
+            let (router, token) = build_test_router_with_pool(pool, buf).await;
+
+            initialize_generic_line(router.clone(), &token, "s1", 2, 2).await;
+            let (_, parsed) = inspect_session(router.clone(), &token, "s1").await;
+            let (backbone_seq, sw1, sw2, styles, sync_type, new_imac, new_seq, new_order) =
+                locate_insert_site(&parsed["summary"]);
+
+            let batch_with_seqs = |seq_a: i64, seq_b: i64| serde_json::json!([
+                { "op": "link_delete", "linkSeq": backbone_seq },
+                { "op": "node_add", "imac": new_imac, "syncName": new_imac.to_string(),
+                  "x": 150.0, "y": 40.0, "syncType": sync_type, "nodeType": "switch",
+                  "insertOrder": new_order },
+                { "op": "link_add", "linkSeq": seq_a, "srcImac": sw1, "dstImac": new_imac,
+                  "stylesJson": styles },
+                { "op": "link_add", "linkSeq": seq_b, "srcImac": new_imac, "dstImac": sw2,
+                  "stylesJson": styles },
+            ]);
+
+            let (status, _) = apply_ops(router.clone(), &token, "s1",
+                batch_with_seqs(new_seq, new_seq + 1)).await;
+            assert_eq!(status, StatusCode::OK);
+            let (_, parsed) = inspect_session(router.clone(), &token, "s1").await;
+            let link_count_first = parsed["summary"]["linkCount"].as_i64().unwrap();
+
+            // 「重试」时重新分配 linkSeq：node_add 同值 no-op，link_delete no-op，
+            // 两条 link_add 是全新 key → 静默成功，平行链路 +2。
+            let (status, parsed) = apply_ops(router.clone(), &token, "s1",
+                batch_with_seqs(new_seq + 2, new_seq + 3)).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(parsed["ok"], true);
+
+            let (_, parsed) = inspect_session(router, &token, "s1").await;
+            assert_eq!(parsed["summary"]["linkCount"].as_i64().unwrap(), link_count_first + 2);
+        });
+    }
+
     #[test]
     fn validate_detects_dangling_link_references() {
         tauri::async_runtime::block_on(async {
