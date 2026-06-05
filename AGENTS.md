@@ -52,6 +52,15 @@
 - `src-node/mcp/sidecar-client.ts`：MCP handler 调用 sidecar 的 thin client（含 SIDECAR_UNAVAILABLE 错误映射）。
 - `src-node/mcp/topology-tools.ts`：8 个 MCP handler 全走 fetchSidecar；`responseMode` / `topologyFullAllowed` 字段已删除。
 
+### 会话导出/导入与 backfill 恢复（v0.4.0）新增代码入口
+
+- `src-tauri/src/session_export.rs`：单会话切片导出（新空 DB + 双连接复制，payload 固定 `'{}'`，tmp+原子 rename，主库零写入）+ `reveal_in_dir` command。
+- `src-tauri/src/session_import.rs`：导入校验链（文件大小/integrity/application_id/行数与字段字节上限/symlink 拒绝）+ 行消毒 + 冲突报错。
+- `src-tauri/src/db.rs::SESSION_SCOPED_TABLES`：15 张 session 域表清单，export/import 复制循环的单一事实源。
+- `src/app/session-transfer.ts`：UI 侧导出/导入编排（save/open 对话框、id 冲突自动新 id 重试、错误文案映射）。
+- `src/ui/confirm-dialog.tsx`：受控确认弹窗（backfill retry 警告复用）。
+- `src/app/hooks/use-backfill-failures.ts`：失败会话查询 hook（mount invoke + retry resolve 重拉，无事件——启动 walker 在窗口创建前同步完成，事件无接收窗口）。
+
 ### Phase B-β2 已删除（不要再引用）
 
 - TS 端 canonical 域与拓扑 compute：`src/domain/canonical.ts` / `validation.ts` / `topology-factory.ts`、`src/topology/*`（仅保留 `limits.ts` 与 `topology-service.ts` 的工具名/runtime 摘要）。
@@ -89,6 +98,8 @@
 ## 导出边界
 
 > **Phase A 状态**：`flow-template` / `planning-export` 阶段在 UI 灰掉，项目导出整条链路（含 `project-exporter.ts` / `project-writer.ts` / `export-manifest.ts`，已删除）暂时下线，Phase B 回归。下列契约为 Phase B 目标，当前不可达。
+>
+> **与会话导出区分**：会话导出/导入（单会话切片 `.db`，v0.4.0 已落地）是独立能力轨道，不受 Phase B 影响；导出文件不含对话记录与 canonical payload（固定 `'{}'`），只含拓扑工程数据。
 
 - Phase B 目标导出文件包括：
   - `tsnagent/generated/network.ned`
