@@ -12,6 +12,7 @@ import {
   exportCurrentSession,
   importSessionFromFile,
   mapImportError,
+  revealExportedFile,
 } from "./session-transfer";
 
 describe("session-transfer", () => {
@@ -100,6 +101,26 @@ describe("session-transfer", () => {
 
       expect(outcome).toEqual({ status: "cancelled" });
       expect(invokeMock).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("revealExportedFile", () => {
+    it("invokes reveal_in_dir with the path", async () => {
+      invokeMock.mockResolvedValue(undefined);
+
+      await revealExportedFile("/tmp/out.db");
+
+      expect(invokeMock).toHaveBeenCalledWith("reveal_in_dir", { path: "/tmp/out.db" });
+    });
+
+    it("swallows reveal failures with a console warning", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      invokeMock.mockRejectedValue("路径不存在");
+
+      await expect(revealExportedFile("/gone.db")).resolves.toBeUndefined();
+
+      expect(warn).toHaveBeenCalled();
+      warn.mockRestore();
     });
   });
 

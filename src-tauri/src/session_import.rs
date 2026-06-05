@@ -29,6 +29,10 @@ pub const MAX_IMPORT_FILE_BYTES: u64 = 10 * 1024 * 1024;
 const MAX_SMALL_TEXT_BYTES: usize = 4 * 1024; // styles_json / sync_type
 const MAX_JSON_TEXT_BYTES: usize = 64 * 1024; // ref_json / cfg_json / spec_json / entry_json
 const MAX_IDENT_TEXT_BYTES: usize = 64; // mac_address / ip
+const MAX_NAME_TEXT_BYTES: usize = 256; // sessions.title / project_name
+/// 全部 scoped 表的总行数上限：行数守卫只盯 topology_nodes/links，子表
+/// （nodes_gcl_cfg 等）可在 10MB 内塞数十万小行造成单事务长锁 + 内存压力。
+const MAX_TOTAL_SCOPED_ROWS: usize = 50_000;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -88,10 +92,11 @@ pub(crate) async fn perform_import(
     source_path: &std::path::Path,
     override_session_id: Option<&str>,
 ) -> Result<ImportSessionResponse, String> {
-    // ---------- 打开源 db（防御性 PRAGMA）----------
+    // ---------- 打开源 db（防御性 PRAGMA；只读 —— 源是用户文件，不留写锁）----------
     let src_options = sqlx::sqlite::SqliteConnectOptions::new()
         .filename(source_path)
         .create_if_missing(false)
+        .read_only(true)
         .foreign_keys(true);
     let src_pool = sqlx::sqlite::SqlitePoolOptions::new()
         .max_connections(1)
@@ -99,13 +104,26 @@ pub(crate) async fn perform_import(
         .await
         .map_err(|e| format!("无法打开源 db：{e}"))?;
 
+    // 显式 close 保证文件句柄同步释放（Windows 上 drop 是惰性的，导入后用户
+    // 立即移动/删除源文件会失败；export 端已有同款注释）。
+    let result = perform_import_inner(main_pool, &src_pool, override_session_id).await;
+    src_pool.close().await;
+    result
+}
+
+async fn perform_import_inner(
+    main_pool: &SqlitePool,
+    src_pool: &SqlitePool,
+    override_session_id: Option<&str>,
+) -> Result<ImportSessionResponse, String> {
+
     // 防御：trusted_schema=OFF + cell_size_check=ON + integrity_check。
     sqlx::query("PRAGMA trusted_schema = OFF")
-        .execute(&src_pool).await.map_err(|e| format!("PRAGMA trusted_schema 失败：{e}"))?;
+        .execute(src_pool).await.map_err(|e| format!("PRAGMA trusted_schema 失败：{e}"))?;
     sqlx::query("PRAGMA cell_size_check = ON")
-        .execute(&src_pool).await.map_err(|e| format!("PRAGMA cell_size_check 失败：{e}"))?;
+        .execute(src_pool).await.map_err(|e| format!("PRAGMA cell_size_check 失败：{e}"))?;
     let integrity: String = sqlx::query_scalar("PRAGMA integrity_check")
-        .fetch_one(&src_pool)
+        .fetch_one(src_pool)
         .await
         .map_err(|e| format!("PRAGMA integrity_check 失败：{e}"))?;
     if integrity != "ok" {
@@ -114,7 +132,7 @@ pub(crate) async fn perform_import(
 
     // 校验 application_id（main db 的 0x54534E01）。
     let app_id: i64 = sqlx::query_scalar("PRAGMA application_id")
-        .fetch_one(&src_pool)
+        .fetch_one(src_pool)
         .await
         .map_err(|e| format!("读取 application_id 失败：{e}"))?;
     if app_id != 0x5453_4E01 {
@@ -124,33 +142,11 @@ pub(crate) async fn perform_import(
         ));
     }
 
-    // 行数上限（与 compute 校验同一常量；早失败，不开 main 事务）。
-    let src_node_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM topology_nodes")
-            .fetch_one(&src_pool)
-            .await
-            .map_err(|e| format!("源拓扑节点计数失败：{e}"))?;
-    if src_node_count as usize > MAX_NODES {
-        return Err(format!(
-            "源拓扑节点数 {src_node_count} 超过上限 {MAX_NODES}，拒绝导入"
-        ));
-    }
-    let src_link_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM topology_links")
-            .fetch_one(&src_pool)
-            .await
-            .map_err(|e| format!("源拓扑链路计数失败：{e}"))?;
-    if src_link_count as usize > MAX_LINKS {
-        return Err(format!(
-            "源拓扑链路数 {src_link_count} 超过上限 {MAX_LINKS}，拒绝导入"
-        ));
-    }
-
     // ---------- 读源 sessions 行 ----------
     let session_row = sqlx::query(
-        "SELECT id, title, created_at, updated_at, message_count, event_count, has_project, project_name, bundle_file_count, payload FROM sessions LIMIT 2",
+        "SELECT id, title, created_at, updated_at, message_count, event_count, has_project, project_name, bundle_file_count FROM sessions LIMIT 2",
     )
-    .fetch_all(&src_pool)
+    .fetch_all(src_pool)
     .await
     .map_err(|e| format!("读取源 sessions 失败：{e}"))?;
     if session_row.is_empty() {
@@ -165,6 +161,48 @@ pub(crate) async fn perform_import(
     let target_session_id = override_session_id
         .map(|s| s.to_string())
         .unwrap_or(src_session_id.clone());
+
+    // sessions 行字段消毒（security review）：title/project_name 限长；payload
+    // 不读源值 —— 导出规格恒写 '{}'，非 '{}' 即非规格文件，导入端固定写 '{}'
+    // 防 memory bomb（view_session_payload 会全文 redact）。
+    let title: String = row.get("title");
+    if title.len() > MAX_NAME_TEXT_BYTES {
+        return Err(format!(
+            "sessions.title 长度 {} 字节超过上限 {MAX_NAME_TEXT_BYTES}，拒绝导入",
+            title.len()
+        ));
+    }
+    let project_name: Option<String> = row.get("project_name");
+    if project_name.as_ref().is_some_and(|p| p.len() > MAX_NAME_TEXT_BYTES) {
+        return Err(format!(
+            "sessions.project_name 超过上限 {MAX_NAME_TEXT_BYTES} 字节，拒绝导入"
+        ));
+    }
+
+    // 行数上限（与 compute 校验同一常量；按目标 session 过滤 —— 守卫范围必须
+    // 与实际复制范围一致，否则带异 session 孤儿行的文件会被误拒）。
+    let src_node_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM topology_nodes WHERE session_id = ?")
+            .bind(&src_session_id)
+            .fetch_one(src_pool)
+            .await
+            .map_err(|e| format!("源拓扑节点计数失败：{e}"))?;
+    if src_node_count as usize > MAX_NODES {
+        return Err(format!(
+            "源拓扑节点数 {src_node_count} 超过上限 {MAX_NODES}，拒绝导入"
+        ));
+    }
+    let src_link_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM topology_links WHERE session_id = ?")
+            .bind(&src_session_id)
+            .fetch_one(src_pool)
+            .await
+            .map_err(|e| format!("源拓扑链路计数失败：{e}"))?;
+    if src_link_count as usize > MAX_LINKS {
+        return Err(format!(
+            "源拓扑链路数 {src_link_count} 超过上限 {MAX_LINKS}，拒绝导入"
+        ));
+    }
 
     // ---------- main db 事务：seed sessions + insert 子表 ----------
     let mut tx = main_pool
@@ -183,26 +221,26 @@ pub(crate) async fn perform_import(
         return Err(format!("目标 session 已存在：{target_session_id}"));
     }
 
-    // Insert sessions
+    // Insert sessions（payload 固定 '{}'：见上方消毒注释）
     sqlx::query(
         r#"INSERT INTO sessions (id, title, created_at, updated_at, message_count, event_count, has_project, project_name, bundle_file_count, payload)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '{}')"#,
     )
     .bind(&target_session_id)
-    .bind(row.get::<String, _>("title"))
+    .bind(&title)
     .bind(row.get::<String, _>("created_at"))
     .bind(row.get::<String, _>("updated_at"))
     .bind(row.get::<i64, _>("message_count"))
     .bind(row.get::<i64, _>("event_count"))
     .bind(row.get::<i64, _>("has_project"))
-    .bind(row.get::<Option<String>, _>("project_name"))
+    .bind(&project_name)
     .bind(row.get::<i64, _>("bundle_file_count"))
-    .bind(row.get::<String, _>("payload"))
     .execute(&mut *tx)
     .await
     .map_err(|e| format!("INSERT sessions 失败：{e}"))?;
 
     let mut summary = ImportSummary::default();
+    let mut total_scoped_rows: usize = 0;
 
     // 共享表清单统一复制（与 export 切片同一事实源，防两端漂移）。
     // 首列 session_id 改写为 target；其余列经字段级校验后动态 bind。
@@ -210,9 +248,16 @@ pub(crate) async fn perform_import(
         let select_sql = format!("SELECT {} FROM {} WHERE session_id = ?", cols.join(", "), table);
         let rows = sqlx::query(&select_sql)
             .bind(&src_session_id)
-            .fetch_all(&src_pool)
+            .fetch_all(src_pool)
             .await
             .map_err(|e| format!("源 SELECT {table} 失败：{e}"))?;
+        total_scoped_rows += rows.len();
+        if total_scoped_rows > MAX_TOTAL_SCOPED_ROWS {
+            let _ = tx.rollback().await;
+            return Err(format!(
+                "源数据总行数超过上限 {MAX_TOTAL_SCOPED_ROWS}，拒绝导入"
+            ));
+        }
         let placeholders: Vec<&str> = cols.iter().map(|_| "?").collect();
         let insert_sql = format!(
             "INSERT INTO {} ({}) VALUES ({})",
@@ -419,6 +464,33 @@ mod tests {
     }
 
     #[test]
+    fn round_trip_preserves_non_integer_real_coordinates() {
+        // bind_dynamic 的类型试探顺序是 i64 → f64：REAL 存储值若被 try_get::<i64>
+        // 接受会发生截断（1.7 → 1，静默数据损坏）。本测试用非整数坐标固化
+        // round-trip 无损（adversarial review RR-1）。
+        tauri::async_runtime::block_on(async {
+            let (dir, main_pool) = seed_main_pool().await;
+            let src_pool = source_pool(dir.path()).await;
+            sqlx::query("INSERT INTO sessions (id, title, created_at, updated_at, payload) VALUES ('orig', 't', 'now', 'now', '{}')")
+                .execute(&src_pool).await.unwrap();
+            sqlx::query("INSERT INTO topology_nodes (session_id, imac, sync_name, x, y, sync_type, insert_order) VALUES ('orig', 1, '0', 1.7, 2.3, '{}', 0)")
+                .execute(&src_pool).await.unwrap();
+            let export_path = dir.path().join("export.db");
+            crate::session_export::perform_single_session_export(&src_pool, "orig", export_path.to_str().unwrap())
+                .await.unwrap();
+
+            perform_import(&main_pool, &export_path, Some("rt")).await.unwrap();
+
+            let (x, y): (f64, f64) = sqlx::query_as(
+                "SELECT x, y FROM topology_nodes WHERE session_id='rt' AND imac=1",
+            )
+            .fetch_one(&main_pool).await.unwrap();
+            assert_eq!(x, 1.7, "x 坐标 round-trip 必须无损");
+            assert_eq!(y, 2.3, "y 坐标 round-trip 必须无损");
+        });
+    }
+
+    #[test]
     fn import_writes_completed_walker_and_survives_startup_walker() {
         tauri::async_runtime::block_on(async {
             let (dir, main_pool) = seed_main_pool().await;
@@ -544,6 +616,54 @@ mod tests {
                 .await.unwrap();
             let err = perform_import(&main_pool, &arr_path, Some("arr")).await.unwrap_err();
             assert!(err.contains("JSON object"), "err={err}");
+        });
+    }
+
+    #[test]
+    fn import_rejects_oversized_ident_and_sanitizes_session_row() {
+        tauri::async_runtime::block_on(async {
+            let (dir, main_pool) = seed_main_pool().await;
+            // mac_address 超 64B → 拒（字段上限的 ident 档代表用例）。
+            let src_pool = source_pool(dir.path()).await;
+            sqlx::query("INSERT INTO sessions (id, title, created_at, updated_at, payload) VALUES ('orig', 't', 'now', 'now', '{}')")
+                .execute(&src_pool).await.unwrap();
+            sqlx::query("INSERT INTO nodes (session_id, node_id, mac_address) VALUES ('orig', 'n0', ?)")
+                .bind("a".repeat(65))
+                .execute(&src_pool).await.unwrap();
+            let export_path = dir.path().join("export.db");
+            crate::session_export::perform_single_session_export(&src_pool, "orig", export_path.to_str().unwrap())
+                .await.unwrap();
+            let err = perform_import(&main_pool, &export_path, Some("mac")).await.unwrap_err();
+            assert!(err.contains("mac_address"), "err={err}");
+
+            // 恶意 payload 不被照搬：手工构造带非 '{}' payload 的切片 → 导入后
+            // payload 固定 '{}'（memory bomb 消毒）。
+            let evil_path = dir.path().join("evil.db");
+            let opts = sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(&evil_path).create_if_missing(true);
+            let evil_pool = SqlitePoolOptions::new().max_connections(1).connect_with(opts).await.unwrap();
+            sqlx::query(&crate::db::safety_net_schema_sql()).execute(&evil_pool).await.unwrap();
+            sqlx::query("INSERT INTO sessions (id, title, created_at, updated_at, payload) VALUES ('orig', 't', 'now', 'now', ?)")
+                .bind("{\"huge\":\"not-our-spec\"}")
+                .execute(&evil_pool).await.unwrap();
+            evil_pool.close().await;
+            perform_import(&main_pool, &evil_path, Some("clean")).await.unwrap();
+            let payload: String = sqlx::query_scalar("SELECT payload FROM sessions WHERE id='clean'")
+                .fetch_one(&main_pool).await.unwrap();
+            assert_eq!(payload, "{}");
+
+            // title 超 256B → 拒。
+            let long_title_path = dir.path().join("title.db");
+            let opts = sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(&long_title_path).create_if_missing(true);
+            let t_pool = SqlitePoolOptions::new().max_connections(1).connect_with(opts).await.unwrap();
+            sqlx::query(&crate::db::safety_net_schema_sql()).execute(&t_pool).await.unwrap();
+            sqlx::query("INSERT INTO sessions (id, title, created_at, updated_at, payload) VALUES ('orig', ?, 'now', 'now', '{}')")
+                .bind("t".repeat(300))
+                .execute(&t_pool).await.unwrap();
+            t_pool.close().await;
+            let err = perform_import(&main_pool, &long_title_path, Some("longtitle")).await.unwrap_err();
+            assert!(err.contains("title"), "err={err}");
         });
     }
 

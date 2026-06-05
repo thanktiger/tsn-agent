@@ -127,7 +127,12 @@ pub async fn retry_backfill(
     .execute(pool)
     .await
     .map_err(|e| format!("retry 标记失败：{e}"))?;
-    walker_run_session(pool, &request.session_id).await?;
+    // walker 的早期 DB 错误路径不会自己 mark_failed（payload SELECT 失败等），
+    // 不兜底会让会话永久卡在 pending_walker（不出现在失败列表，retry 不可达）。
+    if let Err(e) = walker_run_session(pool, &request.session_id).await {
+        let _ = mark_failed(pool, &request.session_id, &format!("WALKER_ERROR:{e}")).await;
+        return Err(e);
+    }
     Ok(())
 }
 

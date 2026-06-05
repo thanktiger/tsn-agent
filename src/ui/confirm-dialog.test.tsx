@@ -50,4 +50,21 @@ describe("ConfirmDialog", () => {
     expect(onCancel).toHaveBeenCalledTimes(2);
     expect(onConfirm).not.toHaveBeenCalled();
   });
+
+  it("removes the Escape listener after the dialog closes", () => {
+    const { onCancel, rerender } = renderDialog();
+    rerender(
+      <ConfirmDialog
+        open={false}
+        title="重建拓扑"
+        body="x"
+        confirmLabel="重建"
+        onConfirm={vi.fn()}
+        onCancel={onCancel}
+      />,
+    );
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(onCancel).not.toHaveBeenCalled();
+  });
 });

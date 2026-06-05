@@ -84,6 +84,8 @@ type SelectedTopologyItem =
 
 type AgentRunPhase = "idle" | "connecting" | "streaming" | "waiting";
 
+type TransferNotice = { kind: "success" | "error"; text: string; path?: string };
+
 const CONFIG_TABS: Array<{ id: ConfigTabId; label: string }> = [
   { id: "node-detail", label: "节点详情" },
   { id: "link-detail", label: "链路详情" },
@@ -105,9 +107,7 @@ export function App() {
   const [activeConfigTab, setActiveConfigTab] = useState<ConfigTabId>("node-detail");
   const [selectedTopologyItem, setSelectedTopologyItem] = useState<SelectedTopologyItem | undefined>();
   const messagesContainerRef = useRef<HTMLDivElement | null>(null);
-  const [transferNotice, setTransferNotice] = useState<
-    { kind: "success" | "error"; text: string; path?: string } | undefined
-  >();
+  const [transferNotice, setTransferNotice] = useState<TransferNotice | undefined>();
   const [retryTargetId, setRetryTargetId] = useState<string | undefined>();
   const [payloadView, setPayloadView] = useState<{ sessionId: string; text: string } | undefined>();
   const { snapshot: topologySnapshot, refetch: refetchTopology } = useTopologySnapshot(currentSession.id);
@@ -531,9 +531,6 @@ export function App() {
     setRetryTargetId(undefined);
     try {
       await invoke("retry_backfill", { request: { sessionId } });
-      // 三处同步：失败列表、会话列表 badge、当前会话画布（walker 不走 mutation buffer）。
-      await refreshBackfillFailures();
-      setSessions(await repository.list());
       if (sessionId === currentSession.id) {
         await refetchTopology();
       }
@@ -546,6 +543,11 @@ export function App() {
       });
     } catch (err) {
       setTransferNotice({ kind: "error", text: `重建失败：${String(err)}` });
+    } finally {
+      // 成败都重拉：retry 失败时 Rust 端可能已把 state 改写为新错误码
+      //（WALKER_ERROR 兜底），失败列表与 badge 需反映最新状态。
+      await refreshBackfillFailures();
+      setSessions(await repository.list());
     }
   }
 
@@ -937,7 +939,7 @@ function WorkspaceToolDrawer({
   payloadView: { sessionId: string; text: string } | undefined;
   sessions: TsnSession[];
   transferBusy: boolean;
-  transferNotice: { kind: "success" | "error"; text: string; path?: string } | undefined;
+  transferNotice: TransferNotice | undefined;
   onClose: () => void;
   onClosePayloadView: () => void;
   onDeleteSession: () => void;
@@ -1014,7 +1016,7 @@ function SessionToolPanel({
   payloadView: { sessionId: string; text: string } | undefined;
   sessions: TsnSession[];
   transferBusy: boolean;
-  transferNotice: { kind: "success" | "error"; text: string; path?: string } | undefined;
+  transferNotice: TransferNotice | undefined;
   onClosePayloadView: () => void;
   onDeleteSession: () => void;
   onDuplicateSession: () => void;
@@ -1103,7 +1105,7 @@ function SessionToolPanel({
             <button
               className="link-button"
               type="button"
-              onClick={() => onRevealExport(transferNotice.path!)}
+              onClick={() => transferNotice.path && onRevealExport(transferNotice.path)}
             >
               在 Finder 中显示
             </button>

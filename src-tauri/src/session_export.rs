@@ -34,13 +34,19 @@ pub struct ExportSessionRequest {
 #[tauri::command]
 pub fn reveal_in_dir(app: tauri::AppHandle, path: String) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
-    let target = PathBuf::from(&path);
-    if !target.is_absolute() || !target.exists() {
-        return Err(format!("路径不存在：{path}"));
-    }
+    let target = validate_reveal_path(&path)?;
     app.opener()
         .reveal_item_in_dir(&target)
         .map_err(|e| format!("无法打开文件位置：{e}"))
+}
+
+/// reveal 路径守卫：仅接受存在的绝对路径（command 是 IPC 面）。
+fn validate_reveal_path(path: &str) -> Result<PathBuf, String> {
+    let target = PathBuf::from(path);
+    if !target.is_absolute() || !target.exists() {
+        return Err(format!("路径不存在：{path}"));
+    }
+    Ok(target)
 }
 
 #[tauri::command]
@@ -103,6 +109,19 @@ pub(crate) async fn perform_single_session_export(
     let tmp_path = format!("{target_path}.tmp");
     // 清理上次中断可能残留的 tmp。
     let _ = std::fs::remove_file(&tmp_path);
+
+    // 预创建 0600 空文件（security review：SQLite 经 umask 创建通常是 0644，
+    // 写入期间存在可读窗口；预创建后 SQLite 直接复用既有文件与其权限位）。
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&tmp_path)
+            .map_err(|e| format!("创建导出临时文件失败：{e}"))?;
+    }
 
     if let Err(e) = write_export_slice(pool, session_id, &session_row, &tmp_path).await {
         let _ = std::fs::remove_file(&tmp_path);
@@ -382,6 +401,20 @@ mod tests {
             assert_eq!(std::fs::read(&target).unwrap(), b"precious old backup");
             assert!(!out.path().join("export.db.tmp").exists());
         });
+    }
+
+    #[test]
+    fn reveal_path_guard_rejects_relative_and_missing() {
+        // 相对路径拒。
+        assert!(validate_reveal_path("relative/path.db").is_err());
+        // 不存在的绝对路径拒。
+        let dir = tempdir().unwrap();
+        let missing = dir.path().join("ghost.db");
+        assert!(validate_reveal_path(missing.to_str().unwrap()).is_err());
+        // 存在的绝对路径通过。
+        let real = dir.path().join("real.db");
+        std::fs::write(&real, b"x").unwrap();
+        assert!(validate_reveal_path(real.to_str().unwrap()).is_ok());
     }
 
     #[cfg(unix)]

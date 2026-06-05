@@ -34,7 +34,8 @@ export function useBackfillFailures(): UseBackfillFailuresResult {
     }
     try {
       const rows = await invoke<BackfillFailureRow[]>("list_backfill_failures");
-      setFailures(rows);
+      // 防御非数组返回（测试 mock 缺分支时 invoke 返回 undefined → .map 崩）。
+      setFailures(Array.isArray(rows) ? rows : []);
     } catch (err) {
       console.warn("list_backfill_failures 失败", err);
     }
