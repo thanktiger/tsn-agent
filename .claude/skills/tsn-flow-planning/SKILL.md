@@ -1,35 +1,14 @@
 ---
 name: tsn-flow-planning
-description: Generate and validate the flow planning stage for TSN Agent using the project runner
+description: TSN Agent 流量规划阶段占位指引。流量规划在当前版本暂时下线，预计随 Phase B 在 DB-backed 路径上重建。
 ---
 
-# TSN Flow Planning Skill
+# TSN Flow Planning Skill（暂下线占位）
 
-Use this skill when the user is describing or changing the TSN flow planning stage.
+流量规划（stable stage id：`flow-template`）在当前版本暂时下线：旧的 stage runner / `stage-skill-result.v0` 协议与 canonical project 表示已删除，Phase B 会在工程数据库（SQLite P0 表 + sidecar）路径上重建本阶段。
 
-## Contract
+## 当前行为边界
 
-- Stable stage id: `flow-template`
-- Skill name: `tsn-flow-planning`
-- Output schema: `tsn-agent.stage-skill-result.v0`
-- The only state-changing output is the JSON written by `tsn-stage-runner`.
-
-## Required Runner Call
-
-Call the project runner with the current user intent, current canonical project, and the result path provided by the host:
-
-```bash
-node "$TSN_AGENT_STAGE_RUNNER_PATH" --stage flow-template --input '<json>' --result-path "$TSN_AGENT_STAGE_RESULT_PATH"
-```
-
-The input JSON should include:
-
-- `userIntent`: latest user request.
-- `scenarioConfigId`: current scenario config id when available.
-- `project`: current canonical TSN project before applying this user request.
-
-Do not hand-write the final JSON result. The runner generates and validates the canonical project.
-
-## User Reply
-
-After the runner finishes, explain the flow planning summary in Chinese and ask the user to confirm or describe changes. Do not claim that export files, planner output, or simulation execution have already completed.
+- 应用层（agent-adapter）在流量规划阶段本地拦截用户输入，不会把该阶段路由给模型；本 skill 仅作为占位保留。
+- 如果仍被询问流量规划相关内容：用中文说明该功能暂时下线、预计 Phase B 回归，不要尝试生成流量规划结果或结构化 JSON。
+- 不要声称导出文件、规划器输出或仿真执行已经完成。

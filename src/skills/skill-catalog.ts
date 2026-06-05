@@ -46,8 +46,8 @@ export const SKILL_CATALOG: SkillCatalogItem[] = [
     description: "解析用户业务流需求，生成流模板，并准备提交外部规划器所需的流参数。",
     inputSummary: "拓扑、用户流量描述、场景流模板",
     outputSummary: "业务流列表、路径、周期、帧长、优先级、时延和抖动约束",
-    status: "enabled",
-    notes: "已接入规划器输入生成，后续重点补齐更多流参数编辑能力。",
+    status: "disabled",
+    notes: "流量规划暂时下线，预计随 Phase B 在工程数据库路径上重建。",
   },
   {
     id: "tsn-inet-export",
