@@ -1,15 +1,23 @@
 # TSN Agent 分阶段工作流
 
+> **Phase A 状态更新（2026-06-04）**
+>
+> Plan v3 `docs/plans/2026-06-03-001-refactor-topology-mcp-single-db-domain-plan.md`
+> 落地后：`flow-template` 和 `planning-export` 阶段在 Phase A → Phase B 完整周期间
+> **UI 灰掉**（aria-disabled + tooltip + inline banner "流量规划与规划导出在当前
+> 版本暂时下线，预计 v0.X 回归"），boss 在 P1 重新构建。阶段 ID 不变以保证
+> 历史 session 兼容。
+
 ## 阶段
 
 TSN Agent 当前使用四个稳定阶段 ID：
 
-- `topology`：Project/Agent 层解析自然语言拓扑规模，调用确定性 topology domain / `tsn_topology` MCP 生成拓扑，再由 project bridge 合成 canonical 拓扑。
+- `topology`：Project/Agent 层解析自然语言拓扑规模，调用 `tsn_topology` MCP（Phase A 起所有工具走 axum sidecar HTTP → SQLite P0 表），UI 通过 `query_topology` Tauri command 读 P0 表 hydrate。
 - `time-sync`：展示时间同步默认假设，后续再细化 gPTP、GM 和端口关系。
-- `flow-template`：用户可见为“流量规划”，基于当前拓扑准备 ST 控制流/视频流等流量输入，只负责创建和确认流集合。
-- `planning-export`：用户可见为“模拟仿真”，刷新项目导出文件，并可启动真实规划任务。基础导出包括 `simulation/inet/omnetpp.ini`、`simulation/inet/traffic.ini`、NED、`workspace/react-flow-topology.json`、`planner/flow_plan_1.json` 和 manifest；当前不执行 OMNeT++。
+- `flow-template`（**Phase A 灰掉**）：用户可见为"流量规划"，基于当前拓扑准备 ST 控制流/视频流等流量输入。Phase B 回归。
+- `planning-export`（**Phase A 灰掉**）：用户可见为"模拟仿真"，刷新项目导出文件，并可启动真实规划任务。Phase B 回归。
 
-阶段完成后进入 `waiting_confirmation`，用户点击“确认并继续”才进入下一阶段。显式输入“直接生成”会走快速路径，一次完成四个阶段。
+阶段完成后进入 `waiting_confirmation`，用户点击"确认并继续"才进入下一阶段。Phase A 期间确认拓扑后停留在 `time-sync`，无法继续推进后两阶段。
 
 ## 事件
 
@@ -22,16 +30,18 @@ TSN Agent 当前使用四个稳定阶段 ID：
 - `artifact`：导出清单或规划器输入已刷新。
 - 规划任务事件：启动、轮询、busy、停止、读取结果和刷新 artifact，诊断只保存 plan id、状态、耗时、错误和文件摘要。
 
-当前执行步骤中的 `tool-availability` 会展示 `tsn_topology` 的 available / unavailable / call_failed 摘要。Agent-facing MCP response 默认展示 summary；只有初始化和 operations 链路为了继续消费 `IntermediateTopology` 才允许显式 full topology。完整 artifact、端口表、MAC 表和完整 changeSet 不进入对话或诊断日志。诊断日志继续保存脱敏后的 run id、耗时、chunk 统计、工具可用状态和错误摘要。
+当前执行步骤中的 `tool-availability` 会展示 `tsn_topology` 的 available / unavailable / call_failed 摘要。Phase A 起 MCP response 已是结构化领域响应（`responseMode` / `topologyFullAllowed` 字段已删除）；`topology.initialize` / `topology.apply_operations` 默认带 `full.topology`，其余工具默认 summary。完整 artifact、端口表、MAC 表和完整 changeSet 不进入对话或诊断日志。诊断日志保存脱敏后的 run id、耗时、chunk 统计、工具可用状态和错误摘要；存储改为 `<app-config>/logs/sess-<id>/agent-run-<runId>.jsonl` 文件（sqlite `diagnostic_logs` 表已 DROP）。
 
 ## Topology MCP 边界
 
 拓扑阶段有两条路径：
 
-- 从 0 初始化：Project/Agent 层选择模板和结构化参数，`topology.initialize` 生成 `IntermediateTopology`，project bridge 合成 `CanonicalTsnProjectV0`。
+- 从 0 初始化：Project/Agent 层选择模板和结构化参数，`topology.initialize` 通过 sidecar 计算并返回 topology；`topology.apply_operations` 落 P0 表得到 `mutationId`。UI 通过 `session_db_changed` event + `query_topology` Tauri command hydrate。
 - 已有拓扑编辑：Project/Agent 层先做 selector 消歧，再用 `topology.inspect` 和 P0 `topology.apply_operations` 处理 `link.delete`、`node.add`、`link.add`。
 
-`tsn_topology` 不做自然语言理解、不保存 topology handle、不生成 project、不推进 workflow，也不导出 `network.ned`、`omnetpp.ini` 或 `flow_plan_1.json`。这些仍属于 Project/Export 层。
+`tsn_topology` 不做自然语言理解、不保存 topology handle、不生成 project、不推进 workflow，也不导出 `network.ned`、`omnetpp.ini` 或 `flow_plan_1.json`。这些仍属于 Project/Export 层（Phase A 期间 flow / planning 导出被 UI 灰掉，Phase B 回归）。
+
+> Phase A 边界：`dual-plane-redundant` 模板在 sidecar 返 `INVALID_TEMPLATE_PARAM`（含 `phase: "A"` + `deferredTo: "Phase B"`），完整 dual-plane Rust 端 port 是 Phase B polish 子任务。
 
 ## ScenarioConfig
 

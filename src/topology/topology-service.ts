@@ -21,7 +21,7 @@ export const TOPOLOGY_TOOL_NAMES = [
   "topology.initialize",
   "topology.inspect",
   "topology.describe_artifacts",
-  "topology.validate_intermediate",
+  "topology.validate",
   "topology.build_artifacts",
   "topology.validate_artifacts",
   "topology.apply_operations",

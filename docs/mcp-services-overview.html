@@ -1,0 +1,803 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TSN Agent MCP 服务全景</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f6f7f9;
+      --panel: #ffffff;
+      --soft: #eef3f7;
+      --soft-2: #f3f6fa;
+      --text: #172033;
+      --muted: #5f6b7a;
+      --muted-2: #7a8595;
+      --line: #d8e0ea;
+      --line-2: #e6ecf3;
+      --blue: #2563eb;
+      --blue-soft: #dbeafe;
+      --teal: #0f766e;
+      --teal-soft: #ccfbf1;
+      --green: #15803d;
+      --green-soft: #d1fae5;
+      --amber: #b45309;
+      --amber-soft: #fde68a;
+      --red: #b91c1c;
+      --red-soft: #fecaca;
+      --violet: #6d28d9;
+      --violet-soft: #ede9fe;
+      --shadow: 0 14px 40px rgba(23, 32, 51, 0.08);
+      --shadow-sm: 0 2px 6px rgba(23, 32, 51, 0.04);
+    }
+
+    * { box-sizing: border-box; }
+
+    html {
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+      line-height: 1.6;
+    }
+
+    body { margin: 0; overflow-x: hidden; }
+
+    .page {
+      max-width: 1180px;
+      margin: 0 auto;
+      padding: 38px 26px 80px;
+    }
+
+    h1, h2, h3, h4, p { margin: 0; }
+
+    h1 {
+      font-size: 32px;
+      line-height: 1.2;
+      letter-spacing: -0.01em;
+    }
+    h2 {
+      font-size: 22px;
+      line-height: 1.3;
+      margin-bottom: 16px;
+      letter-spacing: -0.005em;
+    }
+    h3 {
+      font-size: 16px;
+      line-height: 1.35;
+      margin-bottom: 10px;
+    }
+    h4 {
+      font-size: 14px;
+      line-height: 1.35;
+      margin-bottom: 6px;
+      color: var(--muted);
+      font-weight: 600;
+      letter-spacing: 0.02em;
+      text-transform: uppercase;
+    }
+
+    p { color: var(--muted); }
+
+    code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+      font-size: 12.5px;
+      background: var(--soft);
+      padding: 1px 6px;
+      border-radius: 4px;
+      color: #243149;
+      border: 1px solid var(--line-2);
+    }
+
+    a { color: var(--blue); }
+
+    header.hero {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 24px;
+      align-items: end;
+      border-bottom: 1px solid var(--line);
+      padding-bottom: 22px;
+      margin-bottom: 28px;
+    }
+
+    .hero-meta {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+
+    .tag {
+      display: inline-flex;
+      align-items: center;
+      padding: 4px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+    }
+    .tag.blue { background: var(--blue-soft); color: var(--blue); }
+    .tag.green { background: var(--green-soft); color: var(--green); }
+    .tag.amber { background: var(--amber-soft); color: var(--amber); }
+    .tag.teal { background: var(--teal-soft); color: var(--teal); }
+    .tag.violet { background: var(--violet-soft); color: var(--violet); }
+    .tag.red { background: var(--red-soft); color: var(--red); }
+    .tag.muted { background: var(--soft); color: var(--muted); border: 1px solid var(--line-2); }
+
+    .lead {
+      font-size: 15px;
+      color: var(--muted);
+      margin-top: 12px;
+      max-width: 880px;
+    }
+
+    section { margin-top: 36px; }
+
+    .grid {
+      display: grid;
+      gap: 16px;
+    }
+    .grid.cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .grid.cols-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .grid.cols-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+
+    @media (max-width: 880px) {
+      .grid.cols-2, .grid.cols-3, .grid.cols-4 { grid-template-columns: 1fr; }
+      header.hero { grid-template-columns: 1fr; }
+      .hero-meta { justify-content: flex-start; }
+    }
+
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 20px;
+      box-shadow: var(--shadow-sm);
+    }
+
+    .card.muted { background: var(--soft-2); }
+    .card.accent-blue { border-left: 4px solid var(--blue); }
+    .card.accent-amber { border-left: 4px solid var(--amber); }
+    .card.accent-green { border-left: 4px solid var(--green); }
+    .card.accent-red { border-left: 4px solid var(--red); }
+    .card.accent-violet { border-left: 4px solid var(--violet); }
+    .card.accent-teal { border-left: 4px solid var(--teal); }
+
+    .stat {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .stat .value {
+      font-size: 26px;
+      font-weight: 700;
+      color: var(--text);
+      line-height: 1.1;
+    }
+    .stat .label {
+      font-size: 12.5px;
+      color: var(--muted);
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13.5px;
+    }
+    th, td {
+      padding: 10px 12px;
+      text-align: left;
+      vertical-align: top;
+      border-bottom: 1px solid var(--line-2);
+    }
+    th {
+      font-weight: 600;
+      color: var(--muted);
+      font-size: 12px;
+      letter-spacing: 0.03em;
+      text-transform: uppercase;
+      background: var(--soft-2);
+    }
+    tbody tr:last-child td { border-bottom: none; }
+    td code { font-size: 12px; }
+
+    .pillrow {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 8px;
+    }
+
+    .arch {
+      background: var(--soft-2);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 22px;
+    }
+    .arch pre {
+      margin: 0;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+      font-size: 12px;
+      color: #2b3447;
+      white-space: pre;
+      overflow-x: auto;
+    }
+
+    .filelist {
+      list-style: none;
+      padding: 0;
+      margin: 0;
+    }
+    .filelist li {
+      padding: 10px 0;
+      border-bottom: 1px dashed var(--line-2);
+      display: grid;
+      grid-template-columns: minmax(0, 1.1fr) minmax(0, 1.4fr);
+      gap: 14px;
+      align-items: start;
+    }
+    .filelist li:last-child { border-bottom: none; }
+    .filelist .path {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+      font-size: 12.5px;
+      color: #243149;
+      word-break: break-all;
+    }
+    .filelist .desc {
+      font-size: 13px;
+      color: var(--muted);
+    }
+
+    .checklist {
+      list-style: none;
+      padding: 0;
+      margin: 0;
+    }
+    .checklist li {
+      display: grid;
+      grid-template-columns: 22px 1fr;
+      gap: 10px;
+      padding: 8px 0;
+      font-size: 13.5px;
+      align-items: start;
+    }
+    .checklist .mark {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 20px;
+      height: 20px;
+      border-radius: 6px;
+      font-size: 12px;
+      font-weight: 700;
+      line-height: 1;
+    }
+    .checklist .mark.ok { background: var(--green-soft); color: var(--green); }
+    .checklist .mark.todo { background: var(--amber-soft); color: var(--amber); }
+    .checklist .mark.gate { background: var(--violet-soft); color: var(--violet); }
+    .checklist .mark.no { background: var(--red-soft); color: var(--red); }
+
+    .note {
+      font-size: 12.5px;
+      color: var(--muted-2);
+      margin-top: 8px;
+    }
+
+    .kv {
+      display: grid;
+      grid-template-columns: 130px 1fr;
+      row-gap: 6px;
+      column-gap: 12px;
+      font-size: 13px;
+    }
+    .kv dt { color: var(--muted); }
+    .kv dd { margin: 0; color: var(--text); }
+
+    .footnote {
+      margin-top: 36px;
+      padding-top: 18px;
+      border-top: 1px solid var(--line);
+      font-size: 12.5px;
+      color: var(--muted-2);
+    }
+
+    .anchor-nav {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 14px;
+    }
+    .anchor-nav a {
+      text-decoration: none;
+      padding: 5px 11px;
+      border-radius: 999px;
+      font-size: 12.5px;
+      color: var(--muted);
+      background: var(--soft);
+      border: 1px solid var(--line-2);
+    }
+    .anchor-nav a:hover { background: var(--blue-soft); color: var(--blue); }
+  </style>
+</head>
+<body>
+  <div class="page">
+
+    <header class="hero">
+      <div>
+        <div style="display:flex;gap:10px;align-items:center;margin-bottom:10px;">
+          <span class="tag blue">MCP 服务</span>
+          <span class="tag muted">tsn-agent</span>
+          <span class="tag muted">@modelcontextprotocol/sdk ^1.29.0</span>
+        </div>
+        <h1>TSN Agent MCP 服务全景</h1>
+        <p class="lead">
+          TSN Agent 当前对外暴露 <strong>一个</strong> 本地 MCP 服务 —— <code>tsn_topology</code>，
+          作为 P0 阶段的确定性拓扑领域服务，承担拓扑模板、初始化、校验、artifact 构建、inspect 与 P0 子集
+          operations。本页汇总服务内容、它在项目里的位置、当前已实现/未实现的能力，以及代码与文档的具体文件位置。
+        </p>
+        <div class="anchor-nav">
+          <a href="#position">服务定位</a>
+          <a href="#capabilities">服务内容</a>
+          <a href="#boundary">数据与安全边界</a>
+          <a href="#files">文件位置</a>
+          <a href="#status">已实现 vs 未实现</a>
+          <a href="#runtime">运行与调用</a>
+          <a href="#next">下一步</a>
+        </div>
+      </div>
+      <div class="hero-meta">
+        <span class="tag green">P0 已上线</span>
+        <span class="tag amber">P1 仍在规划</span>
+        <span class="tag violet">生产打包决策门</span>
+      </div>
+    </header>
+
+    <section>
+      <div class="grid cols-4">
+        <div class="card">
+          <div class="stat">
+            <span class="value">1</span>
+            <span class="label">MCP server（<code>tsn_topology</code>）</span>
+          </div>
+        </div>
+        <div class="card">
+          <div class="stat">
+            <span class="value">8</span>
+            <span class="label">工具（<code>topology.*</code>）</span>
+          </div>
+        </div>
+        <div class="card">
+          <div class="stat">
+            <span class="value">3</span>
+            <span class="label">P0 模板</span>
+          </div>
+        </div>
+        <div class="card">
+          <div class="stat">
+            <span class="value">stdio</span>
+            <span class="label">dev/test 传输；生产 sidecar 暂未打包</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="position">
+      <h2>1. 服务定位 — 它在 TSN Agent 中扮演什么</h2>
+      <div class="grid cols-2">
+        <div class="card accent-blue">
+          <h3>领域服务，而不是 Agent 智能体</h3>
+          <p>
+            <code>tsn_topology</code> 是 <strong>无状态确定性领域服务</strong>。它<em>不</em>调用大模型、<em>不</em>做自然语言理解、<em>不</em>推进 workflow、<em>不</em>生成完整 TSN project、<em>不</em>导出 HTML，也<em>不</em>处理 time sync/flow/simulation。
+          </p>
+          <p style="margin-top:10px;">
+            它把以前散落在 <code>tsn-topology/</code> 参考 skill、<code>.claude/skills/tsn-topology</code> 项目内 skill、<code>tsn-stage-runner.ts</code>、<code>topology-factory.ts</code> 的拓扑规则，<strong>收敛到一个版本化契约</strong>，让 Agent runtime 与客户端共用同一份事实来源。
+          </p>
+        </div>
+        <div class="card accent-teal">
+          <h3>四阶段工作流里的「拓扑」阶段执行体</h3>
+          <p>
+            TSN Agent 主工作流固定为 <strong>拓扑 → 时间同步 → 流量规划 → 模拟仿真</strong>。
+            其中拓扑阶段必须优先经由 <code>tsn_topology</code> MCP 工具产生可信拓扑结果；
+            <code>topology.initialize</code> / <code>topology.apply_operations</code> 在显式授权下回传完整 <code>IntermediateTopology</code>，由 worker 在本地合成 <code>WorkflowStageResult</code>。
+          </p>
+          <p style="margin-top:10px;">
+            其它三个阶段目前仍由本地 stage runner / fake agent 产生结构化结果，<strong>尚未拆成独立 MCP domain</strong>。
+          </p>
+        </div>
+      </div>
+
+      <div class="arch" style="margin-top:18px;">
+        <h4>架构关系（dev/test 路径）</h4>
+<pre>
+  ┌───────────────────────────────────────────────────────────────────────┐
+  │  用户  ──自然语言──▶  TSN Agent 桌面客户端（Tauri + React）             │
+  └───────────────────────────────────────────────────────────────────────┘
+                              │ run_claude_agent (Rust command)
+                              ▼
+  ┌───────────────────────────────────────────────────────────────────────┐
+  │  src-tauri/src/commands.rs       —— Rust 端 spawn Node worker        │
+  └───────────────────────────────────────────────────────────────────────┘
+                              │ stdio
+                              ▼
+  ┌───────────────────────────────────────────────────────────────────────┐
+  │  src-node/dist/claude-agent-worker.mjs                                │
+  │   · 配置 mcpServers: { tsn_topology: { command: node, args: [...] }} │
+  │   · 注入 allowedTools（含 mcp__tsn_topology__topology_*）             │
+  │   · 拦截 tool_result, 抽取 trusted topology result, 合成 stage result │
+  └───────────────────────────────────────────────────────────────────────┘
+                  │ MCP stdio (Claude Agent SDK spawn)
+                  ▼
+  ┌───────────────────────────────────────────────────────────────────────┐
+  │  src-node/dist/tsn-topology-server.mjs                                │
+  │   · McpServer("tsn_topology", "0.1.0")                                │
+  │   · 注册 8 个 topology.* 工具                                          │
+  │   · agent-facing 包装：summary 默认 + 资源/深度限制 + 错误 envelope    │
+  └───────────────────────────────────────────────────────────────────────┘
+                              │ TypeScript domain calls
+                              ▼
+  ┌───────────────────────────────────────────────────────────────────────┐
+  │  src/topology/*  —— 共享 topology domain package                      │
+  │  templates · initialize · validate · artifacts · inspect · operations │
+  │  intermediate · project-bridge · tool-result · limits                 │
+  └───────────────────────────────────────────────────────────────────────┘
+</pre>
+        <p class="note">客户端本地（fake agent / 直接 import domain）也可以绕开 MCP，直接调用 <code>src/topology/*</code>。两条路径共享同一份规则。</p>
+      </div>
+    </section>
+
+    <section id="capabilities">
+      <h2>2. 服务内容 — 8 个工具、3 个模板、一个 IntermediateTopology</h2>
+
+      <h3 style="margin-top:8px;">2.1 MCP 工具清单</h3>
+      <p style="margin-bottom:14px;">
+        SDK fully-qualified 命名是 <code>mcp__tsn_topology__topology_&lt;name&gt;</code>，由 <code>src/topology/topology-service.ts</code> 与 <code>src-node/mcp/topology-tools.ts</code> 保证一致。
+      </p>
+      <div class="card" style="padding:0;overflow:hidden;">
+        <table>
+          <thead>
+            <tr>
+              <th style="width: 28%;">工具</th>
+              <th style="width: 16%;">允许 full?</th>
+              <th>用途</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>topology.describe_templates</code></td>
+              <td><span class="tag muted">summary only</span></td>
+              <td>返回 P0 模板目录、参数 schema、默认值、约束、场景 tag、示例。</td>
+            </tr>
+            <tr>
+              <td><code>topology.initialize</code></td>
+              <td><span class="tag teal">可 full（授权）</span></td>
+              <td>以结构化 <code>templateId</code> + 参数生成 <code>IntermediateTopology</code>；worker 捕获后合成 stage result。</td>
+            </tr>
+            <tr>
+              <td><code>topology.inspect</code></td>
+              <td><span class="tag muted">summary only</span></td>
+              <td>按稳定 selector 查询节点 / 链路 / 邻接 / 端口占用摘要；命中不唯一时返回 <code>AMBIGUOUS_SELECTOR</code>。</td>
+            </tr>
+            <tr>
+              <td><code>topology.describe_artifacts</code></td>
+              <td><span class="tag muted">summary only</span></td>
+              <td>返回 4 份 legacy JSON artifact 的数量、大小和计数摘要。</td>
+            </tr>
+            <tr>
+              <td><code>topology.validate_intermediate</code></td>
+              <td><span class="tag muted">summary only</span></td>
+              <td>校验 <code>IntermediateTopology</code> 的节点 / 链路 / 端口 / server 引用与结构。</td>
+            </tr>
+            <tr>
+              <td><code>topology.build_artifacts</code></td>
+              <td><span class="tag muted">summary only</span></td>
+              <td>把 <code>IntermediateTopology</code> 构建为 4 份兼容 JSON artifact。</td>
+            </tr>
+            <tr>
+              <td><code>topology.validate_artifacts</code></td>
+              <td><span class="tag muted">summary only</span></td>
+              <td>校验 legacy JSON artifact 的引用与基本 schema。</td>
+            </tr>
+            <tr>
+              <td><code>topology.apply_operations</code></td>
+              <td><span class="tag teal">可 full（授权 + 去 changeSet）</span></td>
+              <td>P0 支持 <code>link.delete</code> / <code>node.add</code> / <code>link.add</code> 三类原子 operation，支持 <code>dryRun</code>；其余返回 <code>UNSUPPORTED_OPERATION</code>。</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3 style="margin-top:26px;">2.2 P0 模板目录</h3>
+      <div class="grid cols-3">
+        <div class="card">
+          <h3><code>generic-line</code></h3>
+          <p>通用线型拓扑，多台交换机线型互联，每台挂固定数量端系统。</p>
+          <div class="pillrow">
+            <span class="tag muted">switchCount 1-12</span>
+            <span class="tag muted">endSystemsPerSwitch 1-24</span>
+            <span class="tag muted">10 / 100 / 1k / 10k Mbps</span>
+          </div>
+        </div>
+        <div class="card">
+          <h3><code>generic-ring</code></h3>
+          <p>通用环型拓扑，参数与 <code>generic-line</code> 相同，环形互联带基础冗余。</p>
+          <div class="pillrow">
+            <span class="tag muted">redundant</span>
+            <span class="tag muted">ring</span>
+          </div>
+        </div>
+        <div class="card">
+          <h3><code>dual-plane-redundant</code></h3>
+          <p>通用双平面 / 双归属 / 双冗余拓扑。必须显式给出 <code>planes</code> / <code>switches</code> / <code>switchGroups</code> / <code>endSystems</code> / <code>backbone</code> / <code>crossPlaneLinks</code>。</p>
+          <div class="pillrow">
+            <span class="tag muted">A/B 平面</span>
+            <span class="tag muted">primary + backup 接入</span>
+            <span class="tag muted">backbone: line | ring</span>
+            <span class="tag muted">crossPlane: none | paired</span>
+          </div>
+          <p class="note">⚠️ 旧版 <code>aerospace-redundant</code> 已下线；箭载/航天等场景由 Agent 选 <code>dual-plane-redundant</code> 并展开数量。</p>
+        </div>
+      </div>
+
+      <h3 style="margin-top:26px;">2.3 核心数据契约</h3>
+      <div class="grid cols-2">
+        <div class="card">
+          <h3><code>IntermediateTopology</code> v0</h3>
+          <p>权威拓扑事实模型，schemaVersion = <code>tsn-agent.topology.intermediate.v0</code>。</p>
+          <dl class="kv" style="margin-top:10px;">
+            <dt>schemaVersion</dt><dd>固定字符串，工具间共享</dd>
+            <dt>metadata</dt><dd>templateId / templateParams / layout / source</dd>
+            <dt>nodes[]</dt><dd>id、numericId、name、type（switch/endSystem/server）、ports[]、position、可选 mac/ip</dd>
+            <dt>links[]</dt><dd>id、numericId、source/target endpoint、medium、dataRateMbps</dd>
+            <dt>diagnostics[]</dt><dd>code / message / severity / path / 可选 details</dd>
+          </dl>
+          <p class="note">不含 <code>topologyId</code> / <code>revision</code>；客户端 / project 层自己管理。MCP 完全无状态。</p>
+        </div>
+        <div class="card">
+          <h3>错误 envelope</h3>
+          <p>所有工具失败必返回结构化错误，固定字段：</p>
+          <div class="pillrow">
+            <span class="tag muted">code</span>
+            <span class="tag muted">message</span>
+            <span class="tag muted">path</span>
+            <span class="tag muted">severity</span>
+            <span class="tag muted">details</span>
+            <span class="tag muted">retryable</span>
+            <span class="tag muted">requiresUserClarification</span>
+          </div>
+          <p style="margin-top:12px;">常见错误码：</p>
+          <div class="pillrow">
+            <span class="tag muted">UNSUPPORTED_SCHEMA_VERSION</span>
+            <span class="tag muted">INVALID_TEMPLATE_PARAM</span>
+            <span class="tag muted">AMBIGUOUS_SELECTOR</span>
+            <span class="tag muted">UNKNOWN_ENDPOINT_NODE</span>
+            <span class="tag muted">PORT_ALREADY_USED</span>
+            <span class="tag muted">DUPLICATE_NODE_ID</span>
+            <span class="tag muted">DUPLICATE_LINK_ID</span>
+            <span class="tag muted">LIMIT_EXCEEDED</span>
+            <span class="tag muted">UNSUPPORTED_OPERATION</span>
+            <span class="tag muted">FORBIDDEN_RESPONSE_MODE</span>
+          </div>
+        </div>
+      </div>
+
+      <h3 style="margin-top:26px;">2.4 输出的 4 份 legacy JSON artifact</h3>
+      <div class="grid cols-4">
+        <div class="card muted"><code>topology.json</code><p style="margin-top:6px;">完整拓扑节点/链路 / 端口 / 坐标</p></div>
+        <div class="card muted"><code>topo_feature.json</code><p style="margin-top:6px;">拓扑特征摘要（规模、连通性）</p></div>
+        <div class="card muted"><code>data-server.json</code><p style="margin-top:6px;">数据服务节点描述（兼容/诊断用）</p></div>
+        <div class="card muted"><code>mac-forwarding-table.json</code><p style="margin-top:6px;">MAC 转发表（兼容/诊断用）</p></div>
+      </div>
+      <p class="note" style="margin-top:6px;">不再生成 <code>mac-forwarding-table.html</code>；也没有 <code>topology.render_mac_table_html</code> 工具。</p>
+    </section>
+
+    <section id="boundary">
+      <h2>3. 数据与安全边界 — 哪些不能进模型上下文</h2>
+      <div class="grid cols-3">
+        <div class="card accent-amber">
+          <h3>Agent-facing 默认 summary</h3>
+          <p>所有工具响应默认只返回 <strong>计数 / 摘要 / warning-error summary</strong>。</p>
+        </div>
+        <div class="card accent-amber">
+          <h3>full 只放给两个工具</h3>
+          <p>仅 <code>topology.initialize</code> 和 <code>topology.apply_operations</code> 允许在调用方同时显式设置 <code>responseMode: "full"</code> 且 <code>topologyFullAllowed: true</code> 时返回完整 <code>IntermediateTopology</code>。否则返回 <code>FORBIDDEN_RESPONSE_MODE</code>。</p>
+        </div>
+        <div class="card accent-amber">
+          <h3>永远不出 worker 的数据</h3>
+          <p>完整 artifact、端口表、MAC 表、完整 changeSet 不进对话、不进诊断日志。<code>topology.apply_operations</code> 的 full 模式还会主动剥离 <code>changeSet</code>。</p>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:14px;">
+        <h3>资源上限（来自 <code>src/topology/limits.ts</code>）</h3>
+        <div class="grid cols-4" style="margin-top:8px;">
+          <div class="stat"><span class="value">256</span><span class="label">maxNodes</span></div>
+          <div class="stat"><span class="value">1024</span><span class="label">maxLinks</span></div>
+          <div class="stat"><span class="value">64</span><span class="label">maxPortsPerNode</span></div>
+          <div class="stat"><span class="value">32</span><span class="label">maxOperations</span></div>
+          <div class="stat"><span class="value">32</span><span class="label">maxJsonDepth</span></div>
+          <div class="stat"><span class="value">1 MB</span><span class="label">maxIngressPayloadBytes</span></div>
+          <div class="stat"><span class="value">1 MB</span><span class="label">maxArtifactBytes</span></div>
+          <div class="stat"><span class="value">LIMIT_EXCEEDED</span><span class="label">超限统一错误码</span></div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:14px;">
+        <h3>诊断日志 allowlist</h3>
+        <p>
+          MCP 调用只把 <strong>tool 名 / schemaVersion / status / 耗时 bucket / 输入输出计数 / 错误码 / limit 类型 / run id</strong> 写进诊断日志。
+          完整 prompt、凭证、MAC 地址、端口映射、稳定节点/链路 ID、完整 selector、完整 changeSet、大段 artifact 一律不写。
+        </p>
+      </div>
+    </section>
+
+    <section id="files">
+      <h2>4. 文件位置 — 代码、调用方、测试、文档</h2>
+
+      <div class="grid cols-2">
+        <div class="card accent-violet">
+          <h3>4.1 共享 topology domain（TypeScript）</h3>
+          <ul class="filelist">
+            <li><span class="path">src/topology/topology-service.ts</span><span class="desc">统一导出 8 个工具名常量、<code>TopologyRuntimeSummary</code>、runtime 状态。</span></li>
+            <li><span class="path">src/topology/intermediate.ts</span><span class="desc">IntermediateTopology 类型、schemaVersion、ports/MAC/IP 派生。</span></li>
+            <li><span class="path">src/topology/templates.ts</span><span class="desc">3 个 P0 模板的目录、参数 schema、示例。</span></li>
+            <li><span class="path">src/topology/initialize.ts</span><span class="desc">模板 → IntermediateTopology 构建（含 dual-plane）。</span></li>
+            <li><span class="path">src/topology/inspect.ts</span><span class="desc">节点/链路 selector 查询与歧义识别。</span></li>
+            <li><span class="path">src/topology/operations.ts</span><span class="desc">P0 三类 operation 的原子模拟、changeSet、dryRun。</span></li>
+            <li><span class="path">src/topology/validate.ts</span><span class="desc">IntermediateTopology 校验逻辑。</span></li>
+            <li><span class="path">src/topology/artifacts.ts</span><span class="desc">4 份 legacy JSON 的 build / describe / validate。</span></li>
+            <li><span class="path">src/topology/project-bridge.ts</span><span class="desc">IntermediateTopology ↔ CanonicalTsnProjectV0 round-trip。</span></li>
+            <li><span class="path">src/topology/tool-result.ts</span><span class="desc">summary / full 结果类型、<code>forbiddenFullResponseError</code>。</span></li>
+            <li><span class="path">src/topology/limits.ts</span><span class="desc">所有资源上限与字节/深度测量函数。</span></li>
+          </ul>
+        </div>
+
+        <div class="card accent-blue">
+          <h3>4.2 MCP adapter / stdio host（Node）</h3>
+          <ul class="filelist">
+            <li><span class="path">src-node/mcp/tsn-topology-server.ts</span><span class="desc">McpServer 实例 + StdioServerTransport；CLI 入口由 esbuild 打包。</span></li>
+            <li><span class="path">src-node/mcp/topology-tools.ts</span><span class="desc">8 个工具的 zod 输入 schema、agent-facing 包装层（summary 默认、ingress 校验、full 授权、剥离 changeSet）。</span></li>
+            <li><span class="path">src-node/mcp/topology-tools.test.ts</span><span class="desc">工具注册、命名映射、forbidden full、changeSet 剥离测试。</span></li>
+            <li><span class="path">src-node/dist/tsn-topology-server.mjs</span><span class="desc">esbuild 打包产物，<code>build:worker</code> 生成；worker 通过文件存在性发现。</span></li>
+          </ul>
+          <p class="note">命令：<code>npm run build:worker</code>。该命令一并打包 <code>claude-agent-worker.mjs</code>、<code>tsn-stage-runner.mjs</code> 和 <code>tsn-topology-server.mjs</code>。</p>
+        </div>
+
+        <div class="card accent-teal">
+          <h3>4.3 调用方 / 集成点</h3>
+          <ul class="filelist">
+            <li><span class="path">src-node/claude-agent-worker.mjs</span><span class="desc">查找 <code>tsn-topology-server.mjs</code> → 注入 <code>mcpServers</code> → 拼接 <code>allowedTools</code> → 拦截 <code>mcp__tsn_topology__topology_initialize</code> / <code>_apply_operations</code> 的 trusted full result，合成 <code>WorkflowStageResult</code>。</span></li>
+            <li><span class="path">src/agent/agent-adapter.ts</span><span class="desc">在 Tauri/Web 两条路径都注入 <code>topologyRuntime</code> 诊断摘要（available / unavailable / call_failed / unknown）。</span></li>
+            <li><span class="path">src/agent/fake-agent.ts</span><span class="desc">Web/E2E 回退路径，复用同一 <code>TopologyRuntimeSummary</code> 文案，本地直调 domain。</span></li>
+            <li><span class="path">src/agent/topology-workflow-stage-result.ts</span><span class="desc">trusted topology result → <code>WorkflowStageResult</code> 的封装契约。</span></li>
+            <li><span class="path">src-tauri/src/commands.rs</span><span class="desc">Rust 端 <code>run_claude_agent</code> spawn Node worker；本身<em>不</em>直接调用 MCP，但其测试覆盖 stage_results 解析。</span></li>
+          </ul>
+        </div>
+
+        <div class="card accent-green">
+          <h3>4.4 文档与 skill 指引</h3>
+          <ul class="filelist">
+            <li><span class="path">docs/topology-mcp.md</span><span class="desc">服务契约（工具列表、模板、数据边界、错误 envelope、打包边界）。</span></li>
+            <li><span class="path">docs/brainstorms/2026-05-27-tsn-topology-mcp-requirements.md</span><span class="desc">需求与 Phased Scope（含 50 条 R 编号 + 17 条验收例 AE1-AE17）。</span></li>
+            <li><span class="path">docs/brainstorms/2026-05-27-tsn-topology-mcp-architecture.html</span><span class="desc">架构摘要 HTML（同源信息可视化）。</span></li>
+            <li><span class="path">docs/plans/2026-05-28-001-feat-deterministic-topology-mcp-service-plan.md</span><span class="desc">P0 实施计划，U1-U8 共 8 个实施单元。</span></li>
+            <li><span class="path">docs/plans/2026-05-28-002-refactor-topology-stage-result-boundary-plan.md</span><span class="desc">topology stage result 边界 refactor（worker 捕获 trusted result）。</span></li>
+            <li><span class="path">docs/plans/2026-05-29-001-feat-dual-plane-topology-template-plan.md</span><span class="desc">dual-plane-redundant 模板专项 plan。</span></li>
+            <li><span class="path">.claude/skills/tsn-topology/SKILL.md</span><span class="desc">迁移后的薄壳 Agent 指引：只描述何时调哪个 MCP 工具，不再维护独立 builder/validator/HTML。</span></li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <section id="status">
+      <h2>5. 已实现 vs 未实现</h2>
+      <div class="grid cols-2">
+        <div class="card accent-green">
+          <h3>✅ P0 已交付</h3>
+          <ul class="checklist">
+            <li><span class="mark ok">✓</span><span>8 个 <code>topology.*</code> 工具全部实现并注册到 MCP server。</span></li>
+            <li><span class="mark ok">✓</span><span>3 个 P0 模板：<code>generic-line</code>、<code>generic-ring</code>、<code>dual-plane-redundant</code>。</span></li>
+            <li><span class="mark ok">✓</span><span><code>IntermediateTopology</code> v0 schema + <code>TopologyInitIntent</code> + selector + operation + error envelope + summary/full 模式。</span></li>
+            <li><span class="mark ok">✓</span><span><code>topology.apply_operations</code> 插入交换机 tracer subset（<code>link.delete</code> + <code>node.add</code> + <code>link.add</code>）+ dryRun + 原子事务。</span></li>
+            <li><span class="mark ok">✓</span><span>project bridge round-trip：<code>canonicalTopologyToIntermediate</code> ↔ <code>intermediateToCanonicalProject</code>。</span></li>
+            <li><span class="mark ok">✓</span><span>资源上限 + ingress 校验 + JSON 深度/字节测量 + <code>LIMIT_EXCEEDED</code>。</span></li>
+            <li><span class="mark ok">✓</span><span>Agent runtime 集成：<code>mcpServers</code> 注入、<code>allowedTools</code> 同步、trusted topology result 抽取并合成 <code>WorkflowStageResult</code>。</span></li>
+            <li><span class="mark ok">✓</span><span><code>TopologyRuntimeSummary</code>（<code>available</code> / <code>unavailable</code> / <code>call_failed</code> / <code>unknown</code>）注入诊断日志。</span></li>
+            <li><span class="mark ok">✓</span><span>dev/test stdio host：<code>src-node/dist/tsn-topology-server.mjs</code>，由 <code>build:worker</code> 打包。</span></li>
+            <li><span class="mark ok">✓</span><span>确定性 fixture 与快照测试矩阵（<code>src/topology/*.test.ts</code> + <code>src-node/mcp/topology-tools.test.ts</code>）。</span></li>
+            <li><span class="mark ok">✓</span><span>HTML MAC 表导出彻底下线；<code>topology.render_mac_table_html</code> 不存在。</span></li>
+          </ul>
+        </div>
+
+        <div class="card accent-amber">
+          <h3>🚧 P1 / 决策门 / 范围外未实现</h3>
+          <ul class="checklist">
+            <li><span class="mark todo">P1</span><span>全量 node/link CRUD：<code>node.update</code>、<code>node.delete</code>、<code>link.update</code>（当前一律返回 <code>UNSUPPORTED_OPERATION</code>）。</span></li>
+            <li><span class="mark todo">P1</span><span>更多行业模板：<code>industrial-line</code>、<code>industrial-ring</code>、<code>automotive-zonal</code>、<code>aerospace-dual-plane</code>、<code>industrial-star-cell</code>、<code>rail-ladder-ring</code>、<code>substation-station-process-bus</code>、<code>proav-tree</code>。</span></li>
+            <li><span class="mark todo">P1</span><span>完整客户端 runtime 状态矩阵：<code>initializing</code> / <code>retrying</code>、拓扑阶段错误提示、重试 UI。</span></li>
+            <li><span class="mark todo">P1</span><span>拓扑编辑的 dryRun / confirm 图形化状态机；当前确认靠 project/client 层重放 snapshot + operations。</span></li>
+            <li><span class="mark todo">P1</span><span>自然语言到稳定 ID 的 selector 消歧 UI（候选项展示在客户端，不送 MCP）。</span></li>
+            <li><span class="mark gate">门</span><span>生产 Tauri sidecar 打包：当前 <code>tauri.conf.json</code> <strong>有意</strong>不携带 <code>tsn-topology-server.mjs</code>。</span></li>
+            <li><span class="mark gate">门</span><span>固定随包路径、禁止从 <code>PATH</code> 解析、签名/hash 校验、私有 IPC 或 localhost-only、每会话 capability token、fail-closed。</span></li>
+            <li><span class="mark gate">门</span><span>Node-free 全链路：现 <code>claude-agent-worker.mjs</code> 仍依赖本机 Node；若产品承诺 Node-free，需同步替换该链路。</span></li>
+            <li><span class="mark gate">门</span><span>并发工具调用数 / 等待队列 / 重试退避 / 取消 / <code>BUSY</code> 错误（生产 host 才上）。</span></li>
+            <li><span class="mark no">外</span><span>其他 MCP domain：<code>time_sync.*</code>、<code>flow.*</code>、<code>simulation.*</code> 当前<strong>未规划</strong>实现。</span></li>
+            <li><span class="mark no">外</span><span>MCP 内不做：自然语言理解、模板推荐、用户澄清、project 生成、阶段推进、会话保存、文件导出、仿真运行。</span></li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <section id="runtime">
+      <h2>6. 运行与调用</h2>
+      <div class="grid cols-2">
+        <div class="card">
+          <h3>构建与运行（dev / test）</h3>
+          <ul class="filelist">
+            <li><span class="path">npm run build:worker</span><span class="desc">esbuild 把 <code>tsn-topology-server.ts</code> 打包成 <code>src-node/dist/tsn-topology-server.mjs</code>。</span></li>
+            <li><span class="path">npm test</span><span class="desc">运行 vitest（含 <code>src-node/mcp/topology-tools.test.ts</code> 与 <code>src/topology/*.test.ts</code>）。</span></li>
+            <li><span class="path">npm run cargo:test</span><span class="desc">Tauri Rust 测试；运行前必须先 <code>build:worker</code>，否则缺资源。</span></li>
+            <li><span class="path">npm run tauri dev</span><span class="desc">桌面 dev 入口；Tauri spawn Node worker，worker 自动发现 MCP server 文件并启用工具。</span></li>
+          </ul>
+        </div>
+        <div class="card">
+          <h3>worker 端发现逻辑</h3>
+          <p>
+            <code>resolveTopologyMcpServerPath(cwd)</code> 按顺序查找：
+          </p>
+          <ol style="padding-left:18px;margin:8px 0 0;color:var(--muted);font-size:13px;">
+            <li><code>&lt;cwd&gt;/src-node/tsn-topology-server.mjs</code></li>
+            <li><code>&lt;cwd&gt;/src-node/dist/tsn-topology-server.mjs</code></li>
+          </ol>
+          <p style="margin-top:10px;">
+            找到则注入 <code>mcpServers: { tsn_topology: { command: "node", args: [path] } }</code>，
+            没找到则 <strong>不</strong> 注入 MCP，回退到本地 stage runner / domain 调用；不会因为 MCP 缺失阻塞会话。
+          </p>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:14px;">
+        <h3>allowedTools 命名映射</h3>
+        <p>
+          MCP 服务名固定 <code>tsn_topology</code>；工具点号映射成下划线：
+          <code>topology.initialize</code> → <code>mcp__tsn_topology__topology_initialize</code>。
+          worker 通过 <code>buildAllowedToolsForStage()</code> 仅在 MCP 可用时把这 8 个 fully-qualified 名加入 <code>allowedTools</code>，
+          并由 <code>topology-tools.ts</code> 里的 <code>assertTopologyToolMapping()</code> 保证映射不漂移。
+        </p>
+      </div>
+    </section>
+
+    <section id="next">
+      <h2>7. 下一步与决策门</h2>
+      <div class="grid cols-3">
+        <div class="card accent-violet">
+          <h3>生产打包形态</h3>
+          <p>三选一：① Agent SDK spawn packaged stdio server；② Tauri 管理 sidecar + 私有 IPC / loopback；③ shared package + 本地 adapter。须在 P0 之后定稿。</p>
+        </div>
+        <div class="card accent-violet">
+          <h3>Node-free 验收</h3>
+          <p>若产品承诺生产环境无系统 Node，<code>claude-agent-worker.mjs</code> 与 <code>tsn-topology-server.mjs</code> 必须同步替换或封装为自包含可执行。</p>
+        </div>
+        <div class="card accent-violet">
+          <h3>新 MCP domain 入场顺序</h3>
+          <p><code>time_sync.*</code> / <code>flow.*</code> / <code>simulation.*</code> 必须以独立 domain 需求 + 单独验收门进入；不在 <code>tsn_topology</code> 上做拼接。</p>
+        </div>
+      </div>
+    </section>
+
+    <div class="footnote">
+      <p>本页基于以下文件综合生成，可用作 onboarding / review 入口：
+        <code>docs/topology-mcp.md</code>、
+        <code>docs/brainstorms/2026-05-27-tsn-topology-mcp-requirements.md</code>、
+        <code>docs/plans/2026-05-28-001-feat-deterministic-topology-mcp-service-plan.md</code>、
+        <code>docs/plans/2026-05-28-002-refactor-topology-stage-result-boundary-plan.md</code>、
+        <code>docs/plans/2026-05-29-001-feat-dual-plane-topology-template-plan.md</code>、
+        <code>src-node/mcp/*</code>、<code>src/topology/*</code>、<code>src-node/claude-agent-worker.mjs</code>、
+        <code>src/agent/agent-adapter.ts</code>、<code>.claude/skills/tsn-topology/SKILL.md</code>、
+        <code>src-tauri/tauri.conf.json</code>、<code>package.json</code>。
+      </p>
+      <p style="margin-top:8px;">更新此页时，请同步检查 <code>docs/topology-mcp.md</code> 中的工具表和模板表是否仍然一致。</p>
+    </div>
+  </div>
+</body>
+</html>

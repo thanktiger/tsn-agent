@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { readSidecarEnv } from "./sidecar-client";
 import { createTopologyToolRegistry } from "./topology-tools";
 
 export const TSN_TOPOLOGY_MCP_SERVER_NAME = "tsn_topology" as const;
@@ -28,6 +29,14 @@ export function createTsnTopologyMcpServer(): McpServer {
 }
 
 export async function runTsnTopologyMcpServer(): Promise<void> {
+  // Plan v3 U4b: 启动前必须校验 sidecar env；缺失直接 process.exit(1)，
+  // 让 Agent SDK 看到 spawn 失败而不是后续 401 lockout。
+  try {
+    readSidecarEnv();
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exit(1);
+  }
   const server = createTsnTopologyMcpServer();
   const transport = new StdioServerTransport();
   console.error("tsn_topology MCP server listening on stdio");

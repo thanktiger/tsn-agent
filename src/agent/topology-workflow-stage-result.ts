@@ -1,102 +1,42 @@
-import type { CanonicalTsnProjectV0 } from "../domain/canonical";
-import type { IntermediateTopology } from "../topology/intermediate";
-import { summarizeTopology } from "../topology/intermediate";
-import { intermediateToCanonicalProject } from "../topology/project-bridge";
-import type { TopologyToolResult } from "../topology/tool-result";
-import { validateIntermediateTopology } from "../topology/validate";
 import {
   WORKFLOW_STAGE_RESULT_SCHEMA_VERSION,
   type TopologyWorkflowStageResult,
   type WorkflowStageProducer,
 } from "./workflow-stage-result";
 
+/**
+ * Plan v3 Phase B-β：trusted signal 是 sidecar apply_operations 响应里的
+ * `summary.mutationId`。worker 在捕获 MCP tool_result 后调用本 builder，
+ * 不再经过 IntermediateTopology → canonical project 转换。
+ */
+export interface TrustedTopologyMutation {
+  sessionId: string;
+  mutationId: number;
+  /** sidecar applied 操作数，仅用于 summary 文案。 */
+  appliedCount?: number;
+}
+
 export interface TopologyWorkflowStageResultOptions {
-  scenarioConfigId?: string;
-  projectId?: string;
-  projectName?: string;
-  timestamp?: string;
-  defaultDataRateMbps?: number;
   producer: WorkflowStageProducer;
   summary?: string;
 }
 
-export type TrustedTopologyResult =
-  | IntermediateTopology
-  | TopologyToolResult<unknown, { topology: IntermediateTopology }>;
-
 export function createTopologyWorkflowStageResult(
-  trustedResult: TrustedTopologyResult,
+  trustedResult: TrustedTopologyMutation,
   options: TopologyWorkflowStageResultOptions,
 ): TopologyWorkflowStageResult {
-  if (options.producer.type === "legacy-skill") {
-    throw new Error("topology workflow stage result cannot be created from legacy-skill producer.");
+  if (typeof trustedResult.sessionId !== "string" || trustedResult.sessionId.length === 0) {
+    throw new Error("trusted topology mutation must include sessionId.");
   }
 
-  const topology = extractTrustedTopology(trustedResult);
-  const validation = validateIntermediateTopology(topology);
-  const topologySummary = summarizeTopology(topology);
-
-  if (!validation.ok) {
-    return {
-      schemaVersion: WORKFLOW_STAGE_RESULT_SCHEMA_VERSION,
-      stage: "topology",
-      producer: options.producer,
-      status: "failed",
-      summary: options.summary ?? "拓扑工具结果未通过校验。",
-      validation: {
-        ok: false,
-        errors: validation.errors.map((error) => error.message),
-        warnings: validation.warnings.map((warning) => warning.message),
-      },
-      safeEventSummary: {
-        title: "拓扑工具结果",
-        content: `拓扑校验失败：${validation.errors.map((error) => error.message).join("；")}`,
-        status: "error",
-      },
-      payload: {
-        kind: "topology",
-        project: emptyFailedProject(options, topology),
-      },
-    };
-  }
-
-  const bridgeResult = intermediateToCanonicalProject({
-    topology,
-    options: {
-      responseMode: "full",
-      projectId: options.projectId,
-      projectName: options.projectName,
-      timestamp: options.timestamp,
-      defaultDataRateMbps: options.defaultDataRateMbps,
-    },
-  });
-  if (!bridgeResult.ok || !bridgeResult.full?.project) {
-    const errors = bridgeResult.ok ? ["project bridge did not return a canonical project."] : bridgeResult.errors.map((error) => error.message);
-    return {
-      schemaVersion: WORKFLOW_STAGE_RESULT_SCHEMA_VERSION,
-      stage: "topology",
-      producer: options.producer,
-      status: "failed",
-      summary: options.summary ?? "拓扑工具结果无法转换为项目拓扑。",
-      validation: {
-        ok: false,
-        errors,
-        warnings: bridgeResult.warnings.map((warning) => warning.message),
-      },
-      safeEventSummary: {
-        title: "拓扑工具结果",
-        content: `拓扑转换失败：${errors.join("；")}`,
-        status: "error",
-      },
-      payload: {
-        kind: "topology",
-        project: emptyFailedProject(options, topology),
-      },
-    };
+  if (!Number.isInteger(trustedResult.mutationId) || trustedResult.mutationId <= 0) {
+    throw new Error("trusted topology mutation must include a positive mutationId.");
   }
 
   const summary = options.summary
-    ?? `已生成 ${topologySummary.switchCount} 个交换机、${topologySummary.endSystemCount} 个端系统和 ${topologySummary.linkCount} 条链路。`;
+    ?? (trustedResult.appliedCount !== undefined
+      ? `拓扑已写入工程数据库（mutation #${trustedResult.mutationId}，${trustedResult.appliedCount} 个操作）。`
+      : `拓扑已写入工程数据库（mutation #${trustedResult.mutationId}）。`);
 
   return {
     schemaVersion: WORKFLOW_STAGE_RESULT_SCHEMA_VERSION,
@@ -107,59 +47,16 @@ export function createTopologyWorkflowStageResult(
     validation: {
       ok: true,
       errors: [],
-      warnings: validation.warnings.map((warning) => warning.message),
     },
     safeEventSummary: {
       title: "拓扑工具结果",
-      content: `已生成 ${bridgeResult.full.project.topology.nodes.length} 个节点和 ${bridgeResult.full.project.topology.links.length} 条链路。`,
+      content: summary,
       status: "success",
     },
     payload: {
       kind: "topology",
-      project: bridgeResult.full.project,
-    },
-  };
-}
-
-function extractTrustedTopology(result: TrustedTopologyResult): IntermediateTopology {
-  if (isTopologyToolResult(result)) {
-    if (!result.ok) {
-      throw new Error(`trusted topology result failed: ${result.errors.map((error) => error.message).join("；")}`);
-    }
-
-    if (result.metadata.responseMode !== "full" || result.metadata.summaryOnly || !result.full?.topology) {
-      throw new Error("trusted topology result must include full IntermediateTopology.");
-    }
-
-    return result.full.topology;
-  }
-
-  return result;
-}
-
-function isTopologyToolResult(value: TrustedTopologyResult): value is TopologyToolResult<unknown, { topology: IntermediateTopology }> {
-  return Boolean(value && typeof value === "object" && "ok" in value && "metadata" in value);
-}
-
-function emptyFailedProject(options: TopologyWorkflowStageResultOptions, topology?: IntermediateTopology): CanonicalTsnProjectV0 {
-  const timestamp = options.timestamp ?? "2026-01-01T00:00:00.000Z";
-
-  return {
-    schemaVersion: "tsn-agent.canonical.v0",
-    id: options.projectId ?? "project-invalid-topology-result",
-    name: options.projectName ?? "不可应用拓扑结果",
-    createdAt: timestamp,
-    updatedAt: timestamp,
-    topology: {
-      nodes: [],
-      links: [],
-    },
-    flows: [],
-    simulationHints: {
-      inetVersion: "INET 4.x",
-      nedPackage: "tsnagent.generated",
-      defaultDataRateMbps: options.defaultDataRateMbps ?? topology?.links[0]?.dataRateMbps ?? 1_000,
-      timeSynchronization: "assumed-synchronized",
+      sessionId: trustedResult.sessionId,
+      mutationId: trustedResult.mutationId,
     },
   };
 }

@@ -14,13 +14,24 @@ import {
   runClaude,
 } from "./claude-agent-worker.mjs";
 import { TOPOLOGY_MCP_ALLOWED_TOOLS as REGISTRY_TOPOLOGY_MCP_ALLOWED_TOOLS } from "./mcp/topology-tools";
-import { runTopologyStage, writeStageResult } from "./stage-skills/tsn-stage-runner";
-import { initializeTopology } from "../src/topology/initialize";
+import { createTopologyWorkflowStageResult } from "../src/agent/topology-workflow-stage-result";
+
+function topologyStageResultFixture(mutationId = 7) {
+  return createTopologyWorkflowStageResult(
+    { sessionId: "session-1", mutationId },
+    {
+      producer: {
+        type: "mcp",
+        name: "tsn_topology",
+        tool: "topology.apply_operations",
+      },
+    },
+  );
+}
 
 function failedTopologyStageResult(error) {
-  const result = runTopologyStage({ userIntent: "我需要4个交换机，每个交换机连接5个端系统" });
   return {
-    ...result,
+    ...topologyStageResultFixture(),
     status: "failed",
     validation: {
       ok: false,
@@ -31,41 +42,6 @@ function failedTopologyStageResult(error) {
       content: `拓扑校验失败：${error}`,
       status: "error",
     },
-  };
-}
-
-function dualPlaneParams(endSystemsPerSwitch) {
-  return {
-    planes: [{ id: "A" }, { id: "B" }],
-    switches: [
-      { id: "sw1", name: "SW-1", plane: "A", groupId: "g1" },
-      { id: "sw2", name: "SW-2", plane: "B", groupId: "g1" },
-      { id: "sw3", name: "SW-3", plane: "A", groupId: "g2" },
-      { id: "sw4", name: "SW-4", plane: "B", groupId: "g2" },
-    ],
-    switchGroups: [
-      { id: "g1", planeSwitches: { A: "sw1", B: "sw2" } },
-      { id: "g2", planeSwitches: { A: "sw3", B: "sw4" } },
-    ],
-    endSystems: Array.from({ length: 4 * endSystemsPerSwitch }, (_, index) => {
-      const switchOrdinal = Math.floor(index / endSystemsPerSwitch) + 1;
-      const hostOrdinal = index % endSystemsPerSwitch + 1;
-      const groupOrdinal = Math.ceil(switchOrdinal / 2);
-      const primarySwitch = groupOrdinal === 1 ? "sw1" : "sw3";
-      const backupSwitch = groupOrdinal === 1 ? "sw2" : "sw4";
-      return {
-        id: `es${switchOrdinal}-${hostOrdinal}`,
-        name: `ES-${switchOrdinal}-${hostOrdinal}`,
-        groupId: `g${groupOrdinal}`,
-        attachment: {
-          primary: { switchId: primarySwitch, plane: "A" },
-          backup: { switchId: backupSwitch, plane: "B" },
-        },
-      };
-    }),
-    backbone: { mode: "line", withinPlane: true },
-    crossPlaneLinks: { mode: "none" },
-    dataRateMbps: 1000,
   };
 }
 
@@ -143,16 +119,44 @@ describe("claude-agent-worker", () => {
     expect(result.stageResults).toEqual([]);
   });
 
-  it("extracts topology workflow stage results from full MCP tool_result blocks", () => {
+  it("Plan v3 Phase B-β: extracts the trusted mutation only from mutationId-shaped sidecar results", async () => {
+    const { _extractTrustedTopologyMutationForTest } = await import("./claude-agent-worker.mjs");
+    // 新 sidecar 形态
+    expect(_extractTrustedTopologyMutationForTest({
+      ok: true,
+      summary: { sessionId: "s1", mutationId: 7, applied: [{}, {}], dryRun: false },
+    })).toEqual({ sessionId: "s1", mutationId: 7, appliedCount: 2 });
+    // 缺 mutationId → 拒绝
+    expect(_extractTrustedTopologyMutationForTest({
+      ok: true,
+      summary: { sessionId: "s1" },
+    })).toBeUndefined();
+    // ok=false → 拒绝
+    expect(_extractTrustedTopologyMutationForTest({
+      ok: false,
+      summary: { sessionId: "s1", mutationId: 1 },
+    })).toBeUndefined();
+    // dryRun（mutationId 缺省）→ 拒绝
+    expect(_extractTrustedTopologyMutationForTest({
+      ok: true,
+      summary: { sessionId: "s1", mutationId: null, dryRun: true },
+    })).toBeUndefined();
+    // legacy responseMode:full 不再合成阶段结果
+    expect(_extractTrustedTopologyMutationForTest({
+      ok: true,
+      metadata: { responseMode: "full", summaryOnly: false },
+      full: { topology: { nodes: [], links: [] } },
+    })).toBeUndefined();
+  });
+
+  it("extracts topology workflow stage results from mutationId MCP tool_result blocks", () => {
     const toolUseNamesById = new Map([
-      ["toolu-init", "mcp__tsn_topology__topology_initialize"],
+      ["toolu-apply", "mcp__tsn_topology__topology_apply_operations"],
     ]);
-    const toolResult = initializeTopology({
-      templateId: "dual-plane-redundant",
-      params: dualPlaneParams(2),
-      responseMode: "full",
-    });
-    expect(toolResult.ok).toBe(true);
+    const toolResult = {
+      ok: true,
+      summary: { sessionId: "session-1", dryRun: false, applied: [{}, {}, {}], mutationId: 5 },
+    };
 
     const extracted = extractTopologyWorkflowStageResults({
       type: "user",
@@ -160,7 +164,7 @@ describe("claude-agent-worker", () => {
         content: [
           {
             type: "tool_result",
-            tool_use_id: "toolu-init",
+            tool_use_id: "toolu-apply",
             content: [
               {
                 type: "text",
@@ -179,24 +183,24 @@ describe("claude-agent-worker", () => {
       producer: {
         type: "mcp",
         name: "tsn_topology",
-        tool: "topology.initialize",
+        tool: "topology.apply_operations",
       },
       status: "success",
+      payload: {
+        kind: "topology",
+        sessionId: "session-1",
+        mutationId: 5,
+      },
     });
-    expect(extracted[0].result.payload.project.topology.nodes.filter((node) => node.type === "switch")).toHaveLength(4);
-    expect(extracted[0].result.payload.project.topology.nodes.filter((node) => node.type === "endSystem")).toHaveLength(8);
+    expect(extracted[0].result.summary).toContain("mutation #5");
   });
 
-  it("reads and validates a topology stage result written to the run-scoped path", async () => {
+  it("reads a topology stage result written to the run-scoped path", async () => {
     const events = [];
     const query = async function* (input) {
       const resultPath = input.options.env.TSN_AGENT_STAGE_RESULT_PATH;
       expect(resultPath).toContain("tsn-agent-stage-");
-      await writeFile(
-        resultPath,
-        JSON.stringify(runTopologyStage({ userIntent: "我需要4个交换机，每个交换机连接5个端系统" })),
-        "utf8",
-      );
+      await writeFile(resultPath, JSON.stringify(topologyStageResultFixture(7)), "utf8");
       yield { type: "result", session_id: "session-stage", result: "拓扑已生成" };
     };
 
@@ -205,12 +209,12 @@ describe("claude-agent-worker", () => {
     expect(result.stageResults).toHaveLength(1);
     expect(result.stageResults[0]).toMatchObject({
       stage: "topology",
-      skillName: "tsn-topology",
+      producer: { name: "tsn_topology" },
       validation: { ok: true, errors: [] },
+      payload: { kind: "topology", sessionId: "session-1", mutationId: 7 },
     });
-    expect(result.stageResults[0].payload.project.topology.nodes).toHaveLength(24);
     expect(events.map((event) => event.text ?? "").join("")).toContain(
-      "[Skill] tsn-topology 结果已返回：4 个交换机，20 个端系统，23 条链路",
+      "[阶段结果] tsn_topology:topology.apply_operations 结果已返回",
     );
   });
 
@@ -470,9 +474,7 @@ describe("claude-agent-worker", () => {
       yield { type: "system", session_id: "session-turn-limit" };
       throw new Error("Bash returned an error result: Reached maximum number of turns (3)");
     };
-    const stageRunner = vi.fn(async ({ input, resultPath }) => {
-      await writeStageResult(runTopologyStage(input), resultPath);
-    });
+    const stageRunner = vi.fn();
 
     await expect(runClaude(
       "我需要4个交换机，每个交换机连接5个端系统",
@@ -495,14 +497,7 @@ describe("claude-agent-worker", () => {
       yield { type: "system", session_id: "session-flow-turn-limit" };
       throw new Error("Bash returned an error result: Reached maximum number of turns (3)");
     };
-
-    const project = runTopologyStage({
-      userIntent: "我需要3个交换机，每个交换机连接3个端系统，使用环形互联",
-    }).payload.project;
-    const stageRunner = vi.fn(async ({ input, resultPath }) => {
-      const { runFlowPlanningStage } = await import("./stage-skills/tsn-stage-runner");
-      await writeStageResult(runFlowPlanningStage(input), resultPath);
-    });
+    const stageRunner = vi.fn();
 
     await expect(runClaude(
       "再加3条视频流吧",
@@ -511,7 +506,6 @@ describe("claude-agent-worker", () => {
           userIntent: "再加3条视频流吧",
           stage: "flow-template",
           scenarioConfigId: "generic-tsn",
-          project,
         },
         stageRunner,
       },

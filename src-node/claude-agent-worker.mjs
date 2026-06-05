@@ -11,7 +11,7 @@ export const TOPOLOGY_MCP_ALLOWED_TOOLS = [
   "mcp__tsn_topology__topology_initialize",
   "mcp__tsn_topology__topology_inspect",
   "mcp__tsn_topology__topology_describe_artifacts",
-  "mcp__tsn_topology__topology_validate_intermediate",
+  "mcp__tsn_topology__topology_validate",
   "mcp__tsn_topology__topology_build_artifacts",
   "mcp__tsn_topology__topology_validate_artifacts",
   "mcp__tsn_topology__topology_apply_operations",
@@ -45,6 +45,33 @@ export async function runClaude(userPrompt, options = {}, queryFn = query) {
   const skillOutputDir = resolvedOptions.skillOutputDir ?? await createSkillOutputDir(stageResultPath);
   const stageRunnerPath = resolvedOptions.stageRunnerPath ?? resolveStageRunnerPath(cwd);
   const topologyMcpServerPath = resolvedOptions.topologyMcpServerPath ?? resolveTopologyMcpServerPath(cwd);
+  // Plan v3 U4b + Spike B：MCP child env 必须显式声明（Node child_process.spawn
+  // 显式 env 字段语义是 REPLACE 不是 merge）；CLAUDECODE 必须不带过去防嵌套
+  // session 拒绝。Tauri 端通过 `commands::run_claude_agent` 向 worker 注入
+  // TSN_AGENT_DB_RPC_URL/TOKEN/SESSION_ID + env_remove(CLAUDECODE)。
+  const buildTopologyMcpEnv = () => {
+    const env = {};
+    const passthrough = [
+      "PATH",
+      "HOME",
+      "SystemRoot",
+      "APPDATA",
+      "LANG",
+      "LC_ALL",
+      "TMPDIR",
+      "TEMP",
+      "TMP",
+      "TSN_AGENT_DB_RPC_URL",
+      "TSN_AGENT_DB_RPC_TOKEN",
+      "TSN_AGENT_SESSION_ID",
+    ];
+    for (const key of passthrough) {
+      if (process.env[key] !== undefined) {
+        env[key] = process.env[key];
+      }
+    }
+    return env;
+  };
   const topologyMcpConfig = topologyMcpServerPath && existsSync(topologyMcpServerPath)
     ? {
         [TOPOLOGY_MCP_SERVER_NAME]: {
@@ -52,6 +79,7 @@ export async function runClaude(userPrompt, options = {}, queryFn = query) {
           command: process.execPath,
           args: [topologyMcpServerPath],
           alwaysLoad: true,
+          env: buildTopologyMcpEnv(),
         },
       }
     : undefined;
@@ -397,10 +425,10 @@ function buildAllowedToolsForStage(stageRunnerInput, hasTopologyMcpConfig) {
 
 function buildSystemPromptForStage(stageRunnerInput) {
   if (isRecord(stageRunnerInput) && stageRunnerInput.stage === "topology") {
-    return "你是 TSN Agent 的规划助手。你面向懂一点 TSN 但不了解具体参数的新手用户。回复必须是简体中文，保持工程化、具体、可执行。工程状态只接受结构化校验结果。拓扑初始化、校验、artifact 构建、inspect 和 apply_operations 必须优先通过 tsn_topology MCP 工具产生 trusted topology result；initialize/apply_operations 需要落图时必须请求 responseMode: \"full\" 且 topologyFullAllowed: true。artifact、端口表、MAC 表和完整 changeSet 不得进入对话。拓扑阶段不要调用 stage runner，不要写 TSN_AGENT_STAGE_RESULT_PATH，不要用自然语言重新构建拓扑。固定阶段顺序是拓扑、时间同步、流量规划、模拟仿真；拓扑确认后必须进入时间同步。当前应用没有接入 OMNeT++/远程仿真 runner，不能声称已启动仿真、SSH 执行或稍后通知结果。";
+    return "你是 TSN Agent 的规划助手。你面向懂一点 TSN 但不了解具体参数的新手用户。回复必须是简体中文，保持工程化、具体、可执行。工程状态只接受结构化校验结果。拓扑初始化、校验、artifact 构建、inspect 和 apply_operations 必须通过 tsn_topology MCP 工具调用 sidecar，所有工具结果都已是结构化领域响应（不再需要 responseMode/topologyFullAllowed 字段）。artifact、端口表、MAC 表和完整 changeSet 不得再在自然语言里复述。拓扑阶段不要调用 stage runner，不要写 TSN_AGENT_STAGE_RESULT_PATH，不要用自然语言重新构建拓扑。固定阶段顺序是拓扑、时间同步、流量规划、模拟仿真；拓扑确认后必须进入时间同步。当前应用没有接入 OMNeT++/远程仿真 runner，不能声称已启动仿真、SSH 执行或稍后通知结果。";
   }
 
-  return "你是 TSN Agent 的规划助手。你面向懂一点 TSN 但不了解具体参数的新手用户。回复必须是简体中文，保持工程化、具体、可执行。可以使用本轮启用的工具和 TSN 项目 skill，但工程状态只接受结构化校验结果。拓扑初始化、校验、artifact 构建、inspect 和 apply_operations 必须优先通过 tsn_topology MCP 工具产生 trusted topology result；流量规划可暂时通过本地 stage runner 产生结构化结果落地。MCP 只允许在 initialize/apply_operations 需要传递 IntermediateTopology 时使用 responseMode: \"full\" 且 topologyFullAllowed: true，artifact、端口表、MAC 表和完整 changeSet 不得进入对话。除 TSN_AGENT_SKILL_OUTPUT_DIR 和 TSN_AGENT_STAGE_RESULT_PATH 指向的位置外，不要写入仓库文件。固定阶段顺序是拓扑、时间同步、流量规划、模拟仿真；拓扑确认后必须进入时间同步。当前应用没有接入 OMNeT++/远程仿真 runner，不能声称已启动仿真、SSH 执行或稍后通知结果。";
+  return "你是 TSN Agent 的规划助手。你面向懂一点 TSN 但不了解具体参数的新手用户。回复必须是简体中文，保持工程化、具体、可执行。可以使用本轮启用的工具和 TSN 项目 skill，但工程状态只接受结构化校验结果。拓扑初始化、校验、artifact 构建、inspect 和 apply_operations 必须通过 tsn_topology MCP 工具调用 sidecar；流量规划可暂时通过本地 stage runner 产生结构化结果落地。MCP 工具返回值已经是结构化领域响应（不再需要 responseMode/topologyFullAllowed 字段），artifact、端口表、MAC 表和完整 changeSet 仍不得在自然语言里复述。除 TSN_AGENT_SKILL_OUTPUT_DIR 和 TSN_AGENT_STAGE_RESULT_PATH 指向的位置外，不要写入仓库文件。固定阶段顺序是拓扑、时间同步、流量规划、模拟仿真；拓扑确认后必须进入时间同步。当前应用没有接入 OMNeT++/远程仿真 runner，不能声称已启动仿真、SSH 执行或稍后通知结果。";
 }
 
 function buildStageResultRetryPrompt({
@@ -420,7 +448,7 @@ function buildStageResultRetryPrompt({
 现在必须重新执行拓扑 MCP 工具链：
 1. 从 0 初始化时调用 topology.describe_templates 和 topology.initialize。
 2. 已有拓扑编辑时调用 topology.inspect 和 topology.apply_operations。
-3. 需要右侧落图时，topology.initialize / topology.apply_operations 必须请求 responseMode="full" 且 topologyFullAllowed=true。
+3. tsn_topology MCP 工具结果已是 sidecar 结构化领域响应，不再需要 responseMode/topologyFullAllowed 字段。
 4. 不要调用 stage runner，不要写 TSN_AGENT_STAGE_RESULT_PATH，不要只返回文字说明。
 
 用户原始需求：
@@ -496,13 +524,13 @@ export function buildPrompt(
     ? `结构化结果回传：
 - 当前阶段如果需要生成或修改拓扑，必须优先使用 tsn_topology MCP 工具。
 - 从 0 初始化拓扑时，先通过 topology.describe_templates 理解模板，再调用 topology.initialize；已有拓扑编辑时，调用 topology.inspect / topology.apply_operations。
-- 需要右侧落图时，topology.initialize / topology.apply_operations 必须请求 responseMode="full" 且 topologyFullAllowed=true，让 worker 捕获 full IntermediateTopology 并合成 WorkflowStageResult。
+- tsn_topology MCP 工具结果已是 sidecar 结构化领域响应（不再需要 responseMode/topologyFullAllowed 字段）；worker 会自动解析结果并合成 WorkflowStageResult。
 - 不要调用 stage runner，不要写 TSN_AGENT_STAGE_RESULT_PATH，不要让模型复述完整拓扑 JSON，不要从 summary 文本反解析拓扑。
 - TSN_AGENT_SKILL_OUTPUT_DIR=${skillOutputDir}
 - 调用 tsn-topology skill 时，只能作为 MCP 使用指引；不要让 skill 维护独立 builder 或写 stage-result.json。`
     : `结构化结果回传：
 - 当前阶段如果需要生成或修改拓扑，必须使用 tsn-topology skill。
-- 如果可用，拓扑模板目录、初始化、校验、artifact 构建、inspect 和 apply_operations 必须使用 tsn_topology MCP 工具；只有 initialize/apply_operations 为了把 IntermediateTopology 继续传给后续工具时，才允许请求 responseMode="full" 且 topologyFullAllowed=true；不要请求 full artifact、完整端口表、MAC 表或完整 changeSet。
+- 如果可用，拓扑模板目录、初始化、校验、artifact 构建、inspect 和 apply_operations 必须使用 tsn_topology MCP 工具；返回值已是 sidecar 结构化领域响应（不再需要 responseMode/topologyFullAllowed 字段），但 artifact、端口表、MAC 表和完整 changeSet 仍不得在自然语言里复述。
 - 当前阶段如果需要生成或修改流量规划，必须使用 tsn-flow-planning skill。
 - 结构化结果必须由项目 runner 写入 TSN_AGENT_STAGE_RESULT_PATH。
 - TSN_AGENT_STAGE_RESULT_PATH=${stageResultPath}
@@ -983,54 +1011,27 @@ function summarizeStageResultForTrace(result) {
       : `状态为 ${String(result.status ?? "unknown")}`;
   }
 
-  const project = isRecord(result.payload) && isRecord(result.payload.project) ? result.payload.project : undefined;
-  const topology = isRecord(project?.topology) ? project.topology : undefined;
-  const nodes = Array.isArray(topology?.nodes) ? topology.nodes : undefined;
-  const links = Array.isArray(topology?.links) ? topology.links : undefined;
-
-  if (nodes && links) {
-    const switchCount = nodes.filter((node) => isRecord(node) && node.type === "switch").length;
-    const endSystemCount = nodes.filter((node) => isRecord(node) && node.type === "endSystem").length;
-    const flowCount = Array.isArray(project?.flows) ? project.flows.length : undefined;
-    const parts = [`${switchCount} 个交换机`, `${endSystemCount} 个端系统`, `${links.length} 条链路`];
-    if (typeof flowCount === "number" && flowCount > 0) {
-      parts.push(`${flowCount} 条流`);
-    }
-
-    return parts.join("，");
-  }
-
   return summary ? truncate(summary.replace(/\s+/g, " "), 120) : "";
 }
 
 function hasRecoverableStageResult(stageResults) {
   return stageResults.some((result) =>
     isRecord(result)
-      && (result.stage === "topology" || result.stage === "flow-template")
+      && result.stage === "topology"
       && result.status === "success"
       && isRecord(result.validation)
       && result.validation.ok === true
       && isRecord(result.payload)
-      && (result.payload.kind === "topology" || result.payload.kind === "flow-template")
-      && isRecord(result.payload.project)
+      && result.payload.kind === "topology"
+      && typeof result.payload.mutationId === "number"
   );
 }
 
 function buildRecoveredStageResultAssistantText(stageResults) {
-  const result = stageResults.find((candidate) =>
-    isRecord(candidate) && (candidate.stage === "topology" || candidate.stage === "flow-template")
-  );
+  const result = stageResults.find((candidate) => isRecord(candidate) && candidate.stage === "topology");
   const summary = isRecord(result) && typeof result.summary === "string"
     ? result.summary
     : "已生成当前阶段结构化结果。";
-
-  if (isRecord(result) && result.stage === "flow-template") {
-    return [
-      "已根据本轮需求更新流量规划。",
-      summary,
-      "确认流量规划后生成仿真输入和导出清单，或继续描述需要新增、删除或调整的流。",
-    ].join("\n");
-  }
 
   return [
     "已根据本轮需求生成拓扑草案。",
@@ -1134,11 +1135,12 @@ export function extractTopologyWorkflowStageResults(message, toolUseNamesById = 
     }
 
     const toolResult = extractJsonFromToolResultBlock(block);
-    if (!isTrustedTopologyToolResult(toolResult)) {
+    const mutation = extractTrustedTopologyMutation(toolResult);
+    if (!mutation) {
       continue;
     }
 
-    const workflowResult = createTopologyWorkflowStageResult(toolResult, {
+    const workflowResult = createTopologyWorkflowStageResult(mutation, {
       producer: {
         type: "mcp",
         name: TOPOLOGY_MCP_SERVER_NAME,
@@ -1220,14 +1222,32 @@ function parseJsonOrUndefined(text) {
   }
 }
 
-function isTrustedTopologyToolResult(value) {
-  return isRecord(value)
-    && value.ok === true
-    && isRecord(value.metadata)
-    && value.metadata.responseMode === "full"
-    && value.metadata.summaryOnly === false
-    && isRecord(value.full)
-    && isRecord(value.full.topology);
+// Plan v3 Phase B-β：trusted signal 是 sidecar 响应的 `summary.mutationId`。
+// 旧 `responseMode==="full"` resume 路径已删除 —— 新 workflow-stage-result
+// 契约要求 payload 携带 mutationId，legacy 全量 topology 无法再合成阶段结果。
+function extractTrustedTopologyMutation(value) {
+  if (!isRecord(value) || value.ok !== true || !isRecord(value.summary)) {
+    return undefined;
+  }
+
+  const { sessionId, mutationId, applied } = value.summary;
+  if (typeof sessionId !== "string" || sessionId.length === 0) {
+    return undefined;
+  }
+  if (typeof mutationId !== "number" || !Number.isInteger(mutationId) || mutationId <= 0) {
+    return undefined;
+  }
+
+  return {
+    sessionId,
+    mutationId,
+    appliedCount: Array.isArray(applied) ? applied.length : undefined,
+  };
+}
+
+/// Test-only helper to make extractor symmetry assertable from outside.
+export function _extractTrustedTopologyMutationForTest(value) {
+  return extractTrustedTopologyMutation(value);
 }
 
 function toolNameToTopologyToolName(toolName) {

@@ -11,9 +11,9 @@ npm run e2e
 npm run cargo:test
 ```
 
-- `npm test`：运行 Vitest，覆盖 canonical 拓扑、NED/`omnetpp.ini`/`traffic.ini`/React Flow/规划器导出、规划服务 mock 流程、项目快照、安全写盘、会话持久化、诊断日志、fake agent 和关键 React 行为。
+- `npm test`：运行 Vitest，覆盖 canonical 拓扑、NED/`omnetpp.ini`/`traffic.ini`/React Flow/规划器导出、规划服务 mock 流程、会话持久化、诊断日志、agent-adapter（Tauri-only + Web fail-closed）和关键 React 行为。
 - `npm run build`：执行 TypeScript 类型检查和 Vite 生产构建。
-- `npm run e2e`：运行 Web smoke E2E，使用 fake agent 验证一句话拓扑输入、拓扑展示、导出文件列表、保存入口和诊断日志。
+- `npm run e2e`：运行 Web smoke E2E。fake-agent 已删除，Web 端不再有本地确定性拓扑流；smoke 验证 UI 骨架可用与「需要桌面版」fail-closed 边界提示。
 - `npm run cargo:test`：运行 Tauri/Rust 单元测试，覆盖会话数据库 schema、诊断日志、Agent bridge、规划服务 URL/响应边界和写盘安全校验。
 
 ## Topology MCP 测试
@@ -25,9 +25,9 @@ npx vitest run src/topology src-node/mcp/topology-tools.test.ts
 ```
 
 - `src/topology/*.test.ts`：覆盖 `IntermediateTopology` 契约、模板目录、初始化、校验、legacy JSON artifact、inspect、P0 operations 和 project bridge。
-- `src-node/mcp/topology-tools.test.ts`：覆盖 MCP tool registry、allowedTools 映射、full topology 白名单边界、`FORBIDDEN_RESPONSE_MODE`、structured errors 和无 HTML artifact。
+- `src-node/mcp/topology-tools.test.ts`：覆盖 MCP tool registry、allowedTools 映射、handler 转发到 sidecar（`fetchSidecar` mock）、`SIDECAR_UNAVAILABLE` / `FORBIDDEN_OPERATION` 等 structured errors 和无 HTML artifact。
 - `src-node/claude-agent-worker.test.mjs`：覆盖 worker 的 `tsn_topology` MCP server 配置、allowedTools、dev host fail-closed 和 stage runner fallback。
-- `src-node/stage-skills/tsn-stage-runner.test.mjs`：覆盖旧 skill JSON artifact 兼容路径，确保只输出四份 JSON，不输出 HTML。
+- `src-node/stage-skills/tsn-stage-runner.test.mjs`：验证 stage runner 已 stub 化（拓扑走 MCP、流量规划 Phase B 回归），调用即 fail-closed 报下线提示。
 
 完整回归仍使用 `npm test` 和 `npm run build`。
 

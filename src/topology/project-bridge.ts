@@ -1,3 +1,10 @@
+/**
+ * @deprecated Phase B (plan v3 U9b 范围)：Intermediate↔Canonical 桥接随 sidecar
+ * 接管 topology 写权威后逻辑上失效。Agent 走 sidecar 不再 bridge；
+ * Phase A→B 期间为兼容历史 session 中 sessions.payload 的 Canonical 解析仍保留。
+ * 完整删除是 Phase B 后续 PR（需重写 topology-workflow-stage-result / agent-adapter
+ * / topology-factory 等 12 个 consumer）。
+ */
 import type {
   CanonicalTsnProjectV0,
   LinkMedium,

@@ -29,26 +29,45 @@
 
 ## 关键代码入口
 
-- `src/app/App.tsx`：主界面、聊天输入、阶段确认、步骤导航、artifact 显示和导出按钮门禁。
+- `src/app/App.tsx`：主界面、聊天输入、阶段确认、步骤导航、artifact 显示和导出按钮门禁。Phase A 起 flow-template / planning-export 阶段 UI 灰掉。
 - `src/app/App.css`：主界面样式。
-- `src/agent/agent-adapter.ts`：真实 Claude agent 与 fake agent 的适配层，负责 session/workflow 透传和诊断日志。
-- `src/agent/fake-agent.ts`：Web/E2E 环境的确定性 agent，实现分阶段推进、确认、快速路径和 agent event。
+- `src/agent/agent-adapter.ts`：Tauri-only agent 适配层，负责 session/workflow 透传、stage result（仅携带 mutationId）和诊断日志；非 Tauri（Web）fail-closed 返回「需要桌面版」，无 fake-agent 兜底。
+- `src/agent/agent-types.ts`：`AgentEvent` / `TsnAgentRequest` / `TsnAgentResult` 类型（自已删除的 fake-agent.ts 移入）。
 - `src/domain/scenario-config.ts`：轻量场景配置。新增应用场景时优先扩展这里，不要复制核心 workflow。
-- `src/domain/topology-factory.ts`：从自然语言和场景默认值生成 canonical TSN project。
+- `src/domain/topology-factory.ts`：（@deprecated Phase B）历史 in-process 创建 canonical TSN project 入口；新代码应通过 MCP `topology.initialize` + sidecar。
 - `src/project/project-state.ts`：workflow state、阶段状态、确认、请求修改、旧 session 归一化。
-- `src/project/project-exporter.ts`、`src/project/project-writer.ts`、`src-tauri/src/project_writer.rs`：导出边界和写盘实现。
 - `src/sessions/session-repository.ts`、`src-tauri/src/session_store.rs`：Web localStorage 与 Tauri SQLite 会话保存。
 - `src/diagnostics/*`、`src/ui/diagnostics/DiagnosticsDrawer.tsx`：脱敏诊断日志和日志抽屉。
 - `src-node/claude-agent-worker.mjs`：Tauri 中通过本机 Node worker 调用官方 `@anthropic-ai/claude-agent-sdk`。
 
+### Plan v3（topology MCP single-DB）Phase A 新增代码入口
+
+- `src-tauri/src/topology_sidecar.rs` / `topology_sidecar_routes.rs`：axum 127.0.0.1 sidecar + Bearer 中间件 + 8 个 `/db/topology/*` 路由。
+- `src-tauri/src/topology_compute.rs`：sidecar 内 topology compute（templates / initialize / inspect / validate / artifacts 4 件套 + BFS），1:1 镜像 `src/topology/*.ts`。
+- `src-tauri/src/topology_intermediate.rs`：sidecar 内 IntermediateTopology DTO。
+- `src-tauri/src/topology_ops.rs`：apply_operations 白名单 enum + sqlx 写 P0 表。
+- `src-tauri/src/topology_mutation_buffer.rs` + `topology_mutations_command.rs`：mutationId ring buffer + `get_topology_mutations_since` Tauri command。
+- `src-tauri/src/topology_query_command.rs`：`query_topology` Tauri command（UI 读路径，bypass sidecar HTTP，直接 sqlx in-process）。
+- `src-tauri/src/topology_backfill.rs`：启动期一次性 backfill（canonical payload → P0 表）+ 失败 session UI 3 入口。
+- `src-tauri/src/db.rs::P0_DOMAIN_SCHEMA_SQL`：15 张 P0 表 schema（plugin migration v2）。
+- `src-node/mcp/sidecar-client.ts`：MCP handler 调用 sidecar 的 thin client（含 SIDECAR_UNAVAILABLE 错误映射）。
+- `src-node/mcp/topology-tools.ts`：8 个 MCP handler 全走 fetchSidecar；`responseMode` / `topologyFullAllowed` 字段已删除。
+
+### Deprecated（Phase B 后续 PR 删除）
+
+- `src/topology/intermediate.ts` / `validate.ts` / `project-bridge.ts`：sidecar 已接管，TS 端等待 consumer 重写后整体删除。
+- `src/domain/canonical.ts` / `validation.ts`：作为 session payload 序列化 schema 暂保留；最终通过 `query_topology` 直读 P0 表替代。
+- `src/export/planner-exporter.ts` / `inet-traffic-exporter.ts` / `inet-gcl-exporter.ts` / `artifact-bundle.ts` 中 flow 部分：流量规划 P0 暂下线。
+
 ## 分阶段工作流约束
 
 - 稳定阶段 ID 是 `topology`、`time-sync`、`flow-template`、`planning-export`。界面文案可按场景变化，但核心状态机不要改成场景专属 ID。
+- **Phase A → Phase B 灰态**：`flow-template` / `planning-export` 在 UI 显示为 aria-disabled + tooltip + inline banner；阶段 ID 保留但不可推进。boss 在 P1 重新构建。
 - `recordStageResult()` 默认让阶段进入 `waiting_confirmation`；只有用户确认后才能 `confirmCurrentStage()` 进入下一阶段。
 - UI 的左上步骤导航应对应这四个用户可见阶段：拓扑、时间同步、流量规划、模拟仿真；稳定阶段 ID 仍是 `topology`、`time-sync`、`flow-template`、`planning-export`。
-- 拓扑阶段可以生成 canonical project，但 UI 不应提前展示流量规划为“已完成”。
-- 只有 `flow-template` 阶段完成或等待确认后，才显示流量规划内容。
-- 只有 `planning-export` 阶段生成 bundle 后，才允许刷新/保存仿真输入/导出文件。
+- 拓扑阶段写权威 = sidecar `topology.apply_operations` → SQLite P0 表；UI 通过 `query_topology` Tauri command 读取。
+- 只有 `flow-template` 阶段完成或等待确认后，才显示流量规划内容（Phase A 期间始终不可达）。
+- 只有 `planning-export` 阶段生成 bundle 后，才允许刷新/保存仿真输入/导出文件（Phase A 期间始终不可达）。
 - 最终 `planning-export` 阶段确认后应标记完成，不要再次触发仿真输入导出造成确认循环。
 - `flow_plan_1.json` 是规划器输入，不是规划器输出。不要在 MVP 中伪造 `flow_plan_result_1.json`、GCL 或 interface 摘要。
 
@@ -69,14 +88,17 @@
 
 ## 导出边界
 
-- 当前导出文件包括：
+> **Phase A 状态**：`flow-template` / `planning-export` 阶段在 UI 灰掉，项目导出整条链路（含 `project-exporter.ts` / `project-writer.ts` / `export-manifest.ts`，已删除）暂时下线，Phase B 回归。下列契约为 Phase B 目标，当前不可达。
+
+- Phase B 目标导出文件包括：
   - `tsnagent/generated/network.ned`
   - `omnetpp.ini`
   - `react-flow-topology.json`
   - `flow_plan_1.json`
   - `manifest.json`
-- `omnetpp.ini` 当前只承诺最小 INET/OMNeT++ 可加载运行；gPTP、TAS/GCL、调度器选择、业务流应用和规划结果回写是后续扩展。
+- `omnetpp.ini` 只承诺最小 INET/OMNeT++ 可加载运行；gPTP、TAS/GCL、调度器选择、业务流应用和规划结果回写是后续扩展。
 - 导出实现需要继续拒绝危险目录，例如 repo 根目录、home 根目录、应用配置目录、根目录和 symlink 目标。
+- 拓扑数据不再走文件导出落盘：sidecar `topology.apply_operations` 直接写 SQLite P0 表，UI 通过 `query_topology` Tauri command 读取。
 
 ## 验证命令
 

@@ -1,3 +1,9 @@
+/**
+ * @deprecated Phase B (plan v3 U9b 范围)：流量规划导出在 P0 暂下线
+ * （UI 灰掉 flow-template / planning-export workflow 阶段），boss 在 P1 重新
+ * 构建。完整删除是 Phase B 后续 PR（与 inet-traffic / inet-gcl / artifact-bundle
+ * 中 flow 部分一同删）。Phase B-α 仅打标。
+ */
 import type { CanonicalTsnProjectV0, TsnFlow, TsnLink, TsnNode, TsnPort } from "../domain/canonical";
 import {
   type PlannerFlowFeature,

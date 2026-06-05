@@ -1,0 +1,553 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TSN Agent 架构画像与演进建议 · 2026-06-02</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f5f7fa;
+      --paper: #ffffff;
+      --paper-2: #f0f4f8;
+      --ink: #172033;
+      --muted: #5e6a79;
+      --line: #d8e1ea;
+      --blue: #2563eb;
+      --teal: #0f766e;
+      --green: #15803d;
+      --amber: #b45309;
+      --red: #b91c1c;
+      --slate: #334155;
+      --shadow: 0 16px 42px rgba(23, 32, 51, 0.08);
+    }
+
+    * { box-sizing: border-box; }
+
+    html {
+      background: var(--bg);
+      color: var(--ink);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+      line-height: 1.62;
+      scroll-behavior: smooth;
+    }
+
+    body { margin: 0; overflow-x: hidden; }
+
+    a { color: var(--blue); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    code {
+      border: 1px solid #d7e0ea;
+      border-radius: 5px;
+      background: #eef2f7;
+      padding: 1px 5px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+      font-size: 0.9em;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }
+
+    pre {
+      margin: 0;
+      overflow: auto;
+      border-radius: 10px;
+      border: 1px solid #1f2937;
+      background: #0f172a;
+      color: #e2e8f0;
+      padding: 18px 20px;
+      font-size: 12.5px;
+      line-height: 1.6;
+    }
+
+    pre code {
+      display: block;
+      width: max-content;
+      min-width: 100%;
+      border: 0;
+      background: transparent;
+      color: inherit;
+      padding: 0;
+      font-size: inherit;
+      white-space: pre;
+    }
+
+    h1, h2, h3, h4, p, ul, ol { margin: 0; }
+    h1 { max-width: 920px; font-size: clamp(28px, 3.6vw, 40px); line-height: 1.15; }
+    h2 { margin-bottom: 18px; font-size: 22px; line-height: 1.26; letter-spacing: -0.01em; }
+    h3 { margin-bottom: 10px; font-size: 16px; line-height: 1.34; color: var(--slate); }
+    h4 { margin-bottom: 6px; font-size: 14px; color: var(--slate); }
+    p { color: #334155; }
+
+    ul, ol { padding-left: 22px; }
+    li { margin: 4px 0; color: #334155; }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      background: var(--paper);
+      font-size: 13.5px;
+    }
+    th, td {
+      border-bottom: 1px solid var(--line);
+      padding: 10px 12px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      color: #233148;
+      background: #e9eff6;
+      font-size: 12.5px;
+      font-weight: 700;
+    }
+    tr:last-child td { border-bottom: 0; }
+
+    .page { max-width: 1180px; margin: 0 auto; padding: 36px 26px 72px; }
+
+    .hero {
+      border-bottom: 1px solid var(--line);
+      padding-bottom: 28px;
+      margin-bottom: 32px;
+    }
+    .kicker {
+      display: inline-flex;
+      margin-bottom: 12px;
+      color: var(--teal);
+      font-size: 12.5px;
+      font-weight: 800;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    .lead { max-width: 880px; margin-top: 14px; color: #465568; font-size: 16.5px; }
+    .meta {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px;
+      margin-top: 22px;
+    }
+    .meta-item {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--paper);
+      padding: 10px 12px;
+      box-shadow: var(--shadow);
+    }
+    .meta-label { display: block; color: var(--muted); font-size: 11.5px; letter-spacing: 0.04em; text-transform: uppercase; }
+    .meta-value { display: block; margin-top: 4px; color: var(--ink); font-weight: 700; font-size: 14px; }
+
+    section { margin-bottom: 40px; }
+    section h2 { display: flex; align-items: baseline; gap: 12px; }
+    section h2 .sec-num {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 28px; height: 28px;
+      border-radius: 8px;
+      background: var(--paper-2);
+      color: var(--teal);
+      font-size: 13px;
+      font-weight: 800;
+    }
+
+    .panel {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--paper);
+      box-shadow: var(--shadow);
+      padding: 20px 22px;
+    }
+    .panel + .panel { margin-top: 14px; }
+
+    .grid-2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+    .grid-3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+
+    .pros { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+    .pro-card {
+      border: 1px solid #c7e6d4;
+      background: #f0faf4;
+      border-radius: 10px;
+      padding: 14px 16px;
+    }
+    .pro-card h4 { color: var(--green); }
+    .pro-card p { color: #314c3b; font-size: 13.5px; }
+
+    .sev {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 22px; height: 22px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 800;
+    }
+    .sev-red    { background: #fdecec; color: var(--red); }
+    .sev-amber  { background: #fdf3e3; color: var(--amber); }
+    .sev-green  { background: #e7f5ec; color: var(--green); }
+
+    .cons-table td:first-child { width: 36px; text-align: center; }
+    .cons-table td code { font-size: 12.5px; }
+
+    .priority {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: 0.04em;
+    }
+    .p0 { background: #fdecec; color: var(--red); }
+    .p1 { background: #fdf3e3; color: var(--amber); }
+    .p2 { background: #e3edff; color: var(--blue); }
+    .p3 { background: #eef2f7; color: var(--slate); }
+
+    .roadmap-block { margin-top: 14px; }
+    .roadmap-block h3 { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+    .roadmap-block ol { padding-left: 24px; }
+    .roadmap-block li { margin: 6px 0; }
+
+    .callout {
+      border: 1px solid #c8def4;
+      background: #eff6ff;
+      border-left: 4px solid var(--blue);
+      border-radius: 10px;
+      padding: 16px 18px;
+      color: #1f2a44;
+    }
+    .callout strong { color: var(--blue); }
+
+    .footer {
+      margin-top: 40px;
+      padding-top: 18px;
+      border-top: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 12.5px;
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .pill {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 999px;
+      background: var(--paper-2);
+      color: var(--slate);
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .table-wrap {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--paper);
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+
+    @media (max-width: 880px) {
+      .meta { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .grid-2, .grid-3, .pros { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <header class="hero">
+      <span class="kicker">Architecture Review · 架构师视角</span>
+      <h1>TSN Agent 架构画像与演进建议</h1>
+      <p class="lead">
+        当前架构骨架对了 — 分层清晰、契约稳定、纯函数为主。问题集中在三个上帝文件
+        （<code>App.tsx</code> / <code>commands.rs</code> / <code>claude-agent-worker.mjs</code>）
+        与三套手对齐的类型契约。本文从架构师视角给出整体画像、优缺点、以及面向"模块解耦 / 可测试 / 多 agent 协同"的演进路线。
+      </p>
+      <div class="meta">
+        <div class="meta-item">
+          <span class="meta-label">日期</span>
+          <span class="meta-value">2026-06-02</span>
+        </div>
+        <div class="meta-item">
+          <span class="meta-label">仓库分支</span>
+          <span class="meta-value">main (含 PR #2 待合)</span>
+        </div>
+        <div class="meta-item">
+          <span class="meta-label">范围</span>
+          <span class="meta-value">src / src-node / src-tauri / tsn-topology / docs / scripts</span>
+        </div>
+        <div class="meta-item">
+          <span class="meta-label">评估目标</span>
+          <span class="meta-value">解耦 · 可测试 · agent 协同</span>
+        </div>
+      </div>
+    </header>
+
+    <section>
+      <h2><span class="sec-num">1</span>整体架构</h2>
+      <div class="panel">
+        <h3>五层结构、单向依赖、三进程跨语言</h3>
+        <pre><code>┌─────────────────────────────────────────────────────────────┐
+│ React 前端 (src/)                                           │
+│  app/App.tsx ─┬─ agent/  ─┬─ domain/  topology/  export/   │
+│   (上帝文件)  │            │   (纯业务域，可独立测)            │
+│               │            └─ project/ sessions/ diagnostics/│
+│               └─ planner/ skills/ ui/ release/              │
+└──────────────┬──────────────────────────────────────────────┘
+               │ Tauri invoke (camelCase JSON)
+┌──────────────▼──────────────────────────────────────────────┐
+│ Rust Host (src-tauri/src/)                                  │
+│  commands.rs (749 行，上帝文件) ── spawn ──┐                 │
+│  session_store / project_writer / diagnostic_store /        │
+│  planner_client / skill_files (各自单一职责)                 │
+└────────────────────────────────────────────┬────────────────┘
+                                             │ stdin/stdout JSON line
+┌────────────────────────────────────────────▼────────────────┐
+│ Node Worker (src-node/)                                     │
+│  claude-agent-worker.mjs (55KB 单文件) ── @anthropic/sdk    │
+│  mcp/tsn-topology-server.mjs   (独立 stdio MCP)             │
+│  stage-skills/tsn-stage-runner.mjs (skill 子进程)           │
+└─────────────────────────────────────────────────────────────┘
+
+旁挂：tsn-topology/  独立 .git、未提交修改、游离</code></pre>
+      </div>
+
+      <div class="panel">
+        <h3>核心数据流</h3>
+        <p>
+          一句自然语言 → <code>App.submitIntent</code> → <code>agent-adapter.runTsnAgent</code> →
+          (web 走 <code>fake-agent</code> / 桌面走 Tauri invoke → Rust → Node worker → Claude SDK + 拓扑 MCP)
+          → <code>TsnAgentResult</code> 三态 union → <code>project-state</code> 归一化 →
+          <code>artifact-bundle</code> 汇总 → 用户确认 → <code>project-exporter</code> / <code>project_writer</code> 落盘。
+        </p>
+        <p style="margin-top: 10px;">
+          <strong>4 个稳定阶段 ID</strong>（<code>topology</code> / <code>time-sync</code> /
+          <code>flow-template</code> / <code>planning-export</code>）+
+          <code>record → waiting_confirmation → confirm</code>
+          的状态机是整个项目最硬的约束 — AGENTS.md 明确禁止改成场景专属 ID。
+        </p>
+      </div>
+    </section>
+
+    <section>
+      <h2><span class="sec-num">2</span>优点 — 值得保留</h2>
+      <div class="pros">
+        <div class="pro-card">
+          <h4>① 分层清晰、无循环依赖</h4>
+          <p><code>app → agent → domain</code> 单向流，<code>export / topology / planner</code> 各成纯业务域。</p>
+        </div>
+        <div class="pro-card">
+          <h4>② 类型契约硬边界</h4>
+          <p>4 个 stage ID、<code>TsnAgentResult</code> 三态、<code>ArtifactBundle</code>、<code>ExportManifest</code> 都是稳定契约，AGENTS.md 兜底。</p>
+        </div>
+        <div class="pro-card">
+          <h4>③ 核心代码大量纯函数</h4>
+          <p><code>domain/</code>、<code>topology/</code>(12)、<code>export/</code>(7 exporter) 均 input→output，335+ vitest 通过。</p>
+        </div>
+        <div class="pro-card">
+          <h4>④ Fail-closed 设计</h4>
+          <p>web 直接 CTA 下载桌面版；桌面端 sanitizer + 词表 redactor + 16KB/200/30/90s 上限严格。</p>
+        </div>
+        <div class="pro-card">
+          <h4>⑤ 安全网关到位</h4>
+          <p><code>project_writer.rs</code> 拒绝 root/home/symlink、atomic write；<code>display-redaction</code> 剔除 Claude 字样。</p>
+        </div>
+        <div class="pro-card">
+          <h4>⑥ Release 工具链自动化</h4>
+          <p><code>prepare-release.mjs</code> 同步 5 个文件版本；<code>verify-skills.mjs</code> 是 <code>build:worker</code> 的守门人。</p>
+        </div>
+        <div class="pro-card">
+          <h4>⑦ 文档与计划同步推进</h4>
+          <p><code>brainstorms / plans(18) / adr</code> 三层递进；契约文档与代码同步。</p>
+        </div>
+        <div class="pro-card">
+          <h4>⑧ 测试可重放</h4>
+          <p><code>agent-result-fixtures.ts</code> + <code>agent-stage-dispatcher.ts</code> 替代 fake runtime，刚清理 868 行测试黑盒。</p>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2><span class="sec-num">3</span>缺点 — 按严重度排序</h2>
+      <div class="table-wrap">
+        <table class="cons-table">
+          <thead>
+            <tr>
+              <th></th>
+              <th style="width: 22%;">问题</th>
+              <th style="width: 30%;">位置</th>
+              <th>影响</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><span class="sev sev-red">1</span></td>
+              <td><strong>App.tsx 上帝文件</strong></td>
+              <td><code>src/app/App.tsx</code> · 2188 行 · 40+ state · 14 直接 import</td>
+              <td>多 agent 并行改主 UI 必冲突；planner 轮询/导出/diagnostics/阶段确认全混。</td>
+            </tr>
+            <tr>
+              <td><span class="sev sev-red">2</span></td>
+              <td><strong>commands.rs 上帝文件</strong></td>
+              <td><code>src-tauri/src/commands.rs</code> · 749 行</td>
+              <td>IPC + spawn + stdout 解析 + 路径查找 + 校验全混。</td>
+            </tr>
+            <tr>
+              <td><span class="sev sev-red">3</span></td>
+              <td><strong>worker 单文件 55KB</strong></td>
+              <td><code>src-node/claude-agent-worker.mjs</code></td>
+              <td>SDK 初始化 / 拦截 / 提取 / 审计 / prompt 拼装一锅烩。</td>
+            </tr>
+            <tr>
+              <td><span class="sev sev-amber">4</span></td>
+              <td><strong>IPC 协议无版本号</strong></td>
+              <td>三端 JSON line</td>
+              <td>Worker event 是字符串枚举，<code>stage_results: Vec&lt;Value&gt;</code> untyped；schema 漂移无早期检测。</td>
+            </tr>
+            <tr>
+              <td><span class="sev sev-amber">5</span></td>
+              <td><strong>类型契约无单一来源</strong></td>
+              <td>前端 TS / Rust serde / Node JSON 三套手对齐</td>
+              <td>改一处忘改另一处，靠 review 兜底。</td>
+            </tr>
+            <tr>
+              <td><span class="sev sev-amber">6</span></td>
+              <td><strong>agent/ 命名重叠</strong></td>
+              <td><code>agent-adapter</code> · <code>fake-agent</code> · <code>workflow-stage-result</code> · <code>topology-workflow-stage-result</code> · <code>stage-skill-contract</code></td>
+              <td>5 个相似名字，新协作者迷路。</td>
+            </tr>
+            <tr>
+              <td><span class="sev sev-amber">7</span></td>
+              <td><strong>export 分层混乱</strong></td>
+              <td><code>artifact-bundle</code>(汇总+容器双职) / <code>project-exporter</code>(协调) / <code>project_writer</code>(写盘)</td>
+              <td>三层重叠，加新 exporter 要改 artifact-bundle。</td>
+            </tr>
+            <tr>
+              <td><span class="sev sev-amber">8</span></td>
+              <td><strong>tsn-topology/ 游离</strong></td>
+              <td>独立 <code>.git</code>、未提交、不在 root tracking</td>
+              <td>被 <code>.claude/skills</code> + <code>src-node/mcp</code> 引用，三处可能漂移。</td>
+            </tr>
+            <tr>
+              <td><span class="sev sev-amber">9</span></td>
+              <td><strong>PR 无 CI</strong></td>
+              <td><code>.github/workflows/</code> 仅 <code>production-build.yml</code> 在 <code>release/**</code> 触发</td>
+              <td>main 与 PR 推进无自动验证，多 agent 协同时合并冲突隐匿。</td>
+            </tr>
+            <tr>
+              <td><span class="sev sev-amber">10</span></td>
+              <td><strong>Planner 轮询内嵌 App</strong></td>
+              <td><code>App.tsx</code> 826–896 行 · 8 个 helper · 手管 timeout ref</td>
+              <td>应抽 hook / service。</td>
+            </tr>
+            <tr>
+              <td><span class="sev sev-green">11</span></td>
+              <td><strong>diagnostics 侵入业务</strong></td>
+              <td>App.tsx 调 <code>logDiagnostic</code> 10+ 次</td>
+              <td>业务和监控耦合。</td>
+            </tr>
+            <tr>
+              <td><span class="sev sev-green">12</span></td>
+              <td><strong>集成测试薄</strong></td>
+              <td>1 个 Playwright smoke；4 个 <code>#[ignore]</code> 真 SDK e2e</td>
+              <td>MVP 够用，规模化不够；缺 Rust↔worker IPC e2e、MCP stdio e2e。</td>
+            </tr>
+            <tr>
+              <td><span class="sev sev-green">13</span></td>
+              <td><strong>黑盒兼容代码</strong></td>
+              <td><code>sessions/session-topology-repair.ts</code></td>
+              <td>违反 boss "拒绝冗余兼容代码"规则。</td>
+            </tr>
+            <tr>
+              <td><span class="sev sev-green">14</span></td>
+              <td><strong>缺 CLAUDE.md 单一入口</strong></td>
+              <td>当前靠 AGENTS.md + README + memory 拼图</td>
+              <td>新 session 上手成本偏高。</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section>
+      <h2><span class="sec-num">4</span>演进建议 — 按目标排序</h2>
+
+      <div class="panel roadmap-block">
+        <h3><span class="priority p0">P0</span> 立即做 · 拆解多 agent 协同瓶颈</h3>
+        <ol>
+          <li><strong>拆 App.tsx 为 hooks</strong>（最高优先）：
+            <code>useTsnSession()</code> · <code>useStageWorkflow()</code> ·
+            <code>usePlannerPoller()</code> · <code>useArtifactExport()</code> · <code>useDiagnostics()</code>。
+            App.tsx 只剩 ~250 行 layout，每个 hook 独立测、被独立 agent 拥有。</li>
+          <li><strong>加 PR CI workflow</strong>：<code>on: pull_request</code> 跑
+            <code>npm test + cargo:test + tsc --noEmit + verify:skills + e2e:ui-smoke</code>。</li>
+          <li><strong>决定 tsn-topology/ 角色</strong>：3 选 1，不要继续"游离"。
+            (a) 已迁完直接删；(b) 转 git submodule 锁版本；(c) 转 npm workspace 真复用。</li>
+        </ol>
+      </div>
+
+      <div class="panel roadmap-block">
+        <h3><span class="priority p1">P1</span> 一个 sprint 内 · 结构清理</h3>
+        <ol start="4">
+          <li><strong>拆 commands.rs</strong>：<code>worker_bridge.rs</code> 管 spawn + stdout 行解析；<code>commands.rs</code> 只剩 tauri handler + 校验。</li>
+          <li><strong>拆 claude-agent-worker.mjs</strong>：
+            <code>sdk-adapter.mjs</code> / <code>event-bridge.mjs</code> /
+            <code>result-extractor.mjs</code> / <code>prompt-builder.mjs</code> 四份。</li>
+          <li><strong>IPC 协议加版本号</strong>：所有 worker event envelope 加 <code>protocol_version: "1.0"</code>，三端共享 <code>shared/ipc-schema.ts</code> + zod。</li>
+          <li><strong>agent/ 契约收敛</strong>：<code>workflow-stage-result</code> + <code>topology-workflow-stage-result</code> + <code>stage-skill-contract</code> 合到 <code>src/agent/contracts/</code>；adapter / sanitizer / dispatcher 与 contracts 分开。</li>
+          <li><strong>export 三层归一</strong>：<code>exporters/*.ts</code> 单格式纯函数；<code>bundle.ts</code> 只组装数据；<code>project_writer</code> 只做 bundle → 盘；删 <code>project-exporter</code> 中间层。</li>
+        </ol>
+      </div>
+
+      <div class="panel roadmap-block">
+        <h3><span class="priority p2">P2</span> 持续 · 可测试 + 协同</h3>
+        <ol start="9">
+          <li><strong>共享 schema 单一来源</strong>：zod 定义 agent event / stage result / artifact / session payload；Rust 端用 <code>ts-rs</code> 反向同步或 JSON Schema 派生。</li>
+          <li><strong>集成测试补强</strong>：
+            (a) Rust spawn worker JSON 往返（不依赖 Anthropic）；
+            (b) MCP stdio e2e；
+            (c) 多阶段确认 / 快速路径 / 旧 session 迁移 三个 Playwright 用例。</li>
+          <li><strong>diagnostics 反转依赖</strong>：业务发事件，独立 logger 订阅，不在业务代码里散调。</li>
+          <li><strong>删 <code>session-topology-repair</code></strong>（或写明 sunset 日期，按 boss 规则不留双轨）。</li>
+          <li><strong>加 CLAUDE.md</strong>：常用命令 + 不可逾越约束 + 当前迭代 PR + 必读契约文档清单。</li>
+        </ol>
+      </div>
+
+      <div class="panel roadmap-block">
+        <h3><span class="priority p3">P3</span> 远期 · 规模化</h3>
+        <ol start="14">
+          <li>轻量状态库（Zustand）替 App 40 state。</li>
+          <li>exporter 插件机制，迎接其余 7 个应用场景。</li>
+          <li>tauri-driver / Playwright desktop 真实 e2e，把 4 个 <code>#[ignore]</code> 测试拉进 nightly。</li>
+        </ol>
+      </div>
+    </section>
+
+    <section>
+      <h2><span class="sec-num">5</span>一句话总结</h2>
+      <div class="callout">
+        <strong>当前架构骨架对了</strong>（分层清晰、契约稳定、纯函数为主），
+        <strong>问题集中在三个上帝文件</strong>（<code>App.tsx</code> / <code>commands.rs</code> / <code>claude-agent-worker.mjs</code>）
+        + <strong>三套手对齐的类型契约</strong>。
+        先按 <span class="pill">P0</span> 三件事下手，多 agent 协同立刻解锁；
+        <span class="pill">P1</span> 把上帝文件拆完，从 MVP 到真实项目的演进路径就清晰了。
+      </div>
+      <div class="panel" style="margin-top: 14px;">
+        <h3>建议起点</h3>
+        <p>
+          从 <strong>"拆 App.tsx 成 hooks"</strong> 开始 — 收益最大、风险最低：纯重构、测试已覆盖主流程、改动单点不影响契约。
+          完成后 App.tsx 从 2188 行降到 ~250 行，5 个 hooks 各自独立可被不同 agent 拥有。
+        </p>
+      </div>
+    </section>
+
+    <footer class="footer">
+      <div>
+        <span class="pill">Architecture Review</span>
+        <span style="margin-left: 8px;">扫描范围：43 .ts/.tsx + Rust + Node worker + docs/scripts</span>
+      </div>
+      <div>生成日期：2026-06-02 · 仓库：tsn-agent · 评估视角：架构师</div>
+    </footer>
+  </main>
+</body>
+</html>

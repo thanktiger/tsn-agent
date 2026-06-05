@@ -2,18 +2,11 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   BrowserSessionRepository,
   createEmptySession,
-  createSessionRepository,
   redactSessionForStorage,
   SqliteSessionRepository,
   type SessionDatabase,
   type TsnSession,
 } from "./session-repository";
-import { createArtifactBundle } from "../export/artifact-bundle";
-import { createProjectFromIntent } from "../domain/topology-factory";
-import { isEndSystem, isSwitch } from "../domain/canonical";
-import { createInitialWorkflowState } from "../project/project-state";
-
-const DUAL_PLANE_TOPOLOGY_PROMPT = "我需要4个交换机，每个交换机连接2个端系统，双平面冗余";
 
 const invokeMock = vi.hoisted(() => vi.fn());
 
@@ -90,274 +83,36 @@ describe("BrowserSessionRepository", () => {
     expect(await repository.list()).toEqual([session]);
   });
 
-  it("repairs topology drift from stored user messages when listing sessions", async () => {
+  it("persists topologyMutationId across save/list round trips", async () => {
     const repository = new BrowserSessionRepository(window.localStorage);
     const session: TsnSession = {
       ...createEmptySession(),
-      messages: [
-        {
-          id: "message-1",
-          role: "user",
-          createdAt: "2026-05-20T00:00:00.000Z",
-          content: "我需要3个交换机，每个交换机连接5个端系统",
-        },
-        {
-          id: "message-2",
-          role: "user",
-          createdAt: "2026-05-20T00:01:00.000Z",
-          content: "需要改成4台交换机，每台连接3个端",
-        },
-        {
-          id: "message-3",
-          role: "user",
-          createdAt: "2026-05-20T00:02:00.000Z",
-          content: "可以使用环形互联",
-        },
-      ],
-      workflow: createInitialWorkflowState(),
-      project: createProjectFromIntent("我需要4个交换机，每个交换机连接5个端系统"),
+      topologyMutationId: 7,
     };
 
     await repository.save(session);
 
     const restored = (await repository.list())[0];
 
-    expect(restored.project?.topology.nodes).toHaveLength(16);
-    expect(restored.project?.topology.links).toHaveLength(16);
-    expect(restored.project?.flows).toHaveLength(0);
+    expect(restored.topologyMutationId).toBe(7);
   });
 
-  it("does not let continuation messages rewrite a dual-plane redundant topology", async () => {
+  it("normalizes legacy payloads without topologyMutationId", async () => {
     const repository = new BrowserSessionRepository(window.localStorage);
-    const project = createProjectFromIntent(DUAL_PLANE_TOPOLOGY_PROMPT, undefined, {
-      includeControlFlow: false,
-    });
-    const workflow = createInitialWorkflowState();
-    workflow.currentStep = "time-sync";
-    workflow.stages.topology = { step: "topology", status: "confirmed" };
-    workflow.stages["time-sync"] = { step: "time-sync", status: "waiting_confirmation" };
-
-    const session: TsnSession = {
-      ...createEmptySession(),
-      messages: [
-        {
-          id: "message-1",
-          role: "user",
-          createdAt: "2026-05-20T00:00:00.000Z",
-          content: DUAL_PLANE_TOPOLOGY_PROMPT,
-        },
-        {
-          id: "message-2",
-          role: "user",
-          createdAt: "2026-05-20T00:01:00.000Z",
-          content: "继续",
-        },
-      ],
-      workflow,
-      project,
-    };
-
-    await repository.save(session);
+    const session = createEmptySession();
+    // 模拟升级前 payload：附带已删除的 project/bundle 字段。
+    const legacyPayload = [{
+      ...session,
+      project: { schemaVersion: "tsn-agent.canonical.v0", topology: { nodes: [], links: [] }, flows: [] },
+      bundle: { artifacts: [] },
+    }];
+    window.localStorage.setItem("tsn-agent.sessions.v0", JSON.stringify(legacyPayload));
 
     const restored = (await repository.list())[0];
 
-    expect(restored.project?.id).toBe("project-default");
-    expect(restored.project?.topology.nodes.filter(isSwitch)).toHaveLength(4);
-    expect(restored.project?.topology.nodes.filter(isEndSystem)).toHaveLength(8);
-    expect(restored.project?.topology.links).toHaveLength(18);
-  });
-
-  it("repairs stored dual-plane topology instead of preserving a generic fallback shape", async () => {
-    const repository = new BrowserSessionRepository(window.localStorage);
-    const session: TsnSession = {
-      ...createEmptySession(),
-      messages: [
-        {
-          id: "message-1",
-          role: "user",
-          createdAt: "2026-05-20T00:00:00.000Z",
-          content: DUAL_PLANE_TOPOLOGY_PROMPT,
-        },
-        {
-          id: "message-2",
-          role: "user",
-          createdAt: "2026-05-20T00:01:00.000Z",
-          content: "理解的对，按照上面的理解更新拓扑",
-        },
-      ],
-      workflow: createInitialWorkflowState(),
-      project: createProjectFromIntent("我需要2个交换机，每个交换机连接5个端系统", undefined, {
-        includeControlFlow: false,
-      }),
-    };
-
-    await repository.save(session);
-
-    const restored = (await repository.list())[0];
-
-    expect(restored.project?.id).toBe("project-default");
-    expect(restored.project?.topology.nodes.filter(isSwitch)).toHaveLength(4);
-    expect(restored.project?.topology.nodes.filter(isEndSystem)).toHaveLength(8);
-    expect(restored.project?.topology.links).toHaveLength(18);
-  });
-
-  it("repairs dual-plane topology edits that change endpoints per switch", async () => {
-    const repository = new BrowserSessionRepository(window.localStorage);
-    const project = createProjectFromIntent(DUAL_PLANE_TOPOLOGY_PROMPT, undefined, {
-      includeControlFlow: false,
-    });
-
-    const session: TsnSession = {
-      ...createEmptySession(),
-      messages: [
-        {
-          id: "message-1",
-          role: "user",
-          createdAt: "2026-05-20T00:00:00.000Z",
-          content: DUAL_PLANE_TOPOLOGY_PROMPT,
-        },
-        {
-          id: "message-2",
-          role: "user",
-          createdAt: "2026-05-20T00:01:00.000Z",
-          content: "每个交换机改成3个端系统，保持双平面冗余",
-        },
-      ],
-      workflow: createInitialWorkflowState("aerospace-onboard"),
-      project,
-    };
-
-    await repository.save(session);
-
-    const restored = (await repository.list())[0];
-
-    expect(restored.project?.id).toBe("project-default");
-    expect(restored.project?.topology.nodes.filter(isSwitch)).toHaveLength(4);
-    expect(restored.project?.topology.nodes.filter(isEndSystem)).toHaveLength(12);
-    expect(restored.project?.topology.links).toHaveLength(26);
-  });
-
-  it("repairs flow drift from stored user messages when listing sessions", async () => {
-    const repository = new BrowserSessionRepository(window.localStorage);
-    const project = createProjectFromIntent("我需要2个交换机，每个交换机连接3个端系统", undefined, {
-      includeControlFlow: false,
-    });
-    const session: TsnSession = {
-      ...createEmptySession(),
-      messages: [
-        {
-          id: "message-1",
-          role: "user",
-          createdAt: "2026-05-20T00:00:00.000Z",
-          content: "我需要2个交换机，每个交换机连接3个端系统",
-        },
-        {
-          id: "message-2",
-          role: "user",
-          createdAt: "2026-05-20T00:01:00.000Z",
-          content: "两条流，一条视频流，一条控制流",
-        },
-      ],
-      workflow: {
-        ...createInitialWorkflowState(),
-        currentStep: "planning-export",
-      },
-      project,
-      bundle: {
-        artifacts: [
-          {
-            path: "planner/flow_plan_1.json",
-            purpose: "planner-input",
-            label: "旧规划器输入",
-            content: "{}",
-          },
-          {
-            path: "manifest.json",
-            purpose: "manifest",
-            label: "导出文件清单",
-            content: "{}",
-          },
-        ],
-        manifest: {
-          schemaVersion: "tsn-agent.export-manifest.v0",
-          projectId: project.id,
-          generatedAt: "2026-05-20T00:00:00.000Z",
-          files: [],
-        },
-      },
-    };
-
-    await repository.save(session);
-
-    const restored = (await repository.list())[0];
-    const flowPlan = restored.bundle?.artifacts.find((artifact) => artifact.path === "planner/flow_plan_1.json");
-
-    expect(restored.project?.flows.map((flow) => flow.name)).toEqual(["控制流-1", "视频流-1"]);
-    expect(flowPlan?.content).toContain('"sendData"');
-    expect(flowPlan?.content).toContain('"stream_id": 2');
-  });
-
-  it("repairs incremental video and BE flows after topology drift repair", async () => {
-    const repository = new BrowserSessionRepository(window.localStorage);
-    const project = createProjectFromIntent("我需要4个交换机，每个交换机连接5个端系统", undefined, {
-      includeControlFlow: false,
-    });
-    const session: TsnSession = {
-      ...createEmptySession(),
-      messages: [
-        {
-          id: "message-1",
-          role: "user",
-          createdAt: "2026-05-20T00:00:00.000Z",
-          content: "我需要4个交换机，每个交换机连接5个端系统",
-        },
-        {
-          id: "message-2",
-          role: "user",
-          createdAt: "2026-05-20T00:01:00.000Z",
-          content: "需要改为3个交换机ring形状，每个交换机3个端系统",
-        },
-        {
-          id: "message-3",
-          role: "user",
-          createdAt: "2026-05-20T00:02:00.000Z",
-          content: "我还需要一条视频流，还有一条BE流",
-        },
-        {
-          id: "message-4",
-          role: "user",
-          createdAt: "2026-05-20T00:03:00.000Z",
-          content: "再加3条视频流吧",
-        },
-      ],
-      workflow: {
-        ...createInitialWorkflowState(),
-        currentStep: "flow-template",
-        stages: {
-          ...createInitialWorkflowState().stages,
-          topology: { step: "topology", status: "confirmed" },
-          "time-sync": { step: "time-sync", status: "confirmed" },
-          "flow-template": { step: "flow-template", status: "waiting_confirmation" },
-          "planning-export": { step: "planning-export", status: "locked" },
-        },
-      },
-      project,
-    };
-
-    await repository.save(session);
-
-    const restored = (await repository.list())[0];
-
-    expect(restored.project?.topology.nodes).toHaveLength(12);
-    expect(restored.project?.topology.links).toHaveLength(12);
-    expect(restored.project?.flows.map((flow) => flow.name)).toEqual([
-      "控制流-1",
-      "视频流-1",
-      "BE流-1",
-      "视频流-2",
-      "视频流-3",
-      "视频流-4",
-    ]);
+    expect(restored.id).toBe(session.id);
+    expect(restored.topologyMutationId).toBeUndefined();
+    expect(restored.workflow.currentStep).toBe("topology");
   });
 
   it("keeps only the most recent twelve sessions", async () => {
@@ -426,6 +181,17 @@ describe("SqliteSessionRepository", () => {
     expect(sessions).toHaveLength(1);
     expect(sessions[0].id).toBe(session.id);
     expect(database.rows.get(session.id)?.messageCount).toBe(1);
+  });
+
+  it("maps topologyMutationId onto the stored hasProject column", async () => {
+    const database = new MemoryDatabase();
+    const repository = new SqliteSessionRepository(Promise.resolve(database));
+
+    await repository.save({ ...createEmptySession(), id: "session-empty" });
+    await repository.save({ ...createEmptySession(), id: "session-topo", topologyMutationId: 3 });
+
+    expect(database.rows.get("session-empty")).toMatchObject({ hasProject: false, bundleFileCount: 0 });
+    expect(database.rows.get("session-topo")).toMatchObject({ hasProject: true, bundleFileCount: 0 });
   });
 
   it("tracks the selected current session independently from recency", async () => {

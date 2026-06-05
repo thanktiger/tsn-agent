@@ -108,6 +108,20 @@ fn run_claude_agent_blocking(
             "auditDir": audit_dir.as_ref().map(|path| path.display().to_string()),
         }),
     );
+    // Plan v3 U3+U4b：注入 sidecar url + token + session_id 给 worker，
+    // worker 再透传给 MCP child 的 `env`（避免 SDK env passthrough bug，见 Spike B）。
+    let (sidecar_url, sidecar_token, app_session_id_for_env) = {
+        use tauri::Manager;
+        let handle = app
+            .try_state::<crate::topology_sidecar::SidecarHandle>()
+            .ok_or_else(|| "拓扑 sidecar 未启动；应用初始化异常".to_string())?;
+        (
+            handle.url.clone(),
+            handle.token.expose().to_string(),
+            request.app_session_id.clone().unwrap_or_default(),
+        )
+    };
+
     let payload = serde_json::json!({
         "prompt": request.prompt,
         "cwd": cwd,
@@ -117,6 +131,11 @@ fn run_claude_agent_blocking(
         "resumeSessionId": request.resume_session_id,
         "conversationContext": request.conversation_context,
         "stageRunnerInput": request.stage_runner_input,
+        "sidecar": {
+            "url": sidecar_url.clone(),
+            // 不在 payload 内 echo token（避免被 worker 端 audit log 序列化）；
+            // token 通过 env 注入。
+        },
     })
     .to_string();
 
@@ -124,6 +143,13 @@ fn run_claude_agent_blocking(
         .arg(&worker_path)
         .arg(payload)
         .current_dir(cwd)
+        // 注入 sidecar url + token + session_id 到 worker 进程 env；
+        // worker.mjs 再通过 mcpServers.tsn_topology.env 显式声明透传到 MCP child。
+        .env("TSN_AGENT_DB_RPC_URL", &sidecar_url)
+        .env("TSN_AGENT_DB_RPC_TOKEN", &sidecar_token)
+        .env("TSN_AGENT_SESSION_ID", &app_session_id_for_env)
+        // CLAUDECODE=1 在 Claude Code 进程下会被 SDK 拒绝（Spike B + plan v3 KTD）。
+        .env_remove("CLAUDECODE")
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -456,11 +482,6 @@ fn log_worker_event(
     let Some(session_id) = session_id else {
         return;
     };
-    let pool = match tauri::async_runtime::block_on(crate::session_store::connect_app_database(app))
-    {
-        Ok(pool) => pool,
-        Err(_) => return,
-    };
     let entry = crate::diagnostic_store::DiagnosticLogEntry {
         id: create_log_id(),
         session_id: session_id.to_string(),
@@ -473,9 +494,12 @@ fn log_worker_event(
         details: Some(details),
     };
 
-    let _ = tauri::async_runtime::block_on(crate::diagnostic_store::append_diagnostic_log_entry(
-        &pool, entry,
-    ));
+    // U_R5：诊断日志改写 jsonl 文件。LogFileWriter 是 async + 串行 Mutex，
+    // 这里在 worker stderr 同步处理路径上以 block_on 桥接。
+    use tauri::Manager;
+    if let Some(store) = app.try_state::<crate::diagnostic_store::DiagnosticStore>() {
+        let _ = tauri::async_runtime::block_on(store.writer().append(app, entry));
+    }
 }
 
 fn iso_now() -> String {
@@ -576,47 +600,9 @@ fn first_non_empty<'a>(left: &'a str, right: &'a str) -> &'a str {
     }
 }
 
-fn redact_error(value: &str) -> String {
-    value
-        .replace("claude-run-", "agent-run-")
-        .replace("Claude Code", "智能助手工具")
-        .replace("Claude Agent SDK", "智能助手运行时")
-        .replace("Claude Agent", "智能助手")
-        .replace("Claude SDK", "智能助手运行时")
-        .replace("Claude", "智能助手")
-        .replace("智能助手-run-", "agent-run-")
-        .replace("claude_api_key", "agent_api_key")
-        .replace("sk-ant-", "sk-ant-[redacted]-")
-        .split_whitespace()
-        .map(redact_token_like_word)
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-fn redact_token_like_word(word: &str) -> String {
-    let lower = word.to_ascii_lowercase();
-    let sensitive_keys = [
-        "api_key",
-        "apikey",
-        "token",
-        "secret",
-        "password",
-        "claude_api_key",
-    ];
-
-    if let Some(separator_index) = word.find('=').or_else(|| word.find(':')) {
-        let key = &lower[..separator_index];
-
-        if sensitive_keys
-            .iter()
-            .any(|sensitive_key| key.contains(sensitive_key))
-        {
-            return format!("{}[redacted]", &word[..separator_index + 1]);
-        }
-    }
-
-    word.to_string()
-}
+// `redact_error` / `redact_token_like_word` 实现 plan v3 U2b 已统一到
+// `crate::redaction`；本文件继续通过 re-export 引用原名以避免大面积改 call site。
+use crate::redaction::redact_error;
 
 fn validate_prompt(prompt: &str) -> Result<(), String> {
     if prompt.chars().count() > MAX_PROMPT_CHARS {

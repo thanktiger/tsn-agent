@@ -1,10 +1,23 @@
 mod commands;
 mod db;
 mod diagnostic_store;
+mod log_file_writer;
 mod planner_client;
 mod project_writer;
+mod redaction;
+mod session_export;
+mod session_import;
 mod session_store;
 mod skill_files;
+mod topology_backfill;
+mod topology_compute;
+mod topology_intermediate;
+mod topology_mutation_buffer;
+mod topology_mutations_command;
+mod topology_ops;
+mod topology_query_command;
+mod topology_sidecar;
+mod topology_sidecar_routes;
 
 #[tauri::command]
 fn app_health() -> &'static str {
@@ -13,6 +26,7 @@ fn app_health() -> &'static str {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    use tauri::Manager;
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
@@ -23,6 +37,55 @@ pub fn run() {
         )
         .manage(session_store::SessionStore::default())
         .manage(diagnostic_store::DiagnosticStore::default())
+        .manage(std::sync::Arc::new(topology_mutation_buffer::TopologyMutationBuffer::default()))
+        .setup(|app| {
+            // Plan v3 U3 + U4a-1：sidecar 起前先拉起 sqlx pool 与 mutation buffer。
+            // emit 闭包桥接到 Tauri AppHandle，生产 emit_to("main", ...)；
+            // 失败回退到全局 emit，再失败写 stderr（UI 端 watchdog 兜底）。
+            let pool = tauri::async_runtime::block_on(
+                session_store::connect_app_database(&app.handle()),
+            )
+            .expect("connect app database");
+            // Plan v3 U5：把无 backfill_state 的 session 标 pending_walker，然后立即
+            // 跑 walker 把 sessions.payload 写进 topology_nodes/_links/_refs。
+            // 最小路径只覆盖基础拓扑表；13 张 nodes.* + topo_feature 由 MCP
+            // apply_operations 增量补齐（Phase A 边界）。
+            if let Err(error) = tauri::async_runtime::block_on(
+                topology_backfill::mark_pending_for_all_sessions(&pool),
+            ) {
+                eprintln!("backfill pending 扫描失败：{error}");
+            }
+            if let Err(error) = tauri::async_runtime::block_on(
+                topology_backfill::run_walker_for_pending_sessions(&pool),
+            ) {
+                eprintln!("backfill walker 启动期扫描失败：{error}");
+            }
+            let buffer: std::sync::Arc<topology_mutation_buffer::TopologyMutationBuffer> = app
+                .state::<std::sync::Arc<topology_mutation_buffer::TopologyMutationBuffer>>()
+                .inner()
+                .clone();
+            let emit_handle = app.handle().clone();
+            let emit: topology_sidecar_routes::MutationEmitFn =
+                std::sync::Arc::new(move |record| {
+                    let payload = serde_json::json!({
+                        "sessionId": record.session_id,
+                        "domain": record.domain,
+                        "mutationId": record.mutation_id,
+                    });
+                    use tauri::Emitter;
+                    if emit_handle
+                        .emit_to("main", "session_db_changed", payload.clone())
+                        .is_err()
+                    {
+                        let _ = emit_handle.emit("session_db_changed", payload);
+                    }
+                });
+            let handle = tauri::async_runtime::block_on(topology_sidecar::launch(
+                pool, buffer, emit,
+            ));
+            app.manage(handle);
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             app_health,
             diagnostic_store::append_diagnostic_log,
@@ -36,6 +99,13 @@ pub fn run() {
             project_writer::open_project_export_dir,
             project_writer::suggest_project_export_dir,
             project_writer::write_project_artifacts,
+            session_export::export_session,
+            session_import::import_session,
+            topology_backfill::list_backfill_failures,
+            topology_backfill::retry_backfill,
+            topology_backfill::view_session_payload,
+            topology_mutations_command::get_topology_mutations_since,
+            topology_query_command::query_topology,
             session_store::get_current_session,
             session_store::list_sessions,
             session_store::remove_session,
@@ -45,8 +115,15 @@ pub fn run() {
             skill_files::read_skill_file,
             skill_files::write_skill_file
         ])
-        .run(tauri::generate_context!())
-        .expect("failed to run TSN Agent");
+        .build(tauri::generate_context!())
+        .expect("failed to build TSN Agent")
+        .run(|app_handle, event| {
+            if matches!(event, tauri::RunEvent::Exit) {
+                if let Some(handle) = app_handle.try_state::<topology_sidecar::SidecarHandle>() {
+                    handle.shutdown();
+                }
+            }
+        });
 }
 
 #[cfg(test)]

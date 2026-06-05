@@ -4,14 +4,12 @@ import {
   TOPOLOGY_TOOL_NAMES,
   type TopologyToolName,
 } from "../../src/topology/topology-service";
-import { buildTopologyArtifacts, describeTopologyArtifacts, validateTopologyArtifacts, type TopologyArtifacts } from "../../src/topology/artifacts";
-import { initializeTopology, type TopologyInitIntent } from "../../src/topology/initialize";
-import { inspectTopology, type TopologyInspectRequest } from "../../src/topology/inspect";
-import { applyTopologyOperations, type TopologyApplyOperationsRequest } from "../../src/topology/operations";
-import { describeTemplates } from "../../src/topology/templates";
-import { forbiddenFullResponseError, failResult, okResult, type TopologyResponseMode, type TopologyToolResult } from "../../src/topology/tool-result";
-import { validateIntermediateTopology } from "../../src/topology/validate";
 import { TOPOLOGY_LIMITS, measureJsonBytes, measureJsonDepth } from "../../src/topology/limits";
+import {
+  fetchSidecar,
+  type SidecarFailure,
+  type SidecarResult,
+} from "./sidecar-client";
 
 export const TOPOLOGY_MCP_ALLOWED_TOOLS = TOPOLOGY_TOOL_NAMES.map(expectedAllowedToolName);
 
@@ -21,9 +19,17 @@ export interface TopologyMcpToolDefinition {
   title: string;
   description: string;
   inputSchema: z.ZodRawShape;
-  handler: (args: unknown) => Promise<CallToolResult> | CallToolResult;
+  handler: (args: unknown) => Promise<CallToolResult>;
 }
 
+/**
+ * Plan v3 U4b complete: 所有 8 个 topology MCP handler 走 sidecar HTTP fetch；
+ * 完全删除 in-process compute path 与 responseMode/topologyFullAllowed 字段。
+ *
+ * 上游 invariant：sidecar URL/token/sessionId 由 Tauri 在 worker spawn env 中注入。
+ * sidecar 不可达时（启动 panic 已 fail-closed），各 handler 返回 SIDECAR_UNAVAILABLE
+ * 结构化错误而非 throw，确保 agent 拿到 isError=true 的 CallToolResult。
+ */
 export function createTopologyToolRegistry(): TopologyMcpToolDefinition[] {
   return [
     {
@@ -31,16 +37,23 @@ export function createTopologyToolRegistry(): TopologyMcpToolDefinition[] {
       allowedToolName: "mcp__tsn_topology__topology_describe_templates",
       title: "Describe topology templates",
       description: "Return the deterministic P0 topology template catalog.",
-      inputSchema: responseModeSchema(),
-      handler: (args) => toCallToolResult(runAgentFacing(() => okResult({ summary: describeTemplates().summary }), args)),
+      inputSchema: {},
+      handler: async (args) => callSidecarTool("/db/topology/describe_templates", args, {}),
     },
     {
       name: "topology.initialize",
       allowedToolName: "mcp__tsn_topology__topology_initialize",
       title: "Initialize topology",
-      description: "Create an IntermediateTopology from a structured template id and params.",
+      description: "Compute a topology from a template and persist it into the project DB, replacing the session's current topology. Returns summary.mutationId; use topology.inspect to query the persisted result.",
       inputSchema: initializeInputSchema(),
-      handler: (args) => toCallToolResult(runAgentFacing(() => initializeTopology(args as TopologyInitIntent), args, { allowFullTopology: true })),
+      handler: async (args) => callSidecarTool(
+        "/db/topology/initialize",
+        args,
+        {
+          templateId: pickString(args, "templateId"),
+          params: pickValue(args, "params"),
+        },
+      ),
     },
     {
       name: "topology.inspect",
@@ -51,9 +64,16 @@ export function createTopologyToolRegistry(): TopologyMcpToolDefinition[] {
         topology: z.unknown().optional(),
         selectors: z.unknown().optional(),
         includeAdjacency: z.unknown().optional(),
-        ...responseModeSchema(),
       },
-      handler: (args) => toCallToolResult(runAgentFacing(() => inspectTopology(args as TopologyInspectRequest), args)),
+      handler: async (args) => callSidecarTool(
+        "/db/topology/inspect",
+        args,
+        {
+          topology: pickValue(args, "topology"),
+          selectors: pickValue(args, "selectors"),
+          includeAdjacency: pickValue(args, "includeAdjacency"),
+        },
+      ),
     },
     {
       name: "topology.describe_artifacts",
@@ -62,33 +82,26 @@ export function createTopologyToolRegistry(): TopologyMcpToolDefinition[] {
       description: "Return deterministic artifact count and size summaries.",
       inputSchema: {
         artifacts: z.unknown().optional(),
-        ...responseModeSchema(),
       },
-      handler: (args) => toCallToolResult(runAgentFacing(
-        () => describeTopologyArtifacts((args ?? {}) as { artifacts: TopologyArtifacts; responseMode?: TopologyResponseMode }),
+      handler: async (args) => callSidecarTool(
+        "/db/topology/describe_artifacts",
         args,
-      )),
+        { artifacts: pickValue(args, "artifacts") ?? {} },
+      ),
     },
     {
-      name: "topology.validate_intermediate",
-      allowedToolName: "mcp__tsn_topology__topology_validate_intermediate",
+      name: "topology.validate",
+      allowedToolName: "mcp__tsn_topology__topology_validate",
       title: "Validate intermediate topology",
       description: "Validate an IntermediateTopology and return structured errors.",
       inputSchema: {
         topology: z.unknown().optional(),
-        ...responseModeSchema(),
       },
-      handler: (args) => toCallToolResult(runAgentFacing(() => {
-        const report = validateIntermediateTopology((args as { topology?: unknown })?.topology ?? args);
-        return report.ok
-          ? {
-              ok: true,
-              summary: report.summary,
-              warnings: report.warnings,
-              metadata: { responseMode: "summary", summaryOnly: true },
-            }
-          : failResult({ errors: report.errors, warnings: report.warnings });
-      }, args)),
+      handler: async (args) => callSidecarTool(
+        "/db/topology/validate",
+        args,
+        { topology: pickValue(args, "topology") },
+      ),
     },
     {
       name: "topology.build_artifacts",
@@ -97,12 +110,12 @@ export function createTopologyToolRegistry(): TopologyMcpToolDefinition[] {
       description: "Build four legacy JSON topology artifacts from an IntermediateTopology.",
       inputSchema: {
         topology: z.unknown().optional(),
-        ...responseModeSchema(),
       },
-      handler: (args) => toCallToolResult(runAgentFacing(
-        () => buildTopologyArtifacts((args ?? {}) as Parameters<typeof buildTopologyArtifacts>[0]),
+      handler: async (args) => callSidecarTool(
+        "/db/topology/build_artifacts",
         args,
-      )),
+        { topology: pickValue(args, "topology") },
+      ),
     },
     {
       name: "topology.validate_artifacts",
@@ -111,38 +124,40 @@ export function createTopologyToolRegistry(): TopologyMcpToolDefinition[] {
       description: "Validate legacy JSON artifact references.",
       inputSchema: {
         artifacts: z.unknown().optional(),
-        ...responseModeSchema(),
       },
-      handler: (args) => toCallToolResult(runAgentFacing(
-        () => validateTopologyArtifacts((args ?? {}) as Parameters<typeof validateTopologyArtifacts>[0]),
+      handler: async (args) => callSidecarTool(
+        "/db/topology/validate_artifacts",
         args,
-      )),
+        { artifacts: pickValue(args, "artifacts") ?? {} },
+      ),
     },
     {
       name: "topology.apply_operations",
       allowedToolName: "mcp__tsn_topology__topology_apply_operations",
       title: "Apply topology operations",
-      description: "Apply the P0 insert-switch operation subset to an IntermediateTopology.",
+      description: "Apply the P0 insert-switch operation subset to topology P0 tables.",
       inputSchema: {
-        topology: z.unknown().optional(),
         operations: z.unknown().optional(),
         dryRun: z.unknown().optional(),
-        ...responseModeSchema(),
       },
-      handler: (args) => toCallToolResult(runAgentFacing(
-        () => applyTopologyOperations((args ?? {}) as TopologyApplyOperationsRequest),
+      handler: async (args) => callSidecarTool(
+        "/db/topology/apply_operations",
         args,
-        { allowFullTopology: true, stripFullChangeSet: true },
-      )),
+        {
+          operations: pickValue(args, "operations") ?? [],
+          dryRun: pickValue(args, "dryRun") ?? false,
+        },
+      ),
     },
   ];
 }
 
-export function runTopologyTool(name: TopologyToolName, args: unknown): CallToolResult {
+export async function runTopologyTool(name: TopologyToolName, args: unknown): Promise<CallToolResult> {
   const tool = createTopologyToolRegistry().find((candidate) => candidate.name === name);
 
   if (!tool) {
-    return toCallToolResult(failResult({
+    return toCallToolResult({
+      ok: false,
       errors: [
         {
           code: "UNKNOWN_TOOL",
@@ -153,34 +168,41 @@ export function runTopologyTool(name: TopologyToolName, args: unknown): CallTool
           requiresUserClarification: false,
         },
       ],
-    }));
+    });
   }
 
-  return tool.handler(args) as CallToolResult;
+  return tool.handler(args);
 }
 
-function runAgentFacing<TSummary, TFull>(
-  callback: () => TopologyToolResult<TSummary, TFull>,
+interface IngressError {
+  code: string;
+  message: string;
+  path: string;
+  severity: "error";
+  details: Record<string, unknown>;
+  retryable: boolean;
+  requiresUserClarification: boolean;
+}
+
+async function callSidecarTool(
+  route: string,
   args: unknown,
-  options: {
-    allowFullTopology?: boolean;
-    stripFullChangeSet?: boolean;
-  } = {},
-): TopologyToolResult<TSummary, TFull> {
+  body: Record<string, unknown>,
+): Promise<CallToolResult> {
   try {
     const ingressError = validateIngress(args);
     if (ingressError) {
-      return failResult({ errors: [ingressError] });
+      return toCallToolResult({ ok: false, errors: [ingressError] });
     }
-
-    if (isFullResponseMode(args) && (!options.allowFullTopology || !allowsAgentFullTopology(args))) {
-      return failResult({ errors: [forbiddenFullResponseError()] });
+    const sanitized = pruneUndefined(body);
+    const result: SidecarResult = await fetchSidecar(route, sanitized);
+    if (!result.ok) {
+      return toCallToolResult(sidecarFailureToToolResult(result));
     }
-
-    const result = callback();
-    return options.stripFullChangeSet ? stripFullChangeSet(result) : result;
+    return toCallToolResult(result.body);
   } catch (error) {
-    return failResult({
+    return toCallToolResult({
+      ok: false,
       errors: [
         {
           code: "CALL_FAILED",
@@ -195,30 +217,33 @@ function runAgentFacing<TSummary, TFull>(
   }
 }
 
-function stripFullChangeSet<TSummary, TFull>(
-  result: TopologyToolResult<TSummary, TFull>,
-): TopologyToolResult<TSummary, TFull> {
-  if (!result.ok || !result.full || typeof result.full !== "object") {
-    return result;
-  }
-
-  const full = { ...(result.full as Record<string, unknown>) };
-  delete full.changeSet;
-
+function sidecarFailureToToolResult(failure: SidecarFailure): Record<string, unknown> {
   return {
-    ...result,
-    full: full as TFull,
+    ok: false,
+    errors: [
+      {
+        code: failure.code === "SIDECAR_UNREACHABLE" || failure.code === "SIDECAR_TIMEOUT"
+          ? "SIDECAR_UNAVAILABLE"
+          : failure.code,
+        message: failure.message || "topology sidecar returned an error",
+        path: "$",
+        severity: "error",
+        details: { status: failure.status, code: failure.code },
+        retryable: failure.retryable,
+        requiresUserClarification: false,
+      },
+    ],
   };
 }
 
-function validateIngress(args: unknown) {
+function validateIngress(args: unknown): IngressError | undefined {
   const bytes = measureJsonBytes(args ?? {});
   if (bytes > TOPOLOGY_LIMITS.maxIngressPayloadBytes) {
     return {
       code: "LIMIT_EXCEEDED",
       message: `ingress payload bytes exceeded: ${bytes} > ${TOPOLOGY_LIMITS.maxIngressPayloadBytes}`,
       path: "$",
-      severity: "error" as const,
+      severity: "error",
       details: {
         limit: "maxIngressPayloadBytes",
         actual: bytes,
@@ -235,7 +260,7 @@ function validateIngress(args: unknown) {
       code: "LIMIT_EXCEEDED",
       message: `JSON depth exceeded: ${depth} > ${TOPOLOGY_LIMITS.maxJsonDepth}`,
       path: "$",
-      severity: "error" as const,
+      severity: "error",
       details: {
         limit: "maxJsonDepth",
         actual: depth,
@@ -249,29 +274,14 @@ function validateIngress(args: unknown) {
   return undefined;
 }
 
-function isFullResponseMode(args: unknown): boolean {
-  return Boolean(args && typeof args === "object" && "responseMode" in args && (args as { responseMode?: unknown }).responseMode === "full");
-}
-
-function allowsAgentFullTopology(args: unknown): boolean {
-  return Boolean(args && typeof args === "object" && "topologyFullAllowed" in args && (args as { topologyFullAllowed?: unknown }).topologyFullAllowed === true);
-}
-
-function toCallToolResult(result: unknown): CallToolResult {
+function toCallToolResult(payload: unknown): CallToolResult {
   return {
     content: [
       {
         type: "text",
-        text: JSON.stringify(result, null, 2),
+        text: JSON.stringify(payload, null, 2),
       },
     ],
-  };
-}
-
-function responseModeSchema(): z.ZodRawShape {
-  return {
-    responseMode: z.enum(["summary", "full"]).optional(),
-    topologyFullAllowed: z.boolean().optional(),
   };
 }
 
@@ -340,8 +350,32 @@ function initializeInputSchema(): z.ZodRawShape {
       }).strict(),
       dualPlaneParamsSchema,
     ]).optional(),
-    ...responseModeSchema(),
   };
+}
+
+function pickString(args: unknown, key: string): string | undefined {
+  if (args && typeof args === "object" && !Array.isArray(args)) {
+    const v = (args as Record<string, unknown>)[key];
+    return typeof v === "string" ? v : undefined;
+  }
+  return undefined;
+}
+
+function pickValue(args: unknown, key: string): unknown {
+  if (args && typeof args === "object" && !Array.isArray(args)) {
+    return (args as Record<string, unknown>)[key];
+  }
+  return undefined;
+}
+
+function pruneUndefined(body: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(body)) {
+    if (v !== undefined) {
+      out[k] = v;
+    }
+  }
+  return out;
 }
 
 export function expectedAllowedToolName(name: TopologyToolName): string {

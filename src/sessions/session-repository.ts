@@ -1,9 +1,6 @@
-import type { AgentEvent } from "../agent/fake-agent";
-import type { CanonicalTsnProjectV0 } from "../domain/canonical";
-import type { ArtifactBundle } from "../export/artifact-bundle";
+import type { AgentEvent } from "../agent/agent-types";
 import { normalizePlannerRunState, type PlannerRunState } from "../planner/planner-contract";
 import { normalizeWorkflowState, type WorkflowState } from "../project/project-state";
-import { repairSessionTopologyFromMessages } from "./session-topology-repair";
 import { invoke } from "@tauri-apps/api/core";
 
 const STORAGE_KEY = "tsn-agent.sessions.v0";
@@ -17,6 +14,11 @@ export interface ChatMessage {
   createdAt: string;
 }
 
+/**
+ * Plan v3 Phase B-β：session 不再内嵌 canonical project / artifact bundle。
+ * 拓扑权威在 SQLite P0 表（topology_nodes / topology_links），payload 只记录
+ * 最近一次 sidecar 写入的 topologyMutationId，UI 通过 `query_topology` 拉数据。
+ */
 export interface TsnSession {
   id: string;
   title: string;
@@ -27,8 +29,7 @@ export interface TsnSession {
   agentEvents: AgentEvent[];
   workflow: WorkflowState;
   plannerRun?: PlannerRunState;
-  project?: CanonicalTsnProjectV0;
-  bundle?: ArtifactBundle;
+  topologyMutationId?: number;
 }
 
 export interface SessionRepository {
@@ -56,8 +57,10 @@ interface StoredSession {
   updatedAt: string;
   messageCount: number;
   eventCount: number;
+  /** Rust sessions 表既有列；Phase B-β 后表示「已有 sidecar 拓扑写入」。 */
   hasProject: boolean;
   projectName?: string;
+  /** Rust sessions 表既有列；bundle 已删除，固定写 0。 */
   bundleFileCount: number;
   payload: string;
 }
@@ -296,12 +299,13 @@ function storedSessionToSession(session: StoredSession | undefined): TsnSession 
 }
 
 function normalizeSession(session: TsnSession): TsnSession {
-  return repairSessionTopologyFromMessages({
+  return {
     ...session,
     agentEvents: session.agentEvents ?? [],
     workflow: normalizeWorkflowState(session.workflow),
     plannerRun: normalizePlannerRunState(session.plannerRun),
-  });
+    topologyMutationId: typeof session.topologyMutationId === "number" ? session.topologyMutationId : undefined,
+  };
 }
 
 function isSession(session: TsnSession | undefined): session is TsnSession {
@@ -328,9 +332,9 @@ function sessionToStoredSession(session: TsnSession): StoredSession {
     updatedAt: session.updatedAt,
     messageCount: session.messages.length,
     eventCount: session.agentEvents.length,
-    hasProject: Boolean(session.project),
-    projectName: session.project?.name,
-    bundleFileCount: session.bundle?.artifacts.length ?? 0,
+    hasProject: typeof session.topologyMutationId === "number",
+    projectName: undefined,
+    bundleFileCount: 0,
     payload: JSON.stringify(session),
   };
 }

@@ -1,3 +1,9 @@
+/**
+ * @deprecated Phase B (plan v3 U9b 范围)：sidecar 现在 owns topology 校验
+ * （`topology_compute::validate_intermediate_topology` 1:1 镜像本算法）。
+ * 此 TS 文件保留是因为 `topology-workflow-stage-result.ts` 等还在用；
+ * 完整删除是 Phase B 后续 PR 范围。新代码用 MCP `topology.validate`。
+ */
 import { TOPOLOGY_LIMITS, measureJsonBytes, measureJsonDepth } from "./limits";
 import {
   INTERMEDIATE_TOPOLOGY_SCHEMA_VERSION,

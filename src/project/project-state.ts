@@ -1,4 +1,3 @@
-import type { CanonicalTsnProjectV0 } from "../domain/canonical";
 import {
   DEFAULT_SCENARIO_CONFIG_ID,
   WORKFLOW_STEPS,
@@ -7,13 +6,9 @@ import {
   type ScenarioConfig,
   type WorkflowStep,
 } from "../domain/scenario-config";
-import type { ArtifactBundle } from "../export/artifact-bundle";
-import type { StageSkillSummary } from "../agent/stage-skill-contract";
 import type { WorkflowStageSummary } from "../agent/workflow-stage-result";
 
 export type { WorkflowStep };
-
-export type ProjectStep = WorkflowStep;
 
 export type WorkflowStepStatus = "locked" | "current" | "waiting_confirmation" | "confirmed" | "error";
 
@@ -22,8 +17,6 @@ export interface WorkflowStageState {
   status: WorkflowStepStatus;
   summary?: string;
   stageResult?: WorkflowStageSummary;
-  /** Legacy session field; normalized into stageResult on read. */
-  skillResult?: StageSkillSummary;
   confirmedAt?: string;
   updatedAt?: string;
   error?: string;
@@ -42,48 +35,6 @@ export type WorkflowAction =
   | "request-changes"
   | "send-planning"
   | "quick-generate";
-
-export interface ProjectStepSnapshot {
-  id: string;
-  step: ProjectStep;
-  createdAt: string;
-  summary: string;
-  project: CanonicalTsnProjectV0;
-  bundle?: ArtifactBundle;
-  workflow: WorkflowState;
-}
-
-export interface ProjectState {
-  sessionId: string;
-  project: CanonicalTsnProjectV0;
-  bundle?: ArtifactBundle;
-  workflow: WorkflowState;
-  snapshots: ProjectStepSnapshot[];
-  activeSnapshotId?: string;
-}
-
-export function createProjectState(input: {
-  sessionId: string;
-  project: CanonicalTsnProjectV0;
-  bundle?: ArtifactBundle;
-  workflow?: WorkflowState;
-  scenarioConfigId?: string;
-}): ProjectState {
-  return {
-    sessionId: input.sessionId,
-    project: input.project,
-    bundle: input.bundle,
-    workflow: normalizeWorkflowState(input.workflow, input.scenarioConfigId),
-    snapshots: [],
-  };
-}
-
-export function withProjectBundle(state: ProjectState, bundle: ArtifactBundle): ProjectState {
-  return {
-    ...state,
-    bundle,
-  };
-}
 
 export function createInitialWorkflowState(scenarioConfigId: string = DEFAULT_SCENARIO_CONFIG_ID): WorkflowState {
   const configId = resolveScenarioConfig(scenarioConfigId).config.id;
@@ -119,7 +70,6 @@ export function normalizeWorkflowState(
   const stages = Object.fromEntries(
     WORKFLOW_STEPS.map((step) => {
       const existing = state.stages?.[step];
-      const stageResult = existing?.stageResult ?? existing?.skillResult;
 
       return [
         step,
@@ -127,7 +77,7 @@ export function normalizeWorkflowState(
           step,
           status: existing?.status ?? (step === currentStep ? "current" : "locked"),
           summary: existing?.summary,
-          stageResult,
+          stageResult: existing?.stageResult,
           confirmedAt: existing?.confirmedAt,
           updatedAt: existing?.updatedAt,
           error: existing?.error,
@@ -154,8 +104,6 @@ export function recordStageResult(
     step?: WorkflowStep;
     summary: string;
     stageResult?: WorkflowStageSummary;
-    /** Legacy call site compatibility; new code should pass stageResult. */
-    skillResult?: StageSkillSummary;
     waitingConfirmation?: boolean;
     createdAt?: string;
   },
@@ -175,7 +123,7 @@ export function recordStageResult(
         step,
         status,
         summary: input.summary,
-        stageResult: input.stageResult ?? input.skillResult,
+        stageResult: input.stageResult,
         updatedAt: createdAt,
         error: undefined,
       },
@@ -309,7 +257,7 @@ function updateStagesForCurrentStep(
 
 function actionsForStage(stage: Pick<WorkflowStageState, "step" | "status">): WorkflowAction[] {
   if (stage.status === "waiting_confirmation") {
-    return stage.step === "planning-export" ? ["confirm-stage", "request-changes"] : ["confirm-stage", "request-changes"];
+    return ["confirm-stage", "request-changes"];
   }
 
   if (stage.status === "current") {

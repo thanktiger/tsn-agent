@@ -12,7 +12,7 @@ description: TSN Agent 拓扑阶段指引。拓扑固定规则通过 tsn_topolog
 - 拓扑模板、初始化、校验、artifact 构建、inspect 和 P0 `apply_operations` 由 `tsn_topology` MCP 工具或项目本地 topology domain 执行。
 - 自然语言理解、模板选择、selector 消歧、用户澄清和阶段推进仍由 Agent / Project 层负责。
 - `generate_project`、time sync、flow planning、simulation、export 不属于 topology MCP。
-- MCP tool response 默认使用 summary；只有 `topology.initialize` / `topology.apply_operations` 为了让 worker 捕获 full `IntermediateTopology` 并合成 `WorkflowStageResult` 时，才允许请求 `responseMode: "full"` 且 `topologyFullAllowed: true`。
+- MCP tool 返回值已是 sidecar 结构化领域响应（不再需要 `responseMode` / `topologyFullAllowed` 字段）；`topology.initialize`（整表重建）与 `topology.apply_operations`（增量编辑）落 P0 表后响应携带 `summary.mutationId`，worker 据此合成 `WorkflowStageResult`。
 - 不要把完整 artifact、端口表、MAC 表或完整 changeSet 写进对话。
 - 最终工程状态只接受 worker/app-runtime 基于 trusted topology result 合成的结构化 `WorkflowStageResult`；不要让模型写 `stage-result.json`。
 
@@ -22,8 +22,8 @@ description: TSN Agent 拓扑阶段指引。拓扑固定规则通过 tsn_topolog
 
 1. 从用户需求和场景默认值提取结构化参数。
 2. 调用 `mcp__tsn_topology__topology_describe_templates` 获取可用模板目录。
-3. 选择明确的 `templateId` 和参数后调用 `mcp__tsn_topology__topology_initialize`；需要右侧落图时，请求 full topology 并让 worker 捕获。
-4. 必要时调用 `mcp__tsn_topology__topology_validate_intermediate` 和 `mcp__tsn_topology__topology_build_artifacts` 获取 summary。
+3. 选择明确的 `templateId` 和参数后调用 `mcp__tsn_topology__topology_initialize`；它会直接写入工程数据库并返回 `mutationId`（右侧据此落图），同时替换该会话已有拓扑。
+4. 必要时调用 `mcp__tsn_topology__topology_validate` 和 `mcp__tsn_topology__topology_build_artifacts` 获取 summary。
 5. 用中文说明当前拓扑摘要并等待用户确认；不要输出完整 topology JSON 或 stage result JSON。
 
 ## 已有拓扑编辑路径
@@ -35,7 +35,7 @@ description: TSN Agent 拓扑阶段指引。拓扑固定规则通过 tsn_topolog
 3. 调用 `mcp__tsn_topology__topology_inspect` 查询相关节点、链路和端口占用 summary。
 4. 对 P0 插入交换机场景，构造 `[link.delete, node.add, link.add, link.add]` operations。
 5. 先调用 `mcp__tsn_topology__topology_apply_operations` 做 dryRun；对话中只总结变化计数、风险和确认点。
-6. 用户确认后，由 Project 层用同一 current topology snapshot 和同一 operations 重放 apply；需要右侧落图时，让 worker 捕获 updated `IntermediateTopology` 并合成 `WorkflowStageResult`，不把 full changeSet 写进对话。
+6. 用户确认后，用同一 operations 去掉 dryRun 重放 `topology_apply_operations`；worker 从响应的 `summary.mutationId` 合成 `WorkflowStageResult`，不把 full changeSet 写进对话。
 
 P0 不支持 `node.delete`、`node.update`、`link.update`，遇到这些需求时说明需要后续完整 CRUD 能力。
 
