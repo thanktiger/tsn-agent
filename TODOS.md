@@ -2,18 +2,6 @@
 
 按组件分组；组内按优先级 P0（最高）到 P4 排序。完成项移入底部 Completed。
 
-## Phase A 收尾（用户可见缺口）
-
-### Export / Import 会话 UI 接线
-**Priority:** P1
-Rust `export_session` / `import_session` 命令已就绪并经测试，UI 无入口。
-接线前必须先修导出语义：当前导出是整库 `VACUUM INTO`（含其它会话数据，隐私泄漏，且导入端拒绝多 session DB），scrub 非事务（并发保存可能读到 `{}`，恢复失败会永久丢 payload）。需改为单会话导出 + 事务化。（adversarial：codex #1/#2，2026-06-04）
-
-### Backfill 失败恢复 UX
-**Priority:** P1
-`retry_backfill` / `list_backfill_failures` / `view_session_payload` 命令已就绪，UI 无入口；`backfill_progress` 事件未发射；失败会话在 UI 上与空会话不可区分。
-防护：`retry_backfill` 从 payload 重建会清掉 MCP 增量编辑（walker DELETE+重建），接 UI 前需加确认或合并策略。（adversarial：claude P0#3）
-
 ## Sidecar / 数据完整性
 
 ### mutationId 跨重启语义
@@ -23,10 +11,6 @@ in-memory 计数器重启归零，但 `topologyMutationId` 持久化在 session 
 ### mutation buffer 全局 eviction 跨会话误判
 **Priority:** P2
 `out_of_range` 按全局 buffer head 计算；多会话高频写入时其它会话被误触发全量 refetch 或漏报 gap。需按 session 维护保留下界。（adversarial：claude P1#5）
-
-### inspect 出向规模无上限：import 路径绕过 ≤200 论证
-**Priority:** P2
-inspect 全量 rows 的规模论证依赖「数据只能经 initialize（compute ≤200 节点）与 apply_operations（≤32/批）进入」，但 `session_import` 从外部 DB 复制任意行数/字段大小，可使 inspect 响应撑大 sidecar 内存与模型上下文（token DoS）。与 ImportRowValidator 强化合并处理：导入时校验行数/字段大小上限。（adversarial：codex #2，2026-06-05）
 
 ### apply_operations 缺 CAS 前置条件（stale batch）
 **Priority:** P3
@@ -65,6 +49,18 @@ Plan 要求复用 ops 白名单，实际实现为独立 validator + 直接 INSER
 canonicalizer 移除后缺少 Spike A 基线 fixture 的字节级对照测试，「单一事实源 byte-equal」保证未在代码中强制。（plan audit PARTIAL）
 
 ## Completed
+
+### 会话导出/导入 UI（含单会话切片导出重写）
+**Completed:** v0.4.0 (2026-06-05)
+导出重写为单会话切片（tmp+原子 rename、symlink guard、payload 置 '{}'、主库零写入，scrub/restore 竞态整体删除）；UI 接入 save/open 对话框、id 冲突自动新 id、错误文案映射、「在 Finder 中显示」；agent 运行中禁用。导出↔导入真往返被测试固化。
+
+### Backfill 失败恢复 UX
+**Completed:** v0.4.0 (2026-06-05)
+失败会话「迁移失败」badge + 错误码映射 + payload 预览（redact 后截断 64KB）+ retry 确认弹窗（固定强警告）+ 三处刷新；retry 的 walker 早期错误兜底 mark_failed(WALKER_ERROR) 防永久卡 pending。结论：`backfill_progress` 事件不做——启动 walker 在 setup 同步完成于窗口创建前，事件无有效接收窗口；mount invoke + retry resolve 回调覆盖全部刷新时机。
+
+### import 路径规模上限（关闭 inspect 出向 DoS 缺口）
+**Completed:** v0.4.0 (2026-06-05)
+行数上限复用 compute MAX_NODES/MAX_LINKS（按 session 过滤）、字段级字节上限（styles_json/sync_type ≤4KB、*_json ≤64KB、mac/ip ≤64B、title/project_name ≤256B）、styles_json 必须为 JSON object、总行数 ≤50k、payload 强制 '{}'。内容级注入面（ops 白名单收敛）仍为 P2。
 
 ### apply_operations 幂等性 + timeout-after-commit
 **Completed:** v0.3.x 数据可靠性包 (2026-06-05)
