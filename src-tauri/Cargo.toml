@@ -1,6 +1,6 @@
 [package]
 name = "tsn-agent"
-version = "0.3.2"
+version = "0.3.3"
 description = "TSN Agent desktop application"
 authors = ["TSN Agent contributors"]
 edition = "2021"

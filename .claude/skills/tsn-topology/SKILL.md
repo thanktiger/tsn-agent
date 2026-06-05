@@ -10,7 +10,7 @@ description: TSN Agent 拓扑阶段指引。拓扑固定规则通过 tsn_topolog
 ## 当前边界
 
 - 拓扑模板、初始化、校验、artifact 构建、inspect 和 P0 `apply_operations` 由 `tsn_topology` MCP 工具或项目本地 topology domain 执行。
-- 自然语言理解、模板选择、selector 消歧、用户澄清和阶段推进仍由 Agent / Project 层负责。
+- 自然语言理解、模板选择、在 inspect rows 中定位目标、用户澄清和阶段推进仍由 Agent / Project 层负责。
 - `generate_project`、time sync、flow planning、simulation、export 不属于 topology MCP。
 - MCP tool 返回值已是 sidecar 结构化领域响应（不再需要 `responseMode` / `topologyFullAllowed` 字段）；`topology.initialize`（整表重建）与 `topology.apply_operations`（增量编辑）落 P0 表后响应携带 `summary.mutationId`，worker 据此合成 `WorkflowStageResult`。
 - 不要把完整 artifact、端口表、MAC 表或完整 changeSet 写进对话。
@@ -30,14 +30,14 @@ description: TSN Agent 拓扑阶段指引。拓扑固定规则通过 tsn_topolog
 
 当当前 project 已经有拓扑，且用户要插入交换机或调整连接时：
 
-1. Project/Agent 层先把自然语言引用解析为稳定 node/link ID。
-2. 如引用不唯一，先向用户澄清；不要让 MCP 猜测。
-3. 调用 `mcp__tsn_topology__topology_inspect` 查询相关节点、链路和端口占用 summary。
-4. 对 P0 插入交换机场景，构造 `[link.delete, node.add, link.add, link.add]` operations。
-5. 先调用 `mcp__tsn_topology__topology_apply_operations` 做 dryRun；对话中只总结变化计数、风险和确认点。
-6. 用户确认后，用同一 operations 去掉 dryRun 重放 `topology_apply_operations`；worker 从响应的 `summary.mutationId` 合成 `WorkflowStageResult`，不把 full changeSet 写进对话。
+1. 调用 `mcp__tsn_topology__topology_inspect`（无参数）获取该会话全部拓扑 rows：nodes（imac/syncName/nodeType/syncType/x/y/insertOrder）+ links（linkSeq/name/srcImac/dstImac/stylesJson）。
+2. 在 rows 中按 syncName/nodeType/连接关系定位目标节点与链路，得到精确的 imac / linkSeq；如用户引用不唯一，先用中文数字编号选项向用户澄清。
+3. 构造原子 operations（如插入交换机 = `[link_delete, node_add, link_add, link_add]`）：新节点的 `syncType`/`nodeType` 复制 inspect 返回的同类节点原文，新链路的 `stylesJson` 参照既有链路；新 `imac`/`linkSeq` 必须避开 rows 中已占用的值。
+4. 调用 `mcp__tsn_topology__topology_apply_operations`；worker 从响应的 `summary.mutationId` 合成 `WorkflowStageResult`，不把 rows 或 changeSet 写进对话。
+5. 超时重试时逐字节复用上一次的同一 operations（相同 imac/linkSeq），不要重新分配 —— 重新分配 linkSeq 会产生重复的平行链路。
+6. 不要用 `topology.initialize` 重建已确认的拓扑（会整表重排节点命名）；它只用于「从 0 生成」与「换模板」。
 
-P0 不支持 `node.delete`、`node.update`、`link.update`，遇到这些需求时说明需要后续完整 CRUD 能力。
+支持的 op：`node_add` / `node_update` / `node_delete` / `link_add` / `link_delete`（字段 camelCase，详见工具 schema）。「移动节点」「改属性」用 `node_update`；`node_add` 撞已占用 imac 会报 `IMAC_TAKEN`。
 
 ## 兼容脚本
 

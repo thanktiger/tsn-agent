@@ -36,8 +36,8 @@ TSN Agent 当前使用四个稳定阶段 ID：
 
 拓扑阶段有两条路径：
 
-- 从 0 初始化：Project/Agent 层选择模板和结构化参数，`topology.initialize` 通过 sidecar 计算并返回 topology；`topology.apply_operations` 落 P0 表得到 `mutationId`。UI 通过 `session_db_changed` event + `query_topology` Tauri command hydrate。
-- 已有拓扑编辑：Project/Agent 层先做 selector 消歧，再用 `topology.inspect` 和 P0 `topology.apply_operations` 处理 `link.delete`、`node.add`、`link.add`。
+- 从 0 初始化：Project/Agent 层选择模板和结构化参数，`topology.initialize` 通过 sidecar 计算并整表重建 P0 表，返回 `summary.mutationId`（不回传 full topology；查询持久化结果用 `topology.inspect`）。UI 通过 `session_db_changed` event + `query_topology` Tauri command hydrate。
+- 已有拓扑编辑：调用 `topology.inspect`（无参数）拿到全部持久化 rows，在 rows 中按 `imac`/`linkSeq` 定位目标节点/链路，再用 `topology.apply_operations` 处理 `link_delete`、`node_add`、`link_add` 等原子操作。
 
 `tsn_topology` 不做自然语言理解、不保存 topology handle、不生成 project、不推进 workflow，也不导出 `network.ned`、`omnetpp.ini` 或 `flow_plan_1.json`。这些仍属于 Project/Export 层（Phase A 期间 flow / planning 导出被 UI 灰掉，Phase B 回归）。
 

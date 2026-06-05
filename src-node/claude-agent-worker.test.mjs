@@ -81,7 +81,8 @@ describe("claude-agent-worker", () => {
         alwaysLoad: true,
       });
       expect(input.options.mcpServers.tsn_topology.args[0]).toContain("tsn-topology-server.mjs");
-      expect(input.options.disallowedTools).toEqual([]);
+      // AskUserQuestion 双层禁用（plan 2026-06-05-001 U5）：dontAsk 下必拒，硬禁省 turn。
+      expect(input.options.disallowedTools).toEqual(["AskUserQuestion"]);
       expect(input.options.maxTurns).toBe(20);
       expect(input.options.includePartialMessages).toBe(true);
       expect(input.options.systemPrompt).toContain("工程状态只接受结构化校验结果");
@@ -621,6 +622,12 @@ describe("claude-agent-worker", () => {
     expect(prompt).toContain("trusted topology result");
     expect(prompt).not.toContain("--stage topology");
     expect(prompt).not.toContain("然后继续生成控制流模板和导出文件");
+    // 交互工学规则（plan 2026-06-05-001 U5）。
+    expect(prompt).toContain("不要调用 AskUserQuestion");
+    expect(prompt).toContain("选项编号用数字、跨轮保持指代稳定");
+    expect(prompt).toContain("不要用 initialize 重建");
+    expect(prompt).toContain("逐字节复用上一次的同一 batch");
+    expect(prompt).toContain("不要把 inspect 返回的 rows");
   });
 
   it("keeps large stage runner input out of the prompt when an input path is provided", () => {

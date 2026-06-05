@@ -26,8 +26,10 @@ vi.mock("./sidecar-client", () => ({
   readSidecarEnv: readSidecarEnvMock,
 }));
 
+import { z } from "zod";
 import {
   TOPOLOGY_MCP_ALLOWED_TOOLS,
+  applyOperationsInputSchema,
   assertTopologyToolMapping,
   createTopologyToolRegistry,
   expectedAllowedToolName,
@@ -132,23 +134,32 @@ describe("topology MCP tool registry", () => {
     });
   });
 
-  it("inspect forwards topology + selectors", async () => {
+  it("inspect forwards only the session id and surfaces full rows", async () => {
     fetchSidecarMock.mockResolvedValueOnce({
       ok: true as const,
       status: 200,
-      body: { ok: true, summary: { selectedNodeIds: ["sw1"] } },
+      body: {
+        ok: true,
+        summary: {
+          sessionId: "test-session-id",
+          nodeCount: 1,
+          linkCount: 0,
+          nodes: [{ imac: 100, syncName: "0", nodeType: "switch", syncType: "{}", x: 0, y: 0, insertOrder: 0 }],
+          links: [],
+        },
+      },
     });
 
-    const payload = await parseToolText(runTopologyTool("topology.inspect", {
-      topology: { schemaVersion: "tsn-agent.topology.intermediate.v0", nodes: [], links: [] },
-      selectors: [{ kind: "node", id: "sw1" }],
-    }));
+    const payload = await parseToolText(runTopologyTool("topology.inspect", {}));
 
     const { route, body } = lastFetchCall();
     expect(route).toBe("/db/topology/inspect");
-    expect(body).toHaveProperty("topology");
-    expect(body).toHaveProperty("selectors", [{ kind: "node", id: "sw1" }]);
-    expect(payload).toMatchObject({ ok: true, summary: { selectedNodeIds: ["sw1"] } });
+    // DB-backed 全量 rows：不再有 topology/selectors 入参（sessionId 由 fetchSidecar 注入）。
+    expect(body).toEqual({});
+    expect(payload).toMatchObject({
+      ok: true,
+      summary: { nodeCount: 1, nodes: [{ imac: 100, syncName: "0" }] },
+    });
   });
 
   it("build_artifacts forwards topology and returns artifacts summary", async () => {
@@ -386,6 +397,43 @@ describe("topology MCP tool registry", () => {
     }
   });
 
+  it("exposes an empty inspect input schema (no topology/selectors keys)", () => {
+    const registry = createTopologyToolRegistry();
+    const inspectTool = registry.find((tool) => tool.name === "topology.inspect");
+    expect(Object.keys(inspectTool?.inputSchema ?? { stub: 1 })).toEqual([]);
+  });
+
+  it("rejects invalid apply_operations args at the MCP layer without hitting the sidecar", async () => {
+    // runTopologyTool 直通 handler 绕过 zod —— SDK 校验只在 registerTool/Client
+    // 调用路径生效，这里是「格式错误不打 HTTP」机制的唯一真实覆盖路径。
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const server = createTsnTopologyMcpServer();
+    const client = new Client({ name: "topology-tools-test", version: "0.0.0" });
+
+    await Promise.all([
+      server.connect(serverTransport),
+      client.connect(clientTransport),
+    ]);
+
+    try {
+      // 轮 3 真机错误输入：模型发明的 {"kind":"insert-switch"}。
+      const result = await client.callTool({
+        name: "topology.apply_operations",
+        arguments: { operations: [{ kind: "insert-switch" }] },
+      });
+
+      expect(result.isError).toBe(true);
+      const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+      // SDK 把 zod 校验失败包成可读文本回给模型（不 throw 到协议层）。
+      expect(text).toMatch(/[Ii]nvalid/);
+      expect(text).toContain("op");
+      expect(fetchSidecarMock).not.toHaveBeenCalled();
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
   it("recognizes the CLI entrypoint when the module path contains spaces", async () => {
     const fixtureDir = join(tmpdir(), "tsn topology mcp spaced path");
     const fixturePath = join(fixtureDir, "tsn-topology-server.mjs");
@@ -398,5 +446,65 @@ describe("topology MCP tool registry", () => {
     } finally {
       await rm(fixtureDir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("applyOperationsInputSchema", () => {
+  const schema = z.object(applyOperationsInputSchema());
+
+  // 与 U6（serde 端 cargo 测试）共用同一 insert-switch batch 形态作 fixture，防两端漂移。
+  const insertSwitchBatch = {
+    operations: [
+      { op: "link_delete", linkSeq: 0 },
+      { op: "node_add", imac: 124, syncName: "24", x: 150, y: 40, syncType: '{"_classPath":"Q.Graphs.exchanger2"}', nodeType: "switch", insertOrder: 24 },
+      { op: "link_add", linkSeq: 23, srcImac: 100, dstImac: 124, stylesJson: '{"leftLabel":"P1","rightLabel":"P1","speed":1000}' },
+      { op: "link_add", linkSeq: 24, srcImac: 124, dstImac: 101, stylesJson: '{"leftLabel":"P2","rightLabel":"P1","speed":1000}' },
+    ],
+  };
+
+  it("accepts a legal insert-switch batch", () => {
+    const result = schema.safeParse(insertSwitchBatch);
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects the round-3 invented {kind: insert-switch} shape with an op hint", () => {
+    const result = schema.safeParse({ operations: [{ kind: "insert-switch" }] });
+    expect(result.success).toBe(false);
+    const issueText = JSON.stringify(result.success ? [] : result.error.issues);
+    expect(issueText).toContain("op");
+  });
+
+  it("accepts node_update with partial fields and node_delete", () => {
+    const result = schema.safeParse({
+      operations: [
+        { op: "node_update", imac: 100, x: 300, y: 50 },
+        { op: "node_delete", imac: 101 },
+      ],
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects node_add missing required fields (imac / syncType / nodeType)", () => {
+    const base = { op: "node_add", imac: 1, syncName: "0", x: 0, y: 0, syncType: "{}", nodeType: "switch", insertOrder: 0 };
+    for (const missing of ["imac", "syncType", "nodeType"]) {
+      const { [missing]: _omitted, ...incomplete } = base as Record<string, unknown>;
+      const result = schema.safeParse({ operations: [incomplete] });
+      expect(result.success, `node_add without ${missing} must be rejected`).toBe(false);
+    }
+  });
+
+  it("rejects 33 operations via max(32)", () => {
+    const operations = Array.from({ length: 33 }, (_, index) => ({
+      op: "node_delete",
+      imac: index,
+    }));
+    const result = schema.safeParse({ operations });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects an empty operations batch via min(1)", () => {
+    // 空批次在 sidecar 也会被拒（空事务会白白 mint mutationId）。
+    const result = schema.safeParse({ operations: [] });
+    expect(result.success).toBe(false);
   });
 });

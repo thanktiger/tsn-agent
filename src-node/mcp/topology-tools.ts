@@ -59,21 +59,9 @@ export function createTopologyToolRegistry(): TopologyMcpToolDefinition[] {
       name: "topology.inspect",
       allowedToolName: "mcp__tsn_topology__topology_inspect",
       title: "Inspect topology",
-      description: "Inspect nodes, links and adjacency summaries by structured selectors.",
-      inputSchema: {
-        topology: z.unknown().optional(),
-        selectors: z.unknown().optional(),
-        includeAdjacency: z.unknown().optional(),
-      },
-      handler: async (args) => callSidecarTool(
-        "/db/topology/inspect",
-        args,
-        {
-          topology: pickValue(args, "topology"),
-          selectors: pickValue(args, "selectors"),
-          includeAdjacency: pickValue(args, "includeAdjacency"),
-        },
-      ),
+      description: "Return the session's full persisted topology rows: nodes (imac/syncName/nodeType/syncType/x/y/insertOrder) and links (linkSeq/name/srcImac/dstImac/stylesJson). No parameters. Call this first to locate existing imac/linkSeq values before building apply_operations batches.",
+      inputSchema: {},
+      handler: async (args) => callSidecarTool("/db/topology/inspect", args, {}),
     },
     {
       name: "topology.describe_artifacts",
@@ -135,11 +123,8 @@ export function createTopologyToolRegistry(): TopologyMcpToolDefinition[] {
       name: "topology.apply_operations",
       allowedToolName: "mcp__tsn_topology__topology_apply_operations",
       title: "Apply topology operations",
-      description: "Apply the P0 insert-switch operation subset to topology P0 tables.",
-      inputSchema: {
-        operations: z.unknown().optional(),
-        dryRun: z.unknown().optional(),
-      },
+      description: "Apply atomic topology operations (node_add / node_update / node_delete / link_add / link_delete) to the session's persisted topology. Returns summary.mutationId on commit. Call topology.inspect first to locate existing imac/linkSeq values; retries must resend the exact same batch (same imac/linkSeq), never re-allocate keys.",
+      inputSchema: applyOperationsInputSchema(),
       handler: async (args) => callSidecarTool(
         "/db/topology/apply_operations",
         args,
@@ -282,6 +267,68 @@ function toCallToolResult(payload: unknown): CallToolResult {
         text: JSON.stringify(payload, null, 2),
       },
     ],
+  };
+}
+
+/**
+ * apply_operations 的完整 zod schema：字段 1:1 镜像 Rust `TopologyOp` 的 serde
+ * 形态（`op` 值 snake_case、字段名 camelCase）。SDK registerTool 用它生成
+ * JSON schema 给模型并在 MCP 层校验 —— 格式错误不打 HTTP 即收到字段级反馈。
+ * `.max(32)` 与 sidecar `MAX_OPERATIONS_PER_REQUEST` 对齐。
+ * `nodeType` 在 Rust 端虽是 Option，zod 层收紧为 required：inspect 返回的行
+ * 总有非 NULL nodeType 可复制，消除 absent 歧义（三态写入假阳性防护）。
+ * 导出仅供 schema 单测 safeParse（运行时校验走 registerTool/Client 路径）。
+ */
+export function applyOperationsInputSchema(): z.ZodRawShape {
+  const nodeAddSchema = z.object({
+    op: z.literal("node_add"),
+    imac: z.number().int().describe("新节点 key；必须避开已占用 imac（先 inspect）。修改已有节点属性用 node_update，node_add 仅用于新增 imac"),
+    syncName: z.string(),
+    x: z.number(),
+    y: z.number(),
+    syncType: z.string().describe("legacy JSON 串；复制 inspect 返回的同类节点 syncType 原文"),
+    nodeType: z.string().describe("复制 inspect 返回的同类节点 nodeType（如 switch / endSystem）"),
+    insertOrder: z.number().int(),
+  }).strict();
+  const nodeUpdateSchema = z.object({
+    op: z.literal("node_update"),
+    imac: z.number().int().describe("目标节点的既有 imac（先 inspect）；只更新提供的字段"),
+    syncName: z.string().optional(),
+    x: z.number().optional(),
+    y: z.number().optional(),
+    syncType: z.string().optional(),
+    nodeType: z.string().optional(),
+  }).strict();
+  const nodeDeleteSchema = z.object({
+    op: z.literal("node_delete"),
+    imac: z.number().int().describe("目标节点的既有 imac；仍被链路引用时会被拒绝（先 link_delete）"),
+  }).strict();
+  const linkAddSchema = z.object({
+    op: z.literal("link_add"),
+    linkSeq: z.number().int().describe("新链路 key；必须避开已占用 linkSeq（先 inspect）"),
+    name: z.string().optional(),
+    srcImac: z.number().int(),
+    dstImac: z.number().int(),
+    stylesJson: z.string().describe("复制 inspect 返回的既有链路 stylesJson 作为格式参照（leftLabel/rightLabel/speed）"),
+  }).strict();
+  const linkDeleteSchema = z.object({
+    op: z.literal("link_delete"),
+    linkSeq: z.number().int(),
+  }).strict();
+
+  return {
+    operations: z
+      .array(z.discriminatedUnion("op", [
+        nodeAddSchema,
+        nodeUpdateSchema,
+        nodeDeleteSchema,
+        linkAddSchema,
+        linkDeleteSchema,
+      ]))
+      .min(1)
+      .max(32)
+      .describe("原子操作 batch（1-32）。增量修改先 inspect 再构造；重试必须复用同一 batch 的 imac/linkSeq"),
+    dryRun: z.boolean().optional(),
   };
 }
 

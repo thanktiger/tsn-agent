@@ -42,7 +42,7 @@
 ### Plan v3（topology MCP single-DB）Phase A 新增代码入口
 
 - `src-tauri/src/topology_sidecar.rs` / `topology_sidecar_routes.rs`：axum 127.0.0.1 sidecar + Bearer 中间件 + 8 个 `/db/topology/*` 路由。
-- `src-tauri/src/topology_compute.rs`：sidecar 内 topology compute（templates / initialize / inspect / validate / artifacts 4 件套 + BFS）；Phase B-β2 起为唯一实现（TS 端 `src/topology/*` compute 已删除）。
+- `src-tauri/src/topology_compute.rs`：sidecar 内 topology compute（templates / initialize / validate / artifacts 4 件套 + BFS）；Phase B-β2 起为唯一实现（TS 端 `src/topology/*` compute 已删除）。inspect 已迁至 `topology_sidecar_routes.rs`（DB-backed 全量 rows，无 selector）。
 - `src-tauri/src/topology_intermediate.rs`：sidecar 内 IntermediateTopology DTO。
 - `src-tauri/src/topology_ops.rs`：apply_operations 白名单 enum + sqlx 写 P0 表。
 - `src-tauri/src/topology_mutation_buffer.rs` + `topology_mutations_command.rs`：mutationId ring buffer + `get_topology_mutations_since` Tauri command。

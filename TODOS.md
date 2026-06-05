@@ -24,6 +24,22 @@ in-memory 计数器重启归零，但 `topologyMutationId` 持久化在 session 
 **Priority:** P2
 `out_of_range` 按全局 buffer head 计算；多会话高频写入时其它会话被误触发全量 refetch 或漏报 gap。需按 session 维护保留下界。（adversarial：claude P1#5）
 
+### inspect 出向规模无上限：import 路径绕过 ≤200 论证
+**Priority:** P2
+inspect 全量 rows 的规模论证依赖「数据只能经 initialize（compute ≤200 节点）与 apply_operations（≤32/批）进入」，但 `session_import` 从外部 DB 复制任意行数/字段大小，可使 inspect 响应撑大 sidecar 内存与模型上下文（token DoS）。与 ImportRowValidator 强化合并处理：导入时校验行数/字段大小上限。（adversarial：codex #2，2026-06-05）
+
+### apply_operations 缺 CAS 前置条件（stale batch）
+**Priority:** P3
+inspect 响应不带版本、apply 不收 expectedMutationId；模型基于旧 rows 构造的 batch 会在新拓扑上执行（三态只防同 key 异值，不防 stale 逻辑写）。单用户串行交互下概率低；若引入并发编辑或多 agent，需 CAS 式 expectedMutationId。（adversarial：codex #4，2026-06-05）
+
+### link_add 允许 self-loop（src==dst）评估
+**Priority:** P3
+端点计数对 self-loop 取 expected=1，节点存在即插入；TSN 物理拓扑无设备自连用例，下游 artifact/布局行为未定义。评估是否在 ops 层拒绝（行为变更需拍板）。现状已有测试固化端点计数语义（link_add_self_loop_requires_single_endpoint）。（adversarial：codex #7，2026-06-05）
+
+### topology.validate / build_artifacts 仍收 topology JSON 入参
+**Priority:** P3
+DB 权威后模型没有 topology JSON 可传，这两个工具的入参形态与 inspect 同病（使用频率低）。评估改为 DB-backed 或下线入参。（plan 2026-06-05-001 Deferred Features）
+
 ## Agent runtime / UI
 
 ### run_claude_agent 超时不杀 MCP 子进程组

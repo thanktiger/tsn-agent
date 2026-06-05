@@ -6,6 +6,7 @@
 //! plan v3 R19）。
 
 use serde::{Deserialize, Serialize};
+use sqlx::Row;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
@@ -76,11 +77,32 @@ pub struct OpResultSummary {
     pub rows_affected: u64,
 }
 
+/// 三态写入的 JSON 字段同值判定：字符串相等最快路径；不等时退到 JSON 语义比较
+/// （LLM 重试时可能重新序列化 —— 键序/空白变化不应误报 IMAC_TAKEN/LINK_SEQ_TAKEN
+/// 阻断合法的幂等重放）。任一侧解析失败则按字符串不等处理。
+fn json_or_string_eq(stored: &str, provided: &str) -> bool {
+    if stored == provided {
+        return true;
+    }
+    match (
+        serde_json::from_str::<serde_json::Value>(stored),
+        serde_json::from_str::<serde_json::Value>(provided),
+    ) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
+}
+
 /// 执行单条 op 到 transaction；返回 summary 用于 changeSet。
 ///
-/// 幂等约定（数据可靠性包）：sidecar 响应超时后客户端会把 apply_operations
-/// 标记为 retryable，而第一次调用可能已 commit。因此写操作必须重试安全：
-///   - node.add / link.add 使用 UPSERT（重放同值无害）
+/// 幂等约定（数据可靠性包 + 三态写入碰撞防护）：sidecar 响应超时后客户端会把
+/// apply_operations 标记为 retryable，而第一次调用可能已 commit。因此写操作
+/// 必须重试安全，同时不允许静默覆盖已有行：
+///   - node.add / link.add 三态写入：目标 key 不存在 → 插入；存在且同值 →
+///     no-op（重放安全，rows_affected=0）；存在且异值 → IMAC_TAKEN /
+///     LINK_SEQ_TAKEN（防模型选错 key 时静默覆盖现有节点）。同值比较只针对
+///     请求实际提供的字段（absent 的 optional 字段不参与判定）；x/y 用 f64
+///     直比（initialize 坐标全为精确可表示值，JSON/REAL round-trip 无损）。
 ///   - node.delete / link.delete 删除不存在的目标是 no-op（rows_affected=0）
 ///   - node.update 重放安全（目标在重放场景必然存在）；更新真正不存在的
 ///     目标仍报 NOT_FOUND —— 那是逻辑错误，不是重试。
@@ -93,17 +115,13 @@ pub async fn apply_op(
 ) -> Result<OpResultSummary, OpError> {
     match op {
         TopologyOp::NodeAdd(a) => {
+            // 三态写入：写决策由数据库原子完成（DO NOTHING），冲突时读回比对，
+            // 无 SELECT-then-INSERT 的 TOCTOU 窗口。
             let res = sqlx::query(
                 r#"INSERT INTO topology_nodes
                    (session_id, imac, sync_name, x, y, sync_type, node_type, insert_order)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                   ON CONFLICT(session_id, imac) DO UPDATE SET
-                       sync_name = excluded.sync_name,
-                       x = excluded.x,
-                       y = excluded.y,
-                       sync_type = excluded.sync_type,
-                       node_type = excluded.node_type,
-                       insert_order = excluded.insert_order"#,
+                   ON CONFLICT(session_id, imac) DO NOTHING"#,
             )
             .bind(session_id)
             .bind(a.imac)
@@ -116,6 +134,33 @@ pub async fn apply_op(
             .execute(&mut *tx)
             .await
             .map_err(|e| OpError::Database(e.to_string()))?;
+            if res.rows_affected() == 0 {
+                let row = sqlx::query(
+                    r#"SELECT sync_name, x, y, sync_type, node_type, insert_order
+                       FROM topology_nodes WHERE session_id = ? AND imac = ?"#,
+                )
+                .bind(session_id)
+                .bind(a.imac)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(|e| OpError::Database(e.to_string()))?;
+                let same_provided = row.get::<String, _>("sync_name") == a.sync_name
+                    && row.get::<f64, _>("x") == a.x
+                    && row.get::<f64, _>("y") == a.y
+                    && json_or_string_eq(&row.get::<String, _>("sync_type"), &a.sync_type)
+                    && row.get::<i64, _>("insert_order") == a.insert_order
+                    // optional 字段仅在请求提供时参与判定（防重试省略时假阳性）
+                    && a.node_type.as_ref().is_none_or(|nt| {
+                        row.get::<Option<String>, _>("node_type").as_deref() == Some(nt.as_str())
+                    });
+                if !same_provided {
+                    return Err(OpError::ImacTaken(format!(
+                        "imac={} 已存在且取值不同；修改已有节点属性请用 node_update，新增节点请换未占用 imac（先 inspect）",
+                        a.imac
+                    )));
+                }
+                // 同值 → no-op（幂等重放），rows_affected=0 自述。
+            }
             Ok(OpResultSummary {
                 op_kind: "node.add",
                 rows_affected: res.rows_affected(),
@@ -197,15 +242,12 @@ pub async fn apply_op(
                     a.link_seq, a.src_imac, a.dst_imac
                 )));
             }
+            // 三态写入：同 node.add，冲突时读回只比对请求提供的字段。
             let res = sqlx::query(
                 r#"INSERT INTO topology_links
                    (session_id, link_seq, name, src_imac, dst_imac, styles_json)
                    VALUES (?, ?, ?, ?, ?, ?)
-                   ON CONFLICT(session_id, link_seq) DO UPDATE SET
-                       name = excluded.name,
-                       src_imac = excluded.src_imac,
-                       dst_imac = excluded.dst_imac,
-                       styles_json = excluded.styles_json"#,
+                   ON CONFLICT(session_id, link_seq) DO NOTHING"#,
             )
             .bind(session_id)
             .bind(a.link_seq)
@@ -216,6 +258,29 @@ pub async fn apply_op(
             .execute(&mut *tx)
             .await
             .map_err(|e| OpError::Database(e.to_string()))?;
+            if res.rows_affected() == 0 {
+                let row = sqlx::query(
+                    r#"SELECT name, src_imac, dst_imac, styles_json
+                       FROM topology_links WHERE session_id = ? AND link_seq = ?"#,
+                )
+                .bind(session_id)
+                .bind(a.link_seq)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(|e| OpError::Database(e.to_string()))?;
+                let same_provided = row.get::<i64, _>("src_imac") == a.src_imac
+                    && row.get::<i64, _>("dst_imac") == a.dst_imac
+                    && json_or_string_eq(&row.get::<String, _>("styles_json"), &a.styles_json)
+                    && a.name.as_ref().is_none_or(|n| {
+                        row.get::<Option<String>, _>("name").as_deref() == Some(n.as_str())
+                    });
+                if !same_provided {
+                    return Err(OpError::LinkSeqTaken(format!(
+                        "linkSeq={} 已存在且取值不同；新增链路请换未占用 linkSeq（先 inspect），删旧建新请用 link_delete + link_add",
+                        a.link_seq
+                    )));
+                }
+            }
             Ok(OpResultSummary {
                 op_kind: "link.add",
                 rows_affected: res.rows_affected(),
@@ -247,15 +312,25 @@ pub enum OpError {
     UnknownNode(String),
     /// node.delete 的目标仍被链路引用（先 link.delete）。
     NodeHasLinks(String),
+    /// node.add 的目标 imac 已存在且取值不同（三态写入碰撞；改属性走 node_update）。
+    ImacTaken(String),
+    /// link.add 的目标 link_seq 已存在且取值不同（三态写入碰撞）。
+    LinkSeqTaken(String),
 }
 
 impl OpError {
+    /// SQLite 层错误（BUSY/IO/锁超时）是瞬时的，可重试；业务规则错误不可重试。
+    pub fn is_retryable(&self) -> bool {
+        matches!(self, OpError::Database(_))
+    }
     pub fn http_status(&self) -> axum::http::StatusCode {
         match self {
             OpError::NotFound(_)
             | OpError::Database(_)
             | OpError::UnknownNode(_)
-            | OpError::NodeHasLinks(_) => axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+            | OpError::NodeHasLinks(_)
+            | OpError::ImacTaken(_)
+            | OpError::LinkSeqTaken(_) => axum::http::StatusCode::UNPROCESSABLE_ENTITY,
         }
     }
     pub fn code(&self) -> &'static str {
@@ -264,6 +339,8 @@ impl OpError {
             OpError::Database(_) => "DATABASE_ERROR",
             OpError::UnknownNode(_) => "UNKNOWN_NODE",
             OpError::NodeHasLinks(_) => "NODE_HAS_LINKS",
+            OpError::ImacTaken(_) => "IMAC_TAKEN",
+            OpError::LinkSeqTaken(_) => "LINK_SEQ_TAKEN",
         }
     }
     pub fn message(&self) -> String {
@@ -271,7 +348,9 @@ impl OpError {
             OpError::NotFound(m)
             | OpError::Database(m)
             | OpError::UnknownNode(m)
-            | OpError::NodeHasLinks(m) => m.clone(),
+            | OpError::NodeHasLinks(m)
+            | OpError::ImacTaken(m)
+            | OpError::LinkSeqTaken(m) => m.clone(),
         }
     }
 }
@@ -280,7 +359,6 @@ impl OpError {
 mod tests {
     use super::*;
     use sqlx::sqlite::SqlitePoolOptions;
-    use sqlx::Row;
 
     async fn fresh_pool() -> sqlx::Pool<sqlx::Sqlite> {
         let opts = sqlx::sqlite::SqliteConnectOptions::new()
@@ -399,6 +477,153 @@ mod tests {
     }
 
     #[test]
+    fn node_add_same_value_replay_is_noop_even_with_optional_fields_omitted() {
+        tauri::async_runtime::block_on(async {
+            let pool = fresh_pool().await;
+            let mut tx = pool.begin().await.unwrap();
+            apply_op(&mut *tx, "s1", &TopologyOp::NodeAdd(NodeAddArgs {
+                imac: 100, sync_name: "0".into(), x: 1.0, y: 2.0,
+                sync_type: "{}".into(), node_type: Some("switch".into()), insert_order: 0,
+            })).await.unwrap();
+            // 重放省略 optional 的 nodeType（存量行 nodeType="switch"）：
+            // absent 字段不参与异值判定 → 仍判同值 no-op（假阳性回归）。
+            let s = apply_op(&mut *tx, "s1", &TopologyOp::NodeAdd(NodeAddArgs {
+                imac: 100, sync_name: "0".into(), x: 1.0, y: 2.0,
+                sync_type: "{}".into(), node_type: None, insert_order: 0,
+            })).await.unwrap();
+            assert_eq!(s.op_kind, "node.add");
+            assert_eq!(s.rows_affected, 0);
+            tx.commit().await.unwrap();
+
+            let row = sqlx::query("SELECT node_type FROM topology_nodes WHERE session_id='s1' AND imac=100")
+                .fetch_one(&pool).await.unwrap();
+            assert_eq!(row.get::<Option<String>, _>("node_type").as_deref(), Some("switch"));
+        });
+    }
+
+    #[test]
+    fn node_add_collision_with_different_values_reports_imac_taken() {
+        tauri::async_runtime::block_on(async {
+            let pool = fresh_pool().await;
+            let mut seed = pool.begin().await.unwrap();
+            apply_op(&mut *seed, "s1", &TopologyOp::NodeAdd(NodeAddArgs {
+                imac: 100, sync_name: "0".into(), x: 1.0, y: 2.0,
+                sync_type: "{}".into(), node_type: None, insert_order: 0,
+            })).await.unwrap();
+            seed.commit().await.unwrap();
+
+            // 同 imac、不同坐标 → 碰撞报错（v0.3.2 UPSERT 会静默覆盖，三态拒绝）。
+            let mut tx = pool.begin().await.unwrap();
+            let err = apply_op(&mut *tx, "s1", &TopologyOp::NodeAdd(NodeAddArgs {
+                imac: 100, sync_name: "0".into(), x: 9.0, y: 9.0,
+                sync_type: "{}".into(), node_type: None, insert_order: 0,
+            })).await.unwrap_err();
+            assert!(matches!(err, OpError::ImacTaken(_)));
+            assert_eq!(err.code(), "IMAC_TAKEN");
+            // 错误信息给出路：改属性应走 node_update。
+            assert!(err.message().contains("node_update"), "message={}", err.message());
+            tx.rollback().await.unwrap();
+
+            // 原节点完好。
+            let row = sqlx::query("SELECT x FROM topology_nodes WHERE session_id='s1' AND imac=100")
+                .fetch_one(&pool).await.unwrap();
+            assert_eq!(row.get::<f64, _>("x"), 1.0);
+        });
+    }
+
+    #[test]
+    fn link_add_collision_with_different_values_reports_link_seq_taken() {
+        tauri::async_runtime::block_on(async {
+            let pool = fresh_pool().await;
+            let mut tx = pool.begin().await.unwrap();
+            for (imac, order) in [(1_i64, 0_i64), (2, 1), (3, 2)] {
+                apply_op(&mut *tx, "s1", &TopologyOp::NodeAdd(NodeAddArgs {
+                    imac, sync_name: imac.to_string(), x: 0.0, y: 0.0,
+                    sync_type: "{}".into(), node_type: None, insert_order: order,
+                })).await.unwrap();
+            }
+            apply_op(&mut *tx, "s1", &TopologyOp::LinkAdd(LinkAddArgs {
+                link_seq: 0, name: None, src_imac: 1, dst_imac: 2, styles_json: "{}".into(),
+            })).await.unwrap();
+
+            // 同 linkSeq、不同端点 → 碰撞报错。
+            let err = apply_op(&mut *tx, "s1", &TopologyOp::LinkAdd(LinkAddArgs {
+                link_seq: 0, name: None, src_imac: 1, dst_imac: 3, styles_json: "{}".into(),
+            })).await.unwrap_err();
+            assert!(matches!(err, OpError::LinkSeqTaken(_)));
+            assert_eq!(err.code(), "LINK_SEQ_TAKEN");
+
+            // 同值重放仍是 no-op。
+            let s = apply_op(&mut *tx, "s1", &TopologyOp::LinkAdd(LinkAddArgs {
+                link_seq: 0, name: None, src_imac: 1, dst_imac: 2, styles_json: "{}".into(),
+            })).await.unwrap();
+            assert_eq!(s.rows_affected, 0);
+        });
+    }
+
+    #[test]
+    fn replay_with_reserialized_json_fields_is_still_noop() {
+        tauri::async_runtime::block_on(async {
+            let pool = fresh_pool().await;
+            let mut tx = pool.begin().await.unwrap();
+            for (imac, order) in [(1_i64, 0_i64), (2, 1)] {
+                apply_op(&mut *tx, "s1", &TopologyOp::NodeAdd(NodeAddArgs {
+                    imac, sync_name: imac.to_string(), x: 0.0, y: 0.0,
+                    sync_type: r#"{"_classPath":"Q.Graphs.exchanger2","rev":1}"#.into(),
+                    node_type: None, insert_order: order,
+                })).await.unwrap();
+            }
+            apply_op(&mut *tx, "s1", &TopologyOp::LinkAdd(LinkAddArgs {
+                link_seq: 0, name: None, src_imac: 1, dst_imac: 2,
+                styles_json: r#"{"leftLabel":"P1","speed":1000}"#.into(),
+            })).await.unwrap();
+
+            // LLM 重试时重新序列化 JSON（键序/空白变化）：语义同值必须仍判 no-op，
+            // 不得误报 IMAC_TAKEN / LINK_SEQ_TAKEN（adversarial 发现 3 回归）。
+            let s = apply_op(&mut *tx, "s1", &TopologyOp::NodeAdd(NodeAddArgs {
+                imac: 1, sync_name: "1".into(), x: 0.0, y: 0.0,
+                sync_type: r#"{ "rev": 1, "_classPath": "Q.Graphs.exchanger2" }"#.into(),
+                node_type: None, insert_order: 0,
+            })).await.unwrap();
+            assert_eq!(s.rows_affected, 0);
+            let s = apply_op(&mut *tx, "s1", &TopologyOp::LinkAdd(LinkAddArgs {
+                link_seq: 0, name: None, src_imac: 1, dst_imac: 2,
+                styles_json: r#"{ "speed": 1000, "leftLabel": "P1" }"#.into(),
+            })).await.unwrap();
+            assert_eq!(s.rows_affected, 0);
+
+            // 语义不同的 JSON 仍是异值碰撞。
+            let err = apply_op(&mut *tx, "s1", &TopologyOp::LinkAdd(LinkAddArgs {
+                link_seq: 0, name: None, src_imac: 1, dst_imac: 2,
+                styles_json: r#"{"leftLabel":"P1","speed":100}"#.into(),
+            })).await.unwrap_err();
+            assert!(matches!(err, OpError::LinkSeqTaken(_)));
+        });
+    }
+
+    #[test]
+    fn link_add_self_loop_requires_single_endpoint() {
+        tauri::async_runtime::block_on(async {
+            let pool = fresh_pool().await;
+            let mut tx = pool.begin().await.unwrap();
+            apply_op(&mut *tx, "s1", &TopologyOp::NodeAdd(NodeAddArgs {
+                imac: 1, sync_name: "0".into(), x: 0.0, y: 0.0,
+                sync_type: "{}".into(), node_type: None, insert_order: 0,
+            })).await.unwrap();
+            // self-loop（src==dst）端点计数 expected=1：节点存在即通过悬空校验。
+            let s = apply_op(&mut *tx, "s1", &TopologyOp::LinkAdd(LinkAddArgs {
+                link_seq: 0, name: None, src_imac: 1, dst_imac: 1, styles_json: "{}".into(),
+            })).await.unwrap();
+            assert_eq!(s.rows_affected, 1);
+            // 节点不存在的 self-loop 仍被拦截。
+            let err = apply_op(&mut *tx, "s1", &TopologyOp::LinkAdd(LinkAddArgs {
+                link_seq: 1, name: None, src_imac: 9, dst_imac: 9, styles_json: "{}".into(),
+            })).await.unwrap_err();
+            assert!(matches!(err, OpError::UnknownNode(_)));
+        });
+    }
+
+    #[test]
     fn link_add_rejects_unknown_endpoints() {
         tauri::async_runtime::block_on(async {
             let pool = fresh_pool().await;
@@ -466,6 +691,34 @@ mod tests {
             assert_eq!(s.op_kind, "link.delete");
             assert_eq!(s.rows_affected, 1);
             tx.commit().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn node_update_rejects_unknown_target() {
+        tauri::async_runtime::block_on(async {
+            let pool = fresh_pool().await;
+            let mut tx = pool.begin().await.unwrap();
+            // 更新不存在的目标是逻辑错误（非重试场景），必须报 NOT_FOUND。
+            let err = apply_op(&mut *tx, "s1", &TopologyOp::NodeUpdate(NodeUpdateArgs {
+                imac: 999, sync_name: Some("ghost".into()),
+                x: None, y: None, sync_type: None, node_type: None,
+            })).await.unwrap_err();
+            assert!(matches!(err, OpError::NotFound(_)));
+            assert_eq!(err.code(), "NOT_FOUND");
+        });
+    }
+
+    #[test]
+    fn link_delete_missing_target_is_idempotent_noop() {
+        tauri::async_runtime::block_on(async {
+            let pool = fresh_pool().await;
+            let mut tx = pool.begin().await.unwrap();
+            // 幂等：删除不存在的链路 = no-op 成功（重试安全），rows_affected=0。
+            let s = apply_op(&mut *tx, "s1", &TopologyOp::LinkDelete(LinkDeleteArgs { link_seq: 999 }))
+                .await.unwrap();
+            assert_eq!(s.op_kind, "link.delete");
+            assert_eq!(s.rows_affected, 0);
         });
     }
 

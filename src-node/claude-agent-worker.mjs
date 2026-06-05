@@ -97,7 +97,9 @@ export async function runClaude(userPrompt, options = {}, queryFn = query) {
     permissionMode: "dontAsk",
     tools: { type: "preset", preset: "claude_code" },
     allowedTools: buildAllowedToolsForStage(resolvedOptions.stageRunnerInput, Boolean(topologyMcpConfig)),
-    disallowedTools: [],
+    // AskUserQuestion 在 dontAsk 模式下必然被拒（无终端 UI），硬禁省掉模型
+    // 尝试浪费的 turn；prompt 交互规则 1 告知替代路径（中文数字编号选项）。
+    disallowedTools: ["AskUserQuestion"],
     skills: ["tsn-topology", "tsn-flow-planning"],
     ...(topologyMcpConfig ? { mcpServers: topologyMcpConfig } : {}),
     env: {
@@ -344,6 +346,15 @@ export function buildPrompt(
   const executionInstructions = `执行顺序要求：
 1. 先完成 topology MCP 工具调用，确保 worker 能捕获 trusted topology result。
 2. 再生成左侧对话框要展示给用户的中文内容，不要输出 JSON。`;
+  const interactionInstructions = `交互规则：
+1. 不要调用 AskUserQuestion（运行环境无终端 UI，已禁用）；需要用户决策时在中文回复里列数字编号选项。
+2. 选项编号用数字、跨轮保持指代稳定，已采纳的编号不复用为新含义。
+3. 只提供当前工具/模板能落地的选项，不提供后端做不到的选项。
+4. 一轮聚焦一个决策点；有合理默认值时给默认并允许用户一句话确认。
+5. 用户的简短确认（如"速率够用"）不需要调用工具，直接推进。
+6. 增量修改已确认的拓扑时，先 topology.inspect 查 rows 再用 topology.apply_operations 构造原子操作；不要用 initialize 重建（会重排节点命名）。
+7. 不要把 inspect 返回的 rows / stylesJson / syncType 原文复述进中文回复。
+8. apply_operations 超时重试时必须逐字节复用上一次的同一 batch（相同 imac/linkSeq），不要重新分配 —— 重新分配 linkSeq 会产生重复的平行链路。`;
   const failureInstruction = "8. 如果当前阶段是拓扑，不能只返回文字说明；没有 trusted topology result 就不要声称阶段已生成。";
   const fileInstruction = "5. 不要修改仓库文件；不要写 TSN_AGENT_STAGE_RESULT_PATH；不要输出 Markdown 表格。";
 
@@ -357,6 +368,8 @@ ${userPrompt}
 ${structuredResultInstructions}
 
 ${executionInstructions}
+
+${interactionInstructions}
 
 回复要求：
 1. 用新手能理解的语言解释你识别到了哪些拓扑规模和默认假设。
