@@ -151,6 +151,53 @@ describe("runTsnAgent", () => {
     );
   });
 
+  it("enriches worker toolCalls into the result (U4)", async () => {
+    enableTauriRuntime();
+    mockTauriCommands({
+      claude: {
+        assistantText: "已识别拓扑需求。",
+        sessionId: "claude-session-1",
+        toolCalls: [
+          {
+            id: "toolu-1",
+            name: "mcp__tsn_topology__topology_initialize",
+            status: "success",
+            args: { template: "line" },
+            result: { ok: true, summary: { mutationId: 2 } },
+          },
+        ],
+      },
+    });
+    const { runTsnAgent } = await import("./agent-adapter");
+
+    const result = await runTsnAgent({
+      userIntent: "我需要4个交换机，每个交换机连接5个端系统",
+      session: sessionWithWorkflow(createInitialWorkflowState()),
+    });
+
+    expect(result.toolCalls).toHaveLength(1);
+    expect(result.toolCalls?.[0]).toMatchObject({
+      id: "toolu-1",
+      friendlyName: "topology.initialize",
+      status: "success",
+      args: { template: "line" },
+    });
+    expect(result.toolCalls?.[0].summary).toBeTruthy();
+  });
+
+  it("returns empty toolCalls on the local boundary path (U4)", async () => {
+    enableTauriRuntime();
+    const { runTsnAgent } = await import("./agent-adapter");
+
+    const result = await runTsnAgent({
+      userIntent: "启动仿真",
+      session: sessionWithWorkflow(createInitialWorkflowState()),
+    });
+
+    expect(result.mode).toBe("local");
+    expect(result.toolCalls ?? []).toEqual([]);
+  });
+
   it("applies a validated mutationId stage result from the worker", async () => {
     enableTauriRuntime();
     mockTauriCommands({

@@ -9,6 +9,7 @@
 import type { DiagnosticLogRepository } from "../diagnostics/diagnostic-log-repository";
 import type { TsnSession } from "../sessions/session-repository";
 import type { WorkflowState, WorkflowStep } from "../project/project-state";
+import type { ToolCallRecord } from "./tool-call-record";
 
 export type AgentEventKind =
   | "thought"
@@ -40,6 +41,8 @@ export interface TsnAgentResult {
   claudeSessionId?: string;
   /** sidecar apply_operations 写入 P0 表后的 mutationId；UI 据此感知拓扑已更新。 */
   topologyMutationId?: number;
+  /** Plan 2026-06-09-003：本轮工具调用记录，挂到 assistant 消息渲染成卡片。 */
+  toolCalls?: ToolCallRecord[];
 }
 
 export interface TsnAgentRequest {

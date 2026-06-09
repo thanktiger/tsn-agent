@@ -20,6 +20,7 @@ import {
 } from "../project/project-state";
 import { getTopologyRuntimeSummary } from "../topology/topology-service";
 import type { AgentEvent, TsnAgentRequest, TsnAgentResult } from "./agent-types";
+import { enrichToolCall, type RawToolCall } from "./tool-call-record";
 import {
   parseWorkflowStageResult,
   summarizeWorkflowStageResult,
@@ -34,6 +35,7 @@ interface ClaudeAgentResponse {
   assistantText: string;
   sessionId?: string;
   stageResults?: unknown[];
+  toolCalls?: unknown[];
   auditPath?: string;
 }
 
@@ -169,6 +171,7 @@ export async function runTsnAgent(requestOrIntent: TsnAgentRequest | string): Pr
       mode: "claude",
       claudeSessionId: claude.sessionId,
       topologyMutationId: application.topologyMutationId,
+      toolCalls: (claude.toolCalls ?? []).map((raw) => enrichToolCall(raw as RawToolCall)),
     };
   } catch (error) {
     logAgent(request.diagnostics, {
