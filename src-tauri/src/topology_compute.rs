@@ -287,7 +287,17 @@ pub fn initialize_topology(
         if !errors.is_empty() {
             return Err(errors);
         }
-        let topology = create_dual_plane_redundant_topology(&params, data_rate.unwrap_or(1000));
+        // data_rate 在上面的 guard 后必为 Some（错误已聚合返回）。
+        let topology = create_dual_plane_redundant_topology(
+            &params,
+            data_rate.expect("data_rate is Some after the error guard"),
+        );
+        // 防御兜底：sidecar initialize 路径不复验生成结果，参数校验之外的结构性
+        // 损坏（自环 / 重复 node id / 重复端口）须在落库前被结构校验拦截。
+        let report = validate_intermediate_topology(&serde_json::to_value(&topology).unwrap_or(Value::Null));
+        if !report.ok {
+            return Err(report.errors);
+        }
         let summary = InitializeSummary {
             template_id: intent.template_id.clone(),
             node_count: topology.nodes.len(),
@@ -697,7 +707,8 @@ fn validate_dual_plane_params(params: &DualPlaneParams) -> Vec<TopologyErrorOut>
                     "$.params.backbone.mode",
                 )),
             }
-            if matches!(b.within_plane, Some(false)) {
+            // 与 zod `withinPlane: z.literal(true)` 对齐：缺省或 false 都拒（不止 false）。
+            if !matches!(b.within_plane, Some(true)) {
                 errors.push(dp_err(
                     "INVALID_TEMPLATE_PARAM",
                     "$.params.backbone.withinPlane must be true.",
@@ -749,7 +760,15 @@ fn validate_dual_plane_params(params: &DualPlaneParams) -> Vec<TopologyErrorOut>
             ));
         }
         if !sw.id.is_empty() {
-            switch_plane.insert(sw.id.clone(), sw.plane.clone());
+            if switch_plane.contains_key(&sw.id) {
+                errors.push(dp_err(
+                    "INVALID_TEMPLATE_PARAM",
+                    format!("duplicate switch id {:?}.", sw.id),
+                    &format!("{}.id", path),
+                ));
+            } else {
+                switch_plane.insert(sw.id.clone(), sw.plane.clone());
+            }
         }
     }
 
@@ -761,15 +780,30 @@ fn validate_dual_plane_params(params: &DualPlaneParams) -> Vec<TopologyErrorOut>
         ));
     }
     let mut group_ids: HashSet<String> = HashSet::new();
+    let mut group_referenced_switches: HashSet<String> = HashSet::new();
     for (i, g) in params.switch_groups.iter().enumerate() {
         let path = format!("$.params.switchGroups[{}]", i);
         if g.id.is_empty() {
             errors.push(dp_err("INVALID_TEMPLATE_PARAM", "switchGroup id is required.", &format!("{}.id", path)));
-        } else {
-            group_ids.insert(g.id.clone());
+        } else if !group_ids.insert(g.id.clone()) {
+            errors.push(dp_err(
+                "INVALID_TEMPLATE_PARAM",
+                format!("duplicate switchGroup id {:?}.", g.id),
+                &format!("{}.id", path),
+            ));
         }
         validate_group_switch(&g.plane_switches.a, "A", &switch_plane, &mut errors, &format!("{}.planeSwitches.A", path));
         validate_group_switch(&g.plane_switches.b, "B", &switch_plane, &mut errors, &format!("{}.planeSwitches.B", path));
+        // 同一 switch 不得被多个 group 引用（否则平面内骨干链会出现 sw->sw 自环）。
+        for sid in [&g.plane_switches.a, &g.plane_switches.b] {
+            if !sid.is_empty() && !group_referenced_switches.insert(sid.clone()) {
+                errors.push(dp_err(
+                    "INVALID_TEMPLATE_PARAM",
+                    format!("switch {:?} is referenced by more than one switchGroup.", sid),
+                    &format!("{}.planeSwitches", path),
+                ));
+            }
+        }
     }
     for (i, sw) in params.switches.iter().enumerate() {
         if !sw.group_id.is_empty() && !group_ids.contains(&sw.group_id) {
@@ -788,10 +822,26 @@ fn validate_dual_plane_params(params: &DualPlaneParams) -> Vec<TopologyErrorOut>
             "$.params.endSystems",
         ));
     }
+    let mut es_ids: HashSet<String> = HashSet::new();
     for (i, es) in params.end_systems.iter().enumerate() {
         let path = format!("$.params.endSystems[{}]", i);
         if es.id.is_empty() {
             errors.push(dp_err("INVALID_TEMPLATE_PARAM", "endSystem id is required.", &format!("{}.id", path)));
+        } else {
+            if !es_ids.insert(es.id.clone()) {
+                errors.push(dp_err(
+                    "INVALID_TEMPLATE_PARAM",
+                    format!("duplicate endSystem id {:?}.", es.id),
+                    &format!("{}.id", path),
+                ));
+            }
+            if switch_plane.contains_key(&es.id) {
+                errors.push(dp_err(
+                    "INVALID_TEMPLATE_PARAM",
+                    format!("endSystem id {:?} collides with a switch id.", es.id),
+                    &format!("{}.id", path),
+                ));
+            }
         }
         if !es.group_id.is_empty() && !group_ids.contains(&es.group_id) {
             errors.push(dp_err(
@@ -2528,6 +2578,95 @@ mod tests {
         })
         .unwrap_err();
         assert!(err.iter().any(|e| e.path.contains("portCount")));
+    }
+
+    #[test]
+    fn dual_plane_rejects_id_collisions_and_switch_reuse() {
+        // 代码审查 P1：唯一性/复用缺口——这些输入过去能通过校验、静默生成损坏拓扑。
+        let dup_switch = {
+            let mut p = dual_plane_two_hop_params();
+            p["switches"][2]["id"] = json!("sw1"); // 与 sw1 重复
+            p
+        };
+        let dup_es = {
+            let mut p = dual_plane_single_hop_params();
+            p["endSystems"][1]["id"] = json!("es1"); // 与 es1 重复
+            p
+        };
+        let es_switch_collision = {
+            let mut p = dual_plane_single_hop_params();
+            p["endSystems"][0]["id"] = json!("sw1"); // ES id 撞 switch id
+            p
+        };
+        let dup_group = {
+            let mut p = dual_plane_two_hop_params();
+            p["switchGroups"][1]["id"] = json!("g1"); // 重复 group id
+            p
+        };
+        let switch_reuse = {
+            // 两个 group 引用同一 A 平面 switch → 过去会生成 sw1->sw1 自环 backbone。
+            let mut p = dual_plane_two_hop_params();
+            p["switchGroups"][1]["planeSwitches"]["A"] = json!("sw1");
+            p
+        };
+        for params in [dup_switch, dup_es, es_switch_collision, dup_group, switch_reuse] {
+            let result = initialize_topology(&InitializeIntent {
+                template_id: "dual-plane-redundant".into(),
+                params,
+            });
+            assert!(result.is_err(), "structurally-invalid dual-plane input must be rejected");
+        }
+    }
+
+    #[test]
+    fn dual_plane_rejects_absent_within_plane_and_unknown_mode_and_missing_data_rate() {
+        // withinPlane 缺省（对齐 zod literal(true)）。
+        let mut absent_wp = dual_plane_single_hop_params();
+        absent_wp["backbone"].as_object_mut().unwrap().remove("withinPlane");
+        let err = initialize_topology(&InitializeIntent {
+            template_id: "dual-plane-redundant".into(),
+            params: absent_wp,
+        })
+        .unwrap_err();
+        assert!(err.iter().any(|e| e.path.contains("withinPlane")));
+
+        // 未知 backbone.mode → INVALID（区别于 ring 的 UNSUPPORTED）。
+        let mut unknown_mode = dual_plane_single_hop_params();
+        unknown_mode["backbone"]["mode"] = json!("mesh");
+        let err = initialize_topology(&InitializeIntent {
+            template_id: "dual-plane-redundant".into(),
+            params: unknown_mode,
+        })
+        .unwrap_err();
+        assert!(err
+            .iter()
+            .any(|e| e.code == "INVALID_TEMPLATE_PARAM" && e.path.contains("backbone.mode")));
+
+        // dataRateMbps 缺省 → 结构化错误。
+        let mut no_rate = dual_plane_single_hop_params();
+        no_rate.as_object_mut().unwrap().remove("dataRateMbps");
+        let err = initialize_topology(&InitializeIntent {
+            template_id: "dual-plane-redundant".into(),
+            params: no_rate,
+        })
+        .unwrap_err();
+        assert!(err.iter().any(|e| e.path.contains("dataRateMbps")));
+    }
+
+    #[test]
+    fn dual_plane_descriptor_advertises_only_implemented_domain() {
+        // 代码审查（api-contract）：descriptor 与 zod/实现的合法域一致性守护。
+        let catalog = describe_templates_catalog();
+        let templates = catalog["templates"].as_array().unwrap();
+        let dp = templates
+            .iter()
+            .find(|t| t["id"] == "dual-plane-redundant")
+            .expect("dual-plane descriptor present");
+        let params = dp["params"].as_array().unwrap();
+        let backbone = params.iter().find(|p| p["name"] == "backbone").unwrap();
+        let cross = params.iter().find(|p| p["name"] == "crossPlaneLinks").unwrap();
+        assert_eq!(backbone["itemShape"]["mode"], json!("line"));
+        assert_eq!(cross["itemShape"]["mode"], json!("none"));
     }
 
     #[test]
