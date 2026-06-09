@@ -718,19 +718,18 @@ mod tests {
         assert!(tauri_config.contains("../.claude/skills/tsn-topology/SKILL.md"));
         assert!(tauri_config.contains("../.claude/skills/tsn-topology/package.json"));
         assert!(tauri_config.contains("../.claude/skills/tsn-topology/docs/rules.md"));
-        assert!(tauri_config.contains("../.claude/skills/tsn-topology/tools/topology-builder.js"));
-        assert!(tauri_config
-            .contains("../.claude/skills/tsn-topology/tools/validate-topology.js"));
-        assert!(tauri_config.contains(
-            "../.claude/skills/tsn-topology/tools/validate-mac-forwarding-table.js"
-        ));
+        assert!(tauri_config.contains("../.claude/skills/tsn-flow-planning/SKILL.md"));
+        // legacy builder 脚本闭包已下线，不应再打包（topology 参数事实源收口）。
+        assert!(!tauri_config.contains("../.claude/skills/tsn-topology/tools/topology-builder.js"));
+        assert!(
+            !tauri_config.contains("../.claude/skills/tsn-topology/tools/run-topology-skill.js")
+        );
+        assert!(!tauri_config.contains("../.claude/skills/tsn-topology/tools/validate-topology.js"));
+        assert!(!tauri_config
+            .contains("../.claude/skills/tsn-topology/tools/validate-mac-forwarding-table.js"));
         assert!(!tauri_config.contains(
             "../.claude/skills/tsn-topology/tools/render-mac-forwarding-html.js"
         ));
-        assert!(
-            tauri_config.contains("../.claude/skills/tsn-topology/tools/run-topology-skill.js")
-        );
-        assert!(tauri_config.contains("../.claude/skills/tsn-flow-planning/SKILL.md"));
         assert!(!tauri_config.contains("../src-node/dist/tsn-topology-server.mjs"));
     }
 
