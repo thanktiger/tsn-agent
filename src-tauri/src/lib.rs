@@ -96,6 +96,7 @@ pub fn run() {
             diagnostic_store::clear_session_diagnostic_logs,
             diagnostic_store::list_diagnostic_logs,
             commands::run_claude_agent,
+            commands::describe_topology_templates,
             session_export::export_session,
             session_export::reveal_in_dir,
             session_import::import_session,

@@ -27,10 +27,37 @@ export interface SkillFileContent {
   readonlyReason?: string;
 }
 
+export interface TopologyParam {
+  name: string;
+  type: string;
+  minimum?: number;
+  maximum?: number;
+  values?: number[];
+  description?: string;
+  required?: boolean;
+  [key: string]: unknown;
+}
+
+export interface TopologyTemplateDescriptor {
+  id: string;
+  name: string;
+  description?: string;
+  tags?: string[];
+  params: TopologyParam[];
+  example?: Record<string, unknown>;
+}
+
+export interface TopologyTemplateCatalog {
+  templateCount: number;
+  templateIds: string[];
+  templates: TopologyTemplateDescriptor[];
+}
+
 export interface SkillFileService {
   listFiles(skillId: StageSkillName): Promise<SkillFileListResult>;
   readFile(skillId: StageSkillName, path: string): Promise<SkillFileContent>;
   writeFile(skillId: StageSkillName, path: string, content: string): Promise<SkillFileContent>;
+  describeTopologyTemplates(): Promise<TopologyTemplateCatalog>;
 }
 
 export function createSkillFileService(): SkillFileService {
@@ -54,6 +81,9 @@ export function createSkillFileService(): SkillFileService {
         request: { skillId, path, content },
       });
     },
+    describeTopologyTemplates() {
+      return invoke<TopologyTemplateCatalog>("describe_topology_templates");
+    },
   };
 }
 
@@ -72,6 +102,9 @@ export function createBrowserSkillFileService(): SkillFileService {
     },
     async writeFile() {
       throw new Error("请在桌面应用中编辑本地 skill 文件。");
+    },
+    async describeTopologyTemplates() {
+      throw new Error("请在桌面应用中查看拓扑参数合法域。");
     },
   };
 }

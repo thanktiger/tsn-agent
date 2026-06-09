@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, expect, it, vi } from "vitest";
@@ -118,6 +118,70 @@ describe("claude-agent-worker", () => {
     expect(result.sessionId).toBe("session-1");
     expect(result.assistantText).toContain("已生成拓扑说明");
     expect(result.stageResults).toEqual([]);
+  });
+
+  it("injects the SKILL.md body into the system prompt after the guidance sentinel", async () => {
+    const projectDir = await mkdtemp(join(tmpdir(), "tsn-agent-skill-inject-"));
+    const skillDir = join(projectDir, ".claude", "skills", "tsn-topology");
+    await mkdir(skillDir, { recursive: true });
+    await writeFile(join(skillDir, "SKILL.md"), "[SKILL-PROBE-v1] 注入指引正文", "utf8");
+
+    let capturedSystemPrompt;
+    const query = async function* (input) {
+      capturedSystemPrompt = input.options.systemPrompt;
+      yield { type: "result", structured_output: { assistantText: "已注入" } };
+    };
+
+    await runClaude("我需要4个交换机", { cwd: projectDir }, query);
+
+    expect(typeof capturedSystemPrompt).toBe("string");
+    // 骨架段仍在 sentinel 之前。
+    const [skeleton, guidance] = capturedSystemPrompt.split("<<<SKILL_GUIDANCE>>>");
+    expect(skeleton).toContain("工程状态只接受结构化校验结果");
+    expect(guidance).toContain("[SKILL-PROBE-v1] 注入指引正文");
+  });
+
+  it("falls back to the skeleton system prompt when SKILL.md cannot be read", async () => {
+    let capturedSystemPrompt;
+    const query = async function* (input) {
+      capturedSystemPrompt = input.options.systemPrompt;
+      yield { type: "result", structured_output: { assistantText: "降级" } };
+    };
+
+    // cwd 下没有 .claude/skills/tsn-topology/SKILL.md → 读盘失败，不抛异常。
+    const result = await runClaude(
+      "我需要4个交换机",
+      { cwd: join(tmpdir(), "tsn-agent-no-skill-dir-does-not-exist") },
+      query,
+    );
+
+    expect(result.assistantText).toContain("降级");
+    expect(typeof capturedSystemPrompt).toBe("string");
+    expect(capturedSystemPrompt).not.toContain("<<<SKILL_GUIDANCE>>>");
+    expect(capturedSystemPrompt).toContain("工程状态只接受结构化校验结果");
+  });
+
+  it("does not synthesize a topology stage result from assistant-authored topology JSON without an MCP tool call", () => {
+    // 机制层 AE3：agent 在 assistantText 里输出整份拓扑 JSON、不调任何 MCP 工具，
+    // trusted-signal 提取器只认 MCP tool_result 的 mutationId → 返回空。
+    const topologyJson = JSON.stringify({
+      nodes: [{ imac: 1, syncName: "1", nodeType: "switch" }],
+      links: [{ linkSeq: 1, srcImac: 1, dstImac: 2 }],
+    });
+    const extracted = extractTopologyWorkflowStageResults(
+      {
+        type: "assistant",
+        message: {
+          content: [
+            { type: "text", text: `这是我手写的拓扑：${topologyJson}` },
+          ],
+        },
+      },
+      new Map(),
+      { stage: "topology" },
+    );
+
+    expect(extracted).toEqual([]);
   });
 
   it("Plan v3 Phase B-β: extracts the trusted mutation only from mutationId-shaped sidecar results", async () => {
@@ -600,7 +664,7 @@ describe("claude-agent-worker", () => {
     await expect(runClaude("需求", undefined, query)).rejects.toThrow("no assistantText");
   });
 
-  it("builds a TSN-specific prompt", () => {
+  it("builds a TSN-specific prompt with skeleton constraints but no SKILL.md-owned domain guidance", () => {
     const prompt = buildPrompt(
       "我需要4个交换机",
       "历史上下文",
@@ -625,12 +689,19 @@ describe("claude-agent-worker", () => {
     // 交互工学规则（plan 2026-06-05-001 U5）。
     expect(prompt).toContain("不要调用 AskUserQuestion");
     expect(prompt).toContain("选项编号用数字、跨轮保持指代稳定");
+    // 正确性不变式仍由 buildPrompt 骨架承载（initialize 仅用于从 0 生成/换模板）。
     expect(prompt).toContain("不要用 initialize 重建");
     expect(prompt).toContain("逐字节复用上一次的同一 batch");
     expect(prompt).toContain("不要把 inspect 返回的 rows");
-    // 显示名映射规则（v0.3.3 真机验收发现的 off-by-one：SW-1 被按序数折算成第 1 台）。
-    expect(prompt).toContain("按 syncName 精确等于");
-    expect(prompt).toContain("不要按列表顺序或第 N 台折算");
+    // U1：与 SKILL.md 重复的领域指引已移出 buildPrompt（由注入的 SKILL.md 承载）。
+    // 默认互联公式（N*M+(N-1)）。
+    expect(prompt).not.toContain("N*M");
+    expect(prompt).not.toContain("交换机线型互联链路");
+    // 显示名映射规则（SW-N/ES-N 按 syncName）。
+    expect(prompt).not.toContain("按 syncName 精确等于");
+    expect(prompt).not.toContain("不要按列表顺序或第 N 台折算");
+    // "skill 仅作 MCP 使用指引"措辞。
+    expect(prompt).not.toContain("只能作为 MCP 使用指引");
   });
 
   it("keeps large stage runner input out of the prompt when an input path is provided", () => {

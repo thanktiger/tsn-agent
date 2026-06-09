@@ -14,7 +14,6 @@ import {
 import type { DiagnosticLogRepository } from "../../../diagnostics/diagnostic-log-repository";
 import { DiagnosticsLogView } from "../../../ui/diagnostics/DiagnosticsDrawer";
 import { SkillFilePreview } from "../../../ui/skills/SkillFilePreview";
-import { redactProviderNamesForDisplay } from "../../../ui/display-redaction";
 import { resolvePlannerBaseUrl } from "../../../planner/planner-contract";
 import { appVersion, releaseNotes, type ReleaseNote } from "../../../release/release-info";
 import type { TsnSession } from "../../../sessions/session-repository";
@@ -213,7 +212,7 @@ function WorkspaceToolDrawer({
       {activePanel === "diagnostics" && (
         <DiagnosticsLogView sessionId={currentSession.id} repository={diagnosticsRepository} />
       )}
-      {activePanel === "skills" && <SkillToolPanel currentSession={currentSession} />}
+      {activePanel === "skills" && <SkillToolPanel />}
       {activePanel === "settings" && <SettingsToolPanel version={appVersion} releases={releaseNotes} />}
     </aside>
   );
@@ -410,14 +409,9 @@ function SessionToolPanel({
   );
 }
 
-function SkillToolPanel({ currentSession }: { currentSession: TsnSession }) {
+function SkillToolPanel() {
   const [selectedSkillId, setSelectedSkillId] = useState(SKILL_CATALOG[0]?.id);
   const selectedSkill = SKILL_CATALOG.find((skill) => skill.id === selectedSkillId) ?? SKILL_CATALOG[0];
-  const recentEvent = selectedSkill
-    ? [...currentSession.agentEvents]
-      .reverse()
-      .find((event) => event.skillName === selectedSkill.id || event.stage === selectedSkill.stage)
-    : undefined;
 
   return (
     <div className="workspace-tool-panel split-panel">
@@ -456,16 +450,6 @@ function SkillToolPanel({ currentSession }: { currentSession: TsnSession }) {
               <SkillFilePreview skillId={selectedSkill.id} />
               <div className="detail-grid">
                 <DetailRow label="Skill ID" value={selectedSkill.id} />
-                <DetailRow label="阶段" value={selectedSkill.stageLabel} />
-                <DetailRow label="输入" value={selectedSkill.inputSummary} />
-                <DetailRow label="输出" value={selectedSkill.outputSummary} />
-                <DetailRow
-                  label="最近运行"
-                  value={recentEvent
-                    ? `${redactProviderNamesForDisplay(recentEvent.title)} · ${formatTime(recentEvent.createdAt ?? currentSession.updatedAt)}`
-                    : "当前会话暂无记录"}
-                />
-                <DetailRow label="备注" value={selectedSkill.notes || "无"} />
               </div>
             </>
           ) : (

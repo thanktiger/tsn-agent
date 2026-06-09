@@ -83,6 +83,7 @@ export async function runClaude(userPrompt, options = {}, queryFn = query) {
       }
     : undefined;
   const stageRunnerInputPath = await writeStageRunnerInputFile(stageResultPath, resolvedOptions.stageRunnerInput);
+  const { systemPrompt, skillReadWarning } = await buildSystemPromptForStage(resolvedOptions.stageRunnerInput, cwd);
   const finalPrompt = buildPrompt(
     userPrompt,
     resolvedOptions.conversationContext,
@@ -113,8 +114,7 @@ export async function runClaude(userPrompt, options = {}, queryFn = query) {
     ...(typeof resolvedOptions.resumeSessionId === "string" && resolvedOptions.resumeSessionId.length > 0
       ? { resume: resolvedOptions.resumeSessionId }
       : {}),
-    systemPrompt:
-      buildSystemPromptForStage(resolvedOptions.stageRunnerInput),
+    systemPrompt,
   };
   const auditLog = await createAgentRunAuditLog({
     auditDir: resolvedOptions.auditDir,
@@ -130,6 +130,9 @@ export async function runClaude(userPrompt, options = {}, queryFn = query) {
     skillOutputDir,
     sdkOptions,
   });
+  if (skillReadWarning) {
+    recordAuditTimeline(auditLog, skillReadWarning);
+  }
   let currentPromptRunId = "initial";
   const handleSdkMessage = (message) => {
     if (message.type === "system" && message.session_id) {
@@ -314,8 +317,32 @@ function buildAllowedToolsForStage(_stageRunnerInput, hasTopologyMcpConfig) {
   ];
 }
 
-function buildSystemPromptForStage(_stageRunnerInput) {
-  return "你是 TSN Agent 的规划助手。你面向懂一点 TSN 但不了解具体参数的新手用户。回复必须是简体中文，保持工程化、具体、可执行。工程状态只接受结构化校验结果。拓扑初始化、校验、artifact 构建、inspect 和 apply_operations 必须通过 tsn_topology MCP 工具调用 sidecar，所有工具结果都已是结构化领域响应。artifact、端口表、MAC 表和完整 changeSet 不得再在自然语言里复述。不要写 TSN_AGENT_STAGE_RESULT_PATH，不要用自然语言重新构建拓扑。固定阶段顺序是拓扑、时间同步、流量规划、模拟仿真；拓扑确认后必须进入时间同步。当前应用没有接入 OMNeT++/远程仿真 runner，不能声称已启动仿真、SSH 执行或稍后通知结果。";
+// system prompt 骨架：仅守安全/正确性约束（必走 MCP、固定阶段顺序、不自编拓扑
+// JSON、不写 stage-result、无仿真 runner），领域指引由注入的 SKILL.md 承载。
+const SYSTEM_PROMPT_SKELETON = "你是 TSN Agent 的规划助手。你面向懂一点 TSN 但不了解具体参数的新手用户。回复必须是简体中文，保持工程化、具体、可执行。工程状态只接受结构化校验结果。拓扑初始化、校验、artifact 构建、inspect 和 apply_operations 必须通过 tsn_topology MCP 工具调用 sidecar，所有工具结果都已是结构化领域响应。artifact、端口表、MAC 表和完整 changeSet 不得再在自然语言里复述。不要写 TSN_AGENT_STAGE_RESULT_PATH，不要用自然语言重新构建拓扑。固定阶段顺序是拓扑、时间同步、流量规划、模拟仿真；拓扑确认后必须进入时间同步。当前应用没有接入 OMNeT++/远程仿真 runner，不能声称已启动仿真、SSH 执行或稍后通知结果。已有拓扑用 tsn_topology inspect + apply_operations 增量编辑，initialize 仅用于从 0 生成或换模板（误用会整表重排已确认拓扑）。";
+
+// SKILL.md 正文每次运行注入骨架之后，用固定 sentinel 分隔，便于切分骨架段与注入段。
+const SKILL_GUIDANCE_SENTINEL = "<<<SKILL_GUIDANCE>>>";
+
+async function buildSystemPromptForStage(_stageRunnerInput, cwd) {
+  const skillPath = join(cwd, ".claude", "skills", "tsn-topology", "SKILL.md");
+
+  try {
+    const guidance = await readFile(skillPath, "utf8");
+    return {
+      systemPrompt: `${SYSTEM_PROMPT_SKELETON}\n\n${SKILL_GUIDANCE_SENTINEL}\n${guidance}`,
+    };
+  } catch (error) {
+    return {
+      systemPrompt: SYSTEM_PROMPT_SKELETON,
+      skillReadWarning: {
+        type: "skill_guidance_unavailable",
+        level: "warn",
+        skillPath,
+        error: normalizeError(error),
+      },
+    };
+  }
 }
 
 export function buildPrompt(
@@ -341,8 +368,7 @@ export function buildPrompt(
 - 从 0 初始化拓扑时，先通过 topology.describe_templates 理解模板，再调用 topology.initialize（它会直接写入工程数据库并返回 mutationId）；已有拓扑编辑时，调用 topology.inspect / topology.apply_operations。
 - tsn_topology MCP 工具结果已是 sidecar 结构化领域响应；worker 会自动解析结果并合成 WorkflowStageResult。
 - 不要写 TSN_AGENT_STAGE_RESULT_PATH，不要让模型复述完整拓扑 JSON，不要从 summary 文本反解析拓扑。
-- TSN_AGENT_SKILL_OUTPUT_DIR=${skillOutputDir}
-- 调用 tsn-topology skill 时，只能作为 MCP 使用指引；不要让 skill 维护独立 builder 或写 stage-result.json。`;
+- TSN_AGENT_SKILL_OUTPUT_DIR=${skillOutputDir}`;
   const executionInstructions = `执行顺序要求：
 1. 先完成 topology MCP 工具调用，确保 worker 能捕获 trusted topology result。
 2. 再生成左侧对话框要展示给用户的中文内容，不要输出 JSON。`;
@@ -354,9 +380,8 @@ export function buildPrompt(
 5. 用户的简短确认（如"速率够用"）不需要调用工具，直接推进。
 6. 增量修改已确认的拓扑时，先 topology.inspect 查 rows 再用 topology.apply_operations 构造原子操作；不要用 initialize 重建（会重排节点命名）。
 7. 不要把 inspect 返回的 rows / stylesJson / syncType 原文复述进中文回复。
-8. apply_operations 超时重试时必须逐字节复用上一次的同一 batch（相同 imac/linkSeq），不要重新分配 —— 重新分配 linkSeq 会产生重复的平行链路。
-9. 画布节点显示名 = 类型前缀 + syncName（交换机 SW-、端系统 ES-，如 SW-1 即 syncName="1" 的那一行）；用户提到 SW-N / ES-N 时按 syncName 精确等于 "N" 在 inspect rows 中匹配，不要按列表顺序或第 N 台折算。`;
-  const failureInstruction = "8. 如果当前阶段是拓扑，不能只返回文字说明；没有 trusted topology result 就不要声称阶段已生成。";
+8. apply_operations 超时重试时必须逐字节复用上一次的同一 batch（相同 imac/linkSeq），不要重新分配 —— 重新分配 linkSeq 会产生重复的平行链路。`;
+  const failureInstruction = "7. 如果当前阶段是拓扑，不能只返回文字说明；没有 trusted topology result 就不要声称阶段已生成。";
   const fileInstruction = "5. 不要修改仓库文件；不要写 TSN_AGENT_STAGE_RESULT_PATH；不要输出 Markdown 表格。";
 
   return `用户正在通过 TSN Agent 桌面应用配置一个 TSN 网络。
@@ -379,7 +404,6 @@ ${interactionInstructions}
 4. 当前应用没有接入 OMNeT++/远程服务器仿真 runner；遇到启动仿真、SSH、devserver 或远程运行请求时，必须说明当前不会实际执行，也不会后台通知结果。
 ${fileInstruction}
 6. 如果需求缺少关键参数，请给出合理默认值并说明这些默认值后续可以调整。
-7. 通用分布式拓扑默认需要交换机互联：用户说“N 个交换机，每个交换机连接 M 个端系统/网卡/端”或“X 个端系统分配到 N 台交换机”时，除非用户明确说交换机相互独立、不互联或不连接，否则必须生成 N*M + (N-1) 条物理链路，其中 N-1 条是交换机线型互联链路。
 ${failureInstruction}`;
 }
 

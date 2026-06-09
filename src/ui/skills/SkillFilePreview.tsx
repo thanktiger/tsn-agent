@@ -7,9 +7,17 @@ import {
   type SkillFileEntry,
   type SkillFileListResult,
   type SkillFileService,
+  type TopologyParam,
+  type TopologyTemplateCatalog,
 } from "../../skills/skill-file-service";
 
 const defaultSkillFileService = createSkillFileService();
+
+type CatalogState =
+  | { kind: "idle" }
+  | { kind: "loading" }
+  | { kind: "ready"; catalog: TopologyTemplateCatalog }
+  | { kind: "unavailable"; message: string };
 
 export function SkillFilePreview({
   skillId,
@@ -26,7 +34,11 @@ export function SkillFilePreview({
   const [isLoadingList, setIsLoadingList] = useState(false);
   const [isLoadingContent, setIsLoadingContent] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  const [savedNotice, setSavedNotice] = useState(false);
   const [error, setError] = useState<string>();
+  const [catalogState, setCatalogState] = useState<CatalogState>({ kind: "idle" });
+
+  const isTopologySkill = skillId === "tsn-topology";
 
   const previewableFiles = useMemo(
     () => fileList?.files.filter((file) => file.canPreview) ?? [],
@@ -34,6 +46,12 @@ export function SkillFilePreview({
   );
   const selectedFile = fileList?.files.find((file) => file.path === selectedPath);
   const hasDraftChanges = content ? draft !== content.content : false;
+  const effectiveText = isEditing ? draft : content?.content ?? "";
+  const showEmptyGuidanceHint =
+    isTopologySkill &&
+    selectedPath === "SKILL.md" &&
+    Boolean(content?.editable) &&
+    effectiveText.trim() === "";
 
   useEffect(() => {
     let cancelled = false;
@@ -44,6 +62,7 @@ export function SkillFilePreview({
     setContent(undefined);
     setSelectedPath(undefined);
     setIsEditing(false);
+    setSavedNotice(false);
 
     service
       .listFiles(skillId)
@@ -75,6 +94,33 @@ export function SkillFilePreview({
   }, [service, skillId]);
 
   useEffect(() => {
+    if (!isTopologySkill) {
+      setCatalogState({ kind: "idle" });
+      return;
+    }
+
+    let cancelled = false;
+    setCatalogState({ kind: "loading" });
+
+    service
+      .describeTopologyTemplates()
+      .then((catalog) => {
+        if (!cancelled) {
+          setCatalogState({ kind: "ready", catalog });
+        }
+      })
+      .catch((cause) => {
+        if (!cancelled) {
+          setCatalogState({ kind: "unavailable", message: errorMessage(cause) });
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [service, skillId, isTopologySkill]);
+
+  useEffect(() => {
     if (!selectedPath) {
       setContent(undefined);
       setDraft("");
@@ -88,6 +134,7 @@ export function SkillFilePreview({
     setError(undefined);
     setContent(undefined);
     setIsEditing(false);
+    setSavedNotice(false);
 
     service
       .readFile(skillId, selectedPath)
@@ -124,6 +171,11 @@ export function SkillFilePreview({
     setSelectedPath(file.path);
   }
 
+  function startEditing() {
+    setSavedNotice(false);
+    setIsEditing(true);
+  }
+
   async function saveDraft() {
     if (!content || !hasDraftChanges || !content.editable) {
       return;
@@ -137,6 +189,7 @@ export function SkillFilePreview({
       setContent(saved);
       setDraft(saved.content);
       setIsEditing(false);
+      setSavedNotice(true);
     } catch (cause) {
       setError(errorMessage(cause));
     } finally {
@@ -150,7 +203,7 @@ export function SkillFilePreview({
         <div>
           <p className="drawer-kicker">Files</p>
           <h4>Skill 文件</h4>
-          <small>编辑会保存到当前选中的 skill 文件。</small>
+          <small>编辑会保存到当前选中的 skill 文件，下次 agent 运行生效。</small>
         </div>
         {fileList?.status && <span className={`skill-file-status ${fileList.status}`}>{rootStatusLabel(fileList.status)}</span>}
       </div>
@@ -189,43 +242,54 @@ export function SkillFilePreview({
                 <div className="skill-file-preview-header">
                   <div>
                     <span className="mono">{content.path}</span>
-                    {!content.editable && <small>{content.readonlyReason ?? "只读"}</small>}
                   </div>
                   <div className="skill-file-actions">
-                    {isEditing ? (
-                      <>
-                        <button
-                          className="btn-primary"
-                          type="button"
-                          onClick={saveDraft}
-                          disabled={!hasDraftChanges || isSaving}
-                        >
-                          {isSaving ? "保存中..." : "保存"}
+                    {content.editable ? (
+                      isEditing ? (
+                        <>
+                          <button
+                            className="btn-primary"
+                            type="button"
+                            onClick={saveDraft}
+                            disabled={!hasDraftChanges || isSaving}
+                          >
+                            {isSaving ? "保存中..." : "保存"}
+                          </button>
+                          <button
+                            className="btn"
+                            type="button"
+                            onClick={() => {
+                              setDraft(content.content);
+                              setIsEditing(false);
+                            }}
+                          >
+                            取消
+                          </button>
+                        </>
+                      ) : (
+                        <button className="btn" type="button" onClick={startEditing}>
+                          <Pencil size={14} aria-hidden="true" />
+                          编辑文件
                         </button>
-                        <button
-                          className="btn"
-                          type="button"
-                          onClick={() => {
-                            setDraft(content.content);
-                            setIsEditing(false);
-                          }}
-                        >
-                          取消
-                        </button>
-                      </>
-                    ) : (
-                      <button
-                        className="btn"
-                        type="button"
-                        onClick={() => setIsEditing(true)}
-                        disabled={!content.editable}
-                      >
-                        <Pencil size={14} aria-hidden="true" />
-                        编辑文件
-                      </button>
-                    )}
+                      )
+                    ) : null}
                   </div>
                 </div>
+                {!content.editable && (
+                  <div className="skill-file-readonly-notice" role="note">
+                    出厂只读指引（发版应用不可编辑）{content.readonlyReason ? `：${content.readonlyReason}` : ""}
+                  </div>
+                )}
+                {savedNotice && !isEditing && (
+                  <div className="skill-file-saved-notice" role="status">
+                    已保存，下次 agent 运行生效。
+                  </div>
+                )}
+                {showEmptyGuidanceHint && (
+                  <div className="skill-file-empty-hint" role="note">
+                    指引为空：清空将使 agent 失去领域指引，下次运行生效。
+                  </div>
+                )}
                 {isEditing ? (
                   <textarea
                     className="skill-file-editor mono"
@@ -247,8 +311,54 @@ export function SkillFilePreview({
           </div>
         </div>
       )}
+
+      {isTopologySkill && <TopologyLegalDomain state={catalogState} />}
     </section>
   );
+}
+
+function TopologyLegalDomain({ state }: { state: CatalogState }) {
+  return (
+    <section className="skill-legal-domain" aria-label="参数合法域">
+      <div className="skill-legal-domain-header">
+        <h5>参数合法域</h5>
+        <small>来自 MCP describe_templates，只读、不可编辑。</small>
+      </div>
+      {state.kind === "loading" && <div className="empty-panel mono">正在加载参数合法域...</div>}
+      {state.kind === "unavailable" && (
+        <div className="empty-panel mono">参数合法域当前不可用：{state.message}</div>
+      )}
+      {state.kind === "ready" && (
+        <div className="skill-legal-domain-templates">
+          {state.catalog.templates.map((template) => (
+            <div className="skill-legal-domain-template" key={template.id}>
+              <span className="mono">{template.id}</span>
+              <dl className="skill-legal-domain-params">
+                {template.params.map((param) => (
+                  <div className="skill-legal-domain-param" key={param.name}>
+                    <dt className="mono">{param.name}</dt>
+                    <dd>{paramConstraint(param)}</dd>
+                  </div>
+                ))}
+              </dl>
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function paramConstraint(param: TopologyParam): string {
+  if (typeof param.minimum === "number" && typeof param.maximum === "number") {
+    return `${param.type} ${param.minimum}–${param.maximum}`;
+  }
+
+  if (Array.isArray(param.values) && param.values.length > 0) {
+    return `枚举 ${param.values.join(" / ")}`;
+  }
+
+  return param.type;
 }
 
 function rootStatusLabel(status: SkillFileListResult["status"]): string {
