@@ -176,7 +176,11 @@ export function App() {
         updatedAt: completedAt,
         messages: baseMessages.map((message) =>
           message.id === assistantMessage.id
-            ? { ...message, content: redactProviderNamesForDisplay(result.assistantText) }
+            ? {
+                ...message,
+                content: redactProviderNamesForDisplay(result.assistantText),
+                toolCalls: result.toolCalls,
+              }
             : message,
         ),
         claudeSessionId: result.claudeSessionId ?? latestSession.claudeSessionId,

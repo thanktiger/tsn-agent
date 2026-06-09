@@ -206,6 +206,39 @@ describe("App", () => {
     expect(screen.getByRole("button", { name: "确认并继续" })).toBeEnabled();
   });
 
+  it("persists toolCalls onto the finalized assistant message (U6)", async () => {
+    const user = userEvent.setup();
+    runTsnAgentMock.mockResolvedValueOnce(
+      topologyAgentResult({
+        toolCalls: [
+          {
+            id: "toolu-1",
+            name: "Bash",
+            friendlyName: "Bash",
+            status: "success",
+            summary: "ls",
+            args: { command: "ls" },
+            result: { stdout: "ok" },
+          },
+        ],
+      }),
+    );
+    render(<App />);
+
+    await typeDefaultIntent(user);
+    await user.click(screen.getByRole("button", { name: "生成规划草案" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("已根据本轮需求生成拓扑草案。")).toBeInTheDocument();
+    });
+
+    const stored = JSON.parse(window.localStorage.getItem("tsn-agent.sessions.v0") ?? "[]");
+    const withTools = stored[0].messages.find(
+      (message: { role: string; toolCalls?: unknown[] }) => message.role === "assistant" && message.toolCalls?.length,
+    );
+    expect(withTools?.toolCalls[0]).toMatchObject({ friendlyName: "Bash", result: { stdout: "ok" } });
+  });
+
   it("renames the session after the first user message", async () => {
     const user = userEvent.setup();
     render(<App />);
