@@ -7,6 +7,7 @@ import {
   TOPOLOGY_MCP_ALLOWED_TOOLS,
   extractTopologyWorkflowStageResults,
   extractOperationTraceEvents,
+  extractToolCallEvents,
   extractStreamEventText,
   normalizeError,
   parseAssistantText,
@@ -278,9 +279,8 @@ describe("claude-agent-worker", () => {
       validation: { ok: true, errors: [] },
       payload: { kind: "topology", sessionId: "session-1", mutationId: 7 },
     });
-    expect(events.map((event) => event.text ?? "").join("")).toContain(
-      "[阶段结果] tsn_topology:topology.apply_operations 结果已返回",
-    );
+    // Plan 2026-06-09-003 KTD5：trace（含阶段结果）不再走 chunk 流。
+    expect(events.map((event) => event.text ?? "").join("")).not.toContain("[阶段结果]");
   });
 
   it("fails closed by omitting MCP server config when topology host cannot be resolved", async () => {
@@ -377,7 +377,7 @@ describe("claude-agent-worker", () => {
     expect(result.stageResults[0].status).toBe("failed");
   });
 
-  it("surfaces SDK tool use and tool result events in the final assistant text", async () => {
+  it("collects SDK tool use/result into toolCalls and keeps trace text out of chunks and assistant text", async () => {
     const events = [];
     const query = async function* () {
       yield { type: "system", session_id: "session-tool-trace" };
@@ -416,11 +416,97 @@ describe("claude-agent-worker", () => {
     const result = await runClaude("加三条视频流", { onEvent: (event) => events.push(event) }, query);
 
     const streamed = events.map((event) => event.text ?? "").join("");
-    expect(streamed).toContain("[工具] Bash: ls");
-    expect(streamed).toContain("[工具结果] Bash 已返回");
-    expect(result.assistantText).toContain("[工具] Bash: ls");
-    expect(result.assistantText).toContain("[工具结果] Bash 已返回");
+    // KTD5：trace 文本不再进 chunk 流，也不再 prepend 进 assistantText。
+    expect(streamed).not.toContain("[工具]");
+    expect(result.assistantText).not.toContain("[工具]");
     expect(result.assistantText).toContain("已更新流量规划");
+    // R3/R5：完整入参/出参收进 done.toolCalls。
+    expect(result.toolCalls).toHaveLength(1);
+    expect(result.toolCalls[0]).toMatchObject({
+      id: "toolu-1",
+      name: "Bash",
+      status: "success",
+      args: { command: expect.stringContaining("ls") },
+      result: "ok",
+    });
+  });
+
+  it("marks failed tool results as error and dedupes multi-tool calls by id (R10)", async () => {
+    const query = async function* () {
+      yield {
+        type: "assistant",
+        session_id: "session-multi-tool",
+        message: {
+          content: [
+            { type: "tool_use", id: "toolu-a", name: "Read", input: { file_path: "src/app/App.tsx" } },
+            { type: "tool_use", id: "toolu-b", name: "Bash", input: { command: "false" } },
+          ],
+        },
+      };
+      yield {
+        type: "user",
+        session_id: "session-multi-tool",
+        message: {
+          content: [
+            { type: "tool_result", tool_use_id: "toolu-a", content: "file body" },
+            {
+              type: "tool_result",
+              tool_use_id: "toolu-b",
+              content: "<tool_use_error>Exit code 1</tool_use_error>",
+            },
+          ],
+        },
+      };
+      yield { type: "result", session_id: "session-multi-tool", result: "完成" };
+    };
+
+    const result = await runClaude("做两件事", undefined, query);
+
+    expect(result.toolCalls).toHaveLength(2);
+    const byId = Object.fromEntries(result.toolCalls.map((call) => [call.id, call]));
+    expect(byId["toolu-a"]).toMatchObject({ name: "Read", status: "success", result: "file body" });
+    expect(byId["toolu-b"].status).toBe("error");
+  });
+
+  it("extractToolCallEvents pairs use+result entries with full args/result", () => {
+    const toolUseNamesById = new Map();
+    const useEntries = extractToolCallEvents(
+      {
+        type: "assistant",
+        message: {
+          content: [
+            { type: "tool_use", id: "toolu-1", name: "mcp__tsn_topology__topology_initialize", input: { template: "line" } },
+          ],
+        },
+      },
+      toolUseNamesById,
+    );
+    const resultEntries = extractToolCallEvents(
+      {
+        type: "user",
+        message: {
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "toolu-1",
+              content: [{ type: "text", text: JSON.stringify({ ok: true, summary: { mutationId: 3 } }) }],
+            },
+          ],
+        },
+      },
+      toolUseNamesById,
+    );
+
+    expect(useEntries).toEqual([
+      { phase: "use", id: "toolu-1", name: "mcp__tsn_topology__topology_initialize", args: { template: "line" } },
+    ]);
+    expect(resultEntries[0]).toMatchObject({
+      phase: "result",
+      id: "toolu-1",
+      name: "mcp__tsn_topology__topology_initialize",
+      status: "success",
+      result: { ok: true, summary: { mutationId: 3 } },
+    });
   });
 
   it("writes a per-session audit log with prompt, result, and tool traces", async () => {
@@ -643,6 +729,7 @@ describe("claude-agent-worker", () => {
       assistantText: "JSON 字符串回复",
       sessionId: "session-2",
       stageResults: [],
+      toolCalls: [],
     });
   });
 

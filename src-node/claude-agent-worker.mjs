@@ -36,9 +36,10 @@ export async function runClaude(userPrompt, options = {}, queryFn = query) {
   let sessionId;
   let emittedSessionId;
   const emittedText = [];
-  const operationTraceLines = [];
   const operationTraceKeys = new Set();
   const toolUseNamesById = new Map();
+  // Plan 2026-06-09-003：结构化工具记录按 tool_use id 累积，随 done 一次性返回。
+  const toolCallsById = new Map();
   const capturedStageResultKeys = new Set();
   const capturedStageResults = [];
   const stageResultPath = resolvedOptions.stageResultPath ?? await createStageResultPath();
@@ -150,6 +151,7 @@ export async function runClaude(userPrompt, options = {}, queryFn = query) {
       for (const trace of extractOperationTraceEvents(message, toolUseNamesById)) {
         emitOperationTrace(trace);
       }
+      collectToolCalls(message);
       captureTopologyStageResults(message);
 
       if (emittedText.length === 0) {
@@ -165,6 +167,7 @@ export async function runClaude(userPrompt, options = {}, queryFn = query) {
       for (const trace of extractOperationTraceEvents(message, toolUseNamesById)) {
         emitOperationTrace(trace);
       }
+      collectToolCalls(message);
       captureTopologyStageResults(message);
 
       for (const text of extractStreamEventText(message)) {
@@ -176,6 +179,7 @@ export async function runClaude(userPrompt, options = {}, queryFn = query) {
       for (const trace of extractOperationTraceEvents(message, toolUseNamesById)) {
         emitOperationTrace(trace);
       }
+      collectToolCalls(message);
       captureTopologyStageResults(message);
     }
 
@@ -220,15 +224,33 @@ export async function runClaude(userPrompt, options = {}, queryFn = query) {
     recordAuditTimeline(auditLog, { type: "assistant_chunk", text });
     resolvedOptions.onEvent?.({ event: "chunk", text });
   };
+  // Plan 2026-06-09-003 KTD5：trace 仅入 audit，不再发 chunk，也不再 prepend 进
+  // assistantText —— 工具调用改由结构化卡片承载。
   const emitOperationTrace = (trace) => {
     if (!trace?.text || !trace.key || operationTraceKeys.has(trace.key)) {
       return;
     }
 
     operationTraceKeys.add(trace.key);
-    operationTraceLines.push(trace.text);
     recordAuditToolTrace(auditLog, trace);
-    resolvedOptions.onEvent?.({ event: "chunk", text: `${trace.text}\n` });
+  };
+  const collectToolCalls = (message) => {
+    for (const entry of extractToolCallEvents(message, toolUseNamesById)) {
+      const existing = toolCallsById.get(entry.id) ?? { id: entry.id, name: entry.name, status: "success" };
+
+      if (entry.phase === "use") {
+        existing.name = entry.name ?? existing.name;
+        if (isNonEmptyToolInput(entry.args) || existing.args === undefined) {
+          existing.args = entry.args;
+        }
+      } else {
+        existing.name = existing.name ?? entry.name;
+        existing.status = entry.status;
+        existing.result = entry.result;
+      }
+
+      toolCallsById.set(entry.id, existing);
+    }
   };
 
   try {
@@ -242,10 +264,7 @@ export async function runClaude(userPrompt, options = {}, queryFn = query) {
     const stageResults = mergeStageResults(capturedStageResults, await readStageResults(stageResultPath, emitOperationTrace));
 
     if (hasRecoverableStageResult(stageResults)) {
-      const recoveredText = prependOperationTrace(
-        buildRecoveredStageResultAssistantText(stageResults),
-        operationTraceLines,
-      );
+      const recoveredText = buildRecoveredStageResultAssistantText(stageResults);
       const auditPath = await finalizeAgentRunAudit(auditLog, {
         assistantText: recoveredText,
         sessionId,
@@ -258,6 +277,7 @@ export async function runClaude(userPrompt, options = {}, queryFn = query) {
         assistantText: recoveredText,
         sessionId,
         stageResults,
+        toolCalls: [...toolCallsById.values()],
         ...(auditPath ? { auditPath } : {}),
       };
     }
@@ -292,7 +312,7 @@ export async function runClaude(userPrompt, options = {}, queryFn = query) {
     throw error;
   }
 
-  const finalAssistantText = prependOperationTrace(assistantText, operationTraceLines);
+  const finalAssistantText = assistantText.trim();
   const auditPath = await finalizeAgentRunAudit(auditLog, {
     assistantText: finalAssistantText,
     sessionId,
@@ -303,6 +323,7 @@ export async function runClaude(userPrompt, options = {}, queryFn = query) {
     assistantText: finalAssistantText,
     sessionId,
     stageResults: finalStageResults,
+    toolCalls: [...toolCallsById.values()],
     ...(auditPath ? { auditPath } : {}),
   };
 }
@@ -936,6 +957,72 @@ export function extractOperationTraceEvents(message, toolUseNamesById = new Map(
   return traces.filter((trace) => trace.text);
 }
 
+// Plan 2026-06-09-003：从 SDK 消息抽出结构化工具调用条目（use / result 两相）。
+// worker 只透传原始 name + 完整 args/result，前端富化成卡片。
+export function extractToolCallEvents(message, toolUseNamesById = new Map()) {
+  const entries = [];
+  const contentBlocks = collectContentBlocks(message);
+
+  for (const block of contentBlocks) {
+    if (block?.type === "tool_use") {
+      const name = typeof block.name === "string" ? block.name : "工具";
+      if (typeof block.id === "string") {
+        toolUseNamesById.set(block.id, name);
+      }
+      entries.push({
+        phase: "use",
+        id: typeof block.id === "string" ? block.id : undefined,
+        name,
+        args: block.input,
+      });
+    }
+
+    if (block?.type === "tool_result") {
+      const toolUseId = typeof block.tool_use_id === "string" ? block.tool_use_id : undefined;
+      const name = toolUseId ? toolUseNamesById.get(toolUseId) : undefined;
+      entries.push({
+        phase: "result",
+        id: toolUseId,
+        name,
+        status: isFailedToolResult(block) ? "error" : "success",
+        result: extractJsonFromToolResultBlock(block) ?? toolResultRawContent(block),
+      });
+    }
+  }
+
+  return entries.filter((entry) => entry.id);
+}
+
+function toolResultRawContent(block) {
+  const content = block.content ?? block.toolUseResult;
+
+  if (typeof content === "string") {
+    return content;
+  }
+
+  if (Array.isArray(content)) {
+    const text = content
+      .map((item) => (typeof item === "string" ? item : isRecord(item) && typeof item.text === "string" ? item.text : ""))
+      .filter(Boolean)
+      .join("\n");
+    return text || content;
+  }
+
+  return content;
+}
+
+function isNonEmptyToolInput(input) {
+  if (input === undefined || input === null) {
+    return false;
+  }
+
+  if (isRecord(input)) {
+    return Object.keys(input).length > 0;
+  }
+
+  return true;
+}
+
 export function extractTopologyWorkflowStageResults(message, toolUseNamesById = new Map(), stageRunnerInput) {
   if (!isRecord(stageRunnerInput) || stageRunnerInput.stage !== "topology") {
     return [];
@@ -1313,13 +1400,6 @@ function skillNameForStage(stage) {
   }
 
   return undefined;
-}
-
-function prependOperationTrace(assistantText, operationTraceLines) {
-  const body = assistantText.trim();
-  const trace = operationTraceLines.join("\n").trim();
-
-  return trace ? `${trace}\n\n${body}` : body;
 }
 
 export function parseAssistantText(value) {
