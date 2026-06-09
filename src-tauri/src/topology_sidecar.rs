@@ -366,7 +366,7 @@ mod tests {
             let body = serde_json::json!({
                 "sessionId": "s1",
                 "templateId": "generic-line",
-                "params": { "switchCount": 2, "endSystemsPerSwitch": 2 }
+                "params": { "switchCount": 2, "endSystemsPerSwitch": 2, "dataRateMbps": 1000 }
             }).to_string();
             let resp = router
                 .oneshot(Request::builder().method("POST").uri("/db/topology/initialize")
@@ -407,8 +407,8 @@ mod tests {
             let (router, token) = build_test_router_with_pool(pool.clone(), buf.clone()).await;
 
             for params in [
-                serde_json::json!({ "switchCount": 4, "endSystemsPerSwitch": 5 }),
-                serde_json::json!({ "switchCount": 2, "endSystemsPerSwitch": 2 }),
+                serde_json::json!({ "switchCount": 4, "endSystemsPerSwitch": 5, "dataRateMbps": 1000 }),
+                serde_json::json!({ "switchCount": 2, "endSystemsPerSwitch": 2, "dataRateMbps": 1000 }),
             ] {
                 let body = serde_json::json!({
                     "sessionId": "s1",
@@ -756,7 +756,7 @@ mod tests {
         let body = serde_json::json!({
             "sessionId": session_id,
             "templateId": "generic-line",
-            "params": { "switchCount": switch_count, "endSystemsPerSwitch": end_systems_per_switch }
+            "params": { "switchCount": switch_count, "endSystemsPerSwitch": end_systems_per_switch, "dataRateMbps": 1000 }
         }).to_string();
         let resp = router
             .oneshot(Request::builder().method("POST").uri("/db/topology/initialize")

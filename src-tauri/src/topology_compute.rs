@@ -197,9 +197,11 @@ fn dual_plane_descriptor() -> Value {
 
 fn generic_distributed_params() -> Value {
     json!([
-        { "name": "switchCount", "type": "integer", "default": 4, "minimum": 1, "maximum": 12,
+        { "name": "switchCount", "type": "integer",
+          "minimum": SWITCH_COUNT_MIN, "maximum": SWITCH_COUNT_MAX,
           "description": "交换机数量。" },
-        { "name": "endSystemsPerSwitch", "type": "integer", "default": 2, "minimum": 1, "maximum": 24,
+        { "name": "endSystemsPerSwitch", "type": "integer",
+          "minimum": END_SYSTEMS_PER_SWITCH_MIN, "maximum": END_SYSTEMS_PER_SWITCH_MAX,
           "description": "每台交换机接入的端系统数量。" },
         data_rate_param()
     ])
@@ -207,12 +209,22 @@ fn generic_distributed_params() -> Value {
 
 fn data_rate_param() -> Value {
     json!({
-        "name": "dataRateMbps", "type": "enum", "default": 1000,
-        "values": [10, 100, 1000, 10000],
+        "name": "dataRateMbps", "type": "enum",
+        "values": SUPPORTED_DATA_RATES,
         "description": "链路速率，单位 Mbps。",
     })
 }
 
+// ============================================================================
+// 参数合法域单一常量源（catalog 与 initialize 校验共用，禁止双硬编码）
+// MCP 层 zod（src-node/mcp/topology-tools.ts）有意双写 SWITCH_COUNT_*/END_SYSTEMS_*
+// 上下限以提供早失败；drift 由测试守一致，改这里须同步 zod。
+// ============================================================================
+
+pub const SWITCH_COUNT_MIN: i64 = 1;
+pub const SWITCH_COUNT_MAX: i64 = 12;
+pub const END_SYSTEMS_PER_SWITCH_MIN: i64 = 1;
+pub const END_SYSTEMS_PER_SWITCH_MAX: i64 = 24;
 const SUPPORTED_DATA_RATES: [i64; 4] = [10, 100, 1000, 10000];
 
 // ============================================================================
@@ -259,8 +271,6 @@ pub fn initialize_topology(
         Value::Object(serde_json::Map::new())
     };
 
-    let data_rate = normalize_data_rate(params_obj.get("dataRateMbps"))?;
-
     if intent.template_id == "dual-plane-redundant" {
         // Phase A 边界：dual-plane 路径较复杂（~600 LOC port），Phase A 不阻塞，
         // Phase B 或后续 polish PR 接入。当前明确告知用户使用 generic-line / generic-ring。
@@ -277,18 +287,18 @@ pub fn initialize_topology(
         .requires_clarification()]);
     }
 
+    let data_rate = normalize_data_rate(params_obj.get("dataRateMbps"))?;
+
     let switch_count = normalize_integer_param(
         params_obj.get("switchCount"),
-        4,
-        1,
-        12,
+        SWITCH_COUNT_MIN,
+        SWITCH_COUNT_MAX,
         "$.params.switchCount",
     )?;
     let end_systems_per_switch = normalize_integer_param(
         params_obj.get("endSystemsPerSwitch"),
-        2,
-        1,
-        24,
+        END_SYSTEMS_PER_SWITCH_MIN,
+        END_SYSTEMS_PER_SWITCH_MAX,
         "$.params.endSystemsPerSwitch",
     )?;
     let topology = create_generic_distributed_topology(
@@ -312,13 +322,20 @@ pub fn initialize_topology(
 
 fn normalize_integer_param(
     value: Option<&Value>,
-    default: i64,
     min: i64,
     max: i64,
     path: &str,
 ) -> Result<i64, Vec<TopologyErrorOut>> {
     let n = match value {
-        None | Some(Value::Null) => default,
+        None | Some(Value::Null) => {
+            return Err(vec![TopologyErrorOut::new(
+                "INVALID_TEMPLATE_PARAM",
+                format!("{} is required and must be an integer in [{}, {}].", path, min, max),
+                path,
+            )
+            .with_details(json!({"minimum": min, "maximum": max, "actual": Value::Null}))
+            .requires_clarification()]);
+        }
         Some(v) => v.as_i64().or_else(|| v.as_f64().and_then(|f| {
             if f.fract() == 0.0 { Some(f as i64) } else { None }
         })).ok_or_else(|| {
@@ -345,7 +362,21 @@ fn normalize_integer_param(
 
 fn normalize_data_rate(value: Option<&Value>) -> Result<i64, Vec<TopologyErrorOut>> {
     let n = match value {
-        None | Some(Value::Null) => 1000,
+        None | Some(Value::Null) => {
+            return Err(vec![TopologyErrorOut::new(
+                "INVALID_TEMPLATE_PARAM",
+                format!(
+                    "$.params.dataRateMbps is required and must be one of {:?}.",
+                    SUPPORTED_DATA_RATES
+                ),
+                "$.params.dataRateMbps",
+            )
+            .with_details(json!({
+                "allowed": SUPPORTED_DATA_RATES,
+                "actual": Value::Null
+            }))
+            .requires_clarification()]);
+        }
         Some(v) => v.as_i64().or_else(|| v.as_f64().and_then(|f| {
             if f.fract() == 0.0 { Some(f as i64) } else { None }
         })).ok_or_else(|| {
@@ -1768,7 +1799,7 @@ mod tests {
     fn build_minimal_generic_line() -> IntermediateTopology {
         initialize_topology(&InitializeIntent {
             template_id: "generic-line".into(),
-            params: json!({ "switchCount": 2, "endSystemsPerSwitch": 1 }),
+            params: json!({ "switchCount": 2, "endSystemsPerSwitch": 1, "dataRateMbps": 1000 }),
         })
         .map(|(t, _)| t)
         .expect("generic-line topology should be valid")
@@ -1799,7 +1830,7 @@ mod tests {
     fn initialize_generic_ring_closes_loop_with_enough_switches() {
         let (topology, _) = initialize_topology(&InitializeIntent {
             template_id: "generic-ring".into(),
-            params: json!({ "switchCount": 4, "endSystemsPerSwitch": 1 }),
+            params: json!({ "switchCount": 4, "endSystemsPerSwitch": 1, "dataRateMbps": 1000 }),
         })
         .unwrap();
         // 4 host-switch + 3 interconnect (line) + 1 closing = 8
@@ -1829,13 +1860,119 @@ mod tests {
 
     #[test]
     fn initialize_rejects_switch_count_out_of_range() {
+        let over_max = SWITCH_COUNT_MAX + 188;
         let err = initialize_topology(&InitializeIntent {
             template_id: "generic-line".into(),
-            params: json!({ "switchCount": 200 }),
+            params: json!({
+                "switchCount": over_max,
+                "endSystemsPerSwitch": 1,
+                "dataRateMbps": 1000
+            }),
         })
         .unwrap_err();
         assert_eq!(err[0].code, "INVALID_TEMPLATE_PARAM");
         assert_eq!(err[0].path, "$.params.switchCount");
+        assert_eq!(err[0].details["maximum"], json!(SWITCH_COUNT_MAX));
+        assert_eq!(err[0].details["minimum"], json!(SWITCH_COUNT_MIN));
+        assert!(err[0].requires_user_clarification);
+    }
+
+    #[test]
+    fn initialize_requires_explicit_switch_count() {
+        // 缺 switchCount → requires_clarification，不再静默用 4
+        let err = initialize_topology(&InitializeIntent {
+            template_id: "generic-line".into(),
+            params: json!({ "endSystemsPerSwitch": 2, "dataRateMbps": 1000 }),
+        })
+        .unwrap_err();
+        assert_eq!(err[0].code, "INVALID_TEMPLATE_PARAM");
+        assert_eq!(err[0].path, "$.params.switchCount");
+        assert!(err[0].requires_user_clarification);
+    }
+
+    #[test]
+    fn initialize_requires_explicit_end_systems_per_switch() {
+        let err = initialize_topology(&InitializeIntent {
+            template_id: "generic-line".into(),
+            params: json!({ "switchCount": 4, "dataRateMbps": 1000 }),
+        })
+        .unwrap_err();
+        assert_eq!(err[0].code, "INVALID_TEMPLATE_PARAM");
+        assert_eq!(err[0].path, "$.params.endSystemsPerSwitch");
+        assert!(err[0].requires_user_clarification);
+    }
+
+    #[test]
+    fn initialize_requires_explicit_data_rate() {
+        let err = initialize_topology(&InitializeIntent {
+            template_id: "generic-line".into(),
+            params: json!({ "switchCount": 4, "endSystemsPerSwitch": 2 }),
+        })
+        .unwrap_err();
+        assert_eq!(err[0].code, "INVALID_TEMPLATE_PARAM");
+        assert_eq!(err[0].path, "$.params.dataRateMbps");
+        assert!(err[0].requires_user_clarification);
+    }
+
+    #[test]
+    fn describe_templates_generic_params_omit_default_and_carry_legal_domain() {
+        let catalog = describe_templates_catalog();
+        for template_id in ["generic-line", "generic-ring"] {
+            let template = catalog["templates"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|t| t["id"] == template_id)
+                .unwrap_or_else(|| panic!("template {} should exist", template_id));
+            let params = template["params"].as_array().unwrap();
+
+            let switch_count = params
+                .iter()
+                .find(|p| p["name"] == "switchCount")
+                .expect("switchCount param");
+            assert!(switch_count.get("default").is_none(), "switchCount must not carry default");
+            assert_eq!(switch_count["type"], "integer");
+            assert_eq!(switch_count["minimum"], json!(SWITCH_COUNT_MIN));
+            assert_eq!(switch_count["maximum"], json!(SWITCH_COUNT_MAX));
+
+            let end_systems = params
+                .iter()
+                .find(|p| p["name"] == "endSystemsPerSwitch")
+                .expect("endSystemsPerSwitch param");
+            assert!(end_systems.get("default").is_none(), "endSystemsPerSwitch must not carry default");
+            assert_eq!(end_systems["type"], "integer");
+            assert_eq!(end_systems["minimum"], json!(END_SYSTEMS_PER_SWITCH_MIN));
+            assert_eq!(end_systems["maximum"], json!(END_SYSTEMS_PER_SWITCH_MAX));
+
+            let data_rate = params
+                .iter()
+                .find(|p| p["name"] == "dataRateMbps")
+                .expect("dataRateMbps param");
+            assert!(data_rate.get("default").is_none(), "dataRateMbps must not carry default");
+            assert_eq!(data_rate["type"], "enum");
+            assert_eq!(data_rate["values"], json!(SUPPORTED_DATA_RATES));
+        }
+    }
+
+    #[test]
+    fn mcp_zod_legal_domain_matches_rust_constants() {
+        // MCP 层 zod（topology-tools.ts）有意双写上下限以早失败；这里守 drift：
+        // 改 Rust 常量却忘改 zod（或反之）会 red。
+        let zod_src = include_str!("../../src-node/mcp/topology-tools.ts");
+        let switch_clause = format!(".min({}).max({})", SWITCH_COUNT_MIN, SWITCH_COUNT_MAX);
+        let end_systems_clause =
+            format!(".min({}).max({})", END_SYSTEMS_PER_SWITCH_MIN, END_SYSTEMS_PER_SWITCH_MAX);
+        assert!(
+            zod_src.contains(&format!("switchCount: z.number().int(){}", switch_clause)),
+            "zod switchCount bounds drifted from Rust SWITCH_COUNT_MIN/MAX ({switch_clause})"
+        );
+        assert!(
+            zod_src.contains(&format!(
+                "endSystemsPerSwitch: z.number().int(){}",
+                end_systems_clause
+            )),
+            "zod endSystemsPerSwitch bounds drifted from Rust END_SYSTEMS_PER_SWITCH_MIN/MAX ({end_systems_clause})"
+        );
     }
 
     #[test]
