@@ -237,6 +237,10 @@ describe("App", () => {
       (message: { role: string; toolCalls?: unknown[] }) => message.role === "assistant" && message.toolCalls?.length,
     );
     expect(withTools?.toolCalls[0]).toMatchObject({ friendlyName: "Bash", result: { stdout: "ok" } });
+
+    // U7：卡片在对话流内联渲染。
+    expect(screen.getByText("Bash")).toBeInTheDocument();
+    expect(screen.getByText("ls")).toBeInTheDocument();
   });
 
   it("renames the session after the first user message", async () => {

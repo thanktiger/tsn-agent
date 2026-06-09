@@ -4,6 +4,7 @@ import type { ScenarioConfig } from "../../../domain/scenario-config";
 import type { WorkflowState, WorkflowStageState, WorkflowStepStatus } from "../../../project/project-state";
 import { redactProviderNamesForDisplay } from "../../../ui/display-redaction";
 import type { AgentRunPhase } from "../../hooks/use-agent-run-controller";
+import { ToolCallCard } from "./tool-call-card";
 
 const INTENT_PLACEHOLDER = "例如：我需要 4 个交换机，每个交换机连接 5 个端系统";
 const STEPPER_STEPS = ["topology", "time-sync", "flow-template", "planning-export"] as const;
@@ -81,7 +82,16 @@ export function ChatPane({
             {message.id === pendingAssistantMessageId ? (
               <AgentWaitingIndicator />
             ) : (
-              <p>{message.role === "assistant" ? redactProviderNamesForDisplay(message.content) : message.content}</p>
+              <>
+                {message.role === "assistant" && message.toolCalls && message.toolCalls.length > 0 && (
+                  <div className="tool-call-list">
+                    {message.toolCalls.map((record) => (
+                      <ToolCallCard key={record.id} record={record} />
+                    ))}
+                  </div>
+                )}
+                <p>{message.role === "assistant" ? redactProviderNamesForDisplay(message.content) : message.content}</p>
+              </>
             )}
           </article>
         ))}
