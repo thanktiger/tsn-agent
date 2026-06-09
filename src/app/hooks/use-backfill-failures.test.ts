@@ -60,10 +60,7 @@ describe("useBackfillFailures", () => {
 describe("describeBackfillError", () => {
   it("maps known codes to readable text and passes unknown codes through", () => {
     expect(describeBackfillError("PAYLOAD_NOT_JSON")).toBe("原始数据不是合法 JSON");
-    expect(describeBackfillError("CANONICAL_SCHEMA_INVALID:node_missing_numeric_id")).toBe(
-      "原始数据缺少必需字段",
-    );
-    expect(describeBackfillError("CONSTRAINT_VIOLATION:topology_nodes_insert")).toBe("数据写入冲突");
+    // canonical 迁移下线后 walker 只产生 PAYLOAD_NOT_JSON；其余码（含 WALKER_ERROR）走兜底透传。
     expect(describeBackfillError("SOMETHING_NEW")).toBe("SOMETHING_NEW");
     expect(describeBackfillError(null)).toBe("原因未知");
   });

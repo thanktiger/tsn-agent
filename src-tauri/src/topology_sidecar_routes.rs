@@ -231,8 +231,8 @@ pub async fn initialize(
 }
 
 /// 把 initialize 计算出的 IntermediateTopology 重建到该 session 的 P0 表。
-/// 映射规则与 backfill walker 对齐：imac = 100 + insert_order（按 numericId 升序），
-/// sync_name = numericId，sync_type = {"_classPath": legacy_class_path}。
+/// imac = 100 + insert_order（按 numericId 升序），sync_name = numericId，
+/// sync_type = {"_classPath": legacy_class_path}。这是 imac 映射的唯一生产路径。
 async fn persist_initialized_topology(
     pool: &sqlx::Pool<sqlx::Sqlite>,
     session_id: &str,

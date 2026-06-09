@@ -56,11 +56,5 @@ export function describeBackfillError(errorCode: string | null): string {
   if (errorCode.startsWith("PAYLOAD_NOT_JSON")) {
     return "原始数据不是合法 JSON";
   }
-  if (errorCode.startsWith("CANONICAL_SCHEMA_INVALID")) {
-    return "原始数据缺少必需字段";
-  }
-  if (errorCode.startsWith("CONSTRAINT_VIOLATION")) {
-    return "数据写入冲突";
-  }
   return errorCode;
 }
