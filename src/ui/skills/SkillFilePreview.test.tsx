@@ -112,7 +112,7 @@ describe("SkillFilePreview", () => {
     expect(screen.getByText("暂无目录")).toBeInTheDocument();
   });
 
-  it("does not edit readonly files", async () => {
+  it("shows readonly factory notice instead of a disabled editor", async () => {
     const service = createService({
       readFile: vi.fn().mockResolvedValue({
         skillId: "tsn-topology",
@@ -126,7 +126,80 @@ describe("SkillFilePreview", () => {
     render(<SkillFilePreview skillId="tsn-topology" service={service} />);
 
     expect(await screen.findByText("只读内容")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "编辑文件" })).toBeDisabled();
-    expect(screen.getByText("只读 skill 资源不可编辑。")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "编辑文件" })).not.toBeInTheDocument();
+    expect(screen.getByText(/出厂只读指引/)).toBeInTheDocument();
+    expect(screen.getByText(/只读 skill 资源不可编辑/)).toBeInTheDocument();
+  });
+
+  it("renders the topology legal-domain from the catalog", async () => {
+    const service = createService({
+      describeTopologyTemplates: vi.fn().mockResolvedValue({
+        templateCount: 1,
+        templateIds: ["generic-line"],
+        templates: [
+          {
+            id: "generic-line",
+            name: "通用线型拓扑",
+            params: [
+              { name: "switchCount", type: "integer", minimum: 1, maximum: 12 },
+              { name: "dataRateMbps", type: "enum", values: [10, 100, 1000, 10000] },
+            ],
+          },
+        ],
+      }),
+    });
+
+    render(<SkillFilePreview skillId="tsn-topology" service={service} />);
+
+    expect(await screen.findByRole("region", { name: "参数合法域" })).toBeInTheDocument();
+    expect(await screen.findByText("switchCount")).toBeInTheDocument();
+    expect(screen.getByText("dataRateMbps")).toBeInTheDocument();
+  });
+
+  it("shows legal-domain unavailable when the catalog command fails", async () => {
+    const service = createService({
+      describeTopologyTemplates: vi.fn().mockRejectedValue(new Error("命令不可用")),
+    });
+
+    render(<SkillFilePreview skillId="tsn-topology" service={service} />);
+
+    expect(await screen.findByText(/参数合法域当前不可用/)).toBeInTheDocument();
+  });
+
+  it("hints when the SKILL.md guidance is empty", async () => {
+    const service = createService({
+      readFile: vi.fn().mockResolvedValue({
+        skillId: "tsn-topology",
+        path: "SKILL.md",
+        content: "",
+        editable: true,
+      }),
+    });
+
+    render(<SkillFilePreview skillId="tsn-topology" service={service} />);
+
+    expect(await screen.findByText(/清空将使 agent 失去领域指引/)).toBeInTheDocument();
+  });
+
+  it("does not render the legal-domain section for non-topology skills", async () => {
+    const service = createService({
+      listFiles: vi.fn().mockResolvedValue({
+        skillId: "tsn-flow-planning",
+        status: "available",
+        files: [{ path: "SKILL.md", kind: "file", sizeBytes: 10, canPreview: true, canEdit: true }],
+      }),
+      readFile: vi.fn().mockResolvedValue({
+        skillId: "tsn-flow-planning",
+        path: "SKILL.md",
+        content: "flow 内容",
+        editable: true,
+      }),
+    });
+
+    render(<SkillFilePreview skillId="tsn-flow-planning" service={service} />);
+
+    expect(await screen.findByText("flow 内容")).toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "参数合法域" })).not.toBeInTheDocument();
+    expect(service.describeTopologyTemplates).not.toHaveBeenCalled();
   });
 });
