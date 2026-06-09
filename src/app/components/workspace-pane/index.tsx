@@ -17,11 +17,9 @@ import {
   type TopologyNodeRow,
   type TopologyRowSnapshot,
 } from "../../../sessions/topology-snapshot";
-import type { AgentEvent } from "../../../agent/agent-types";
-import { redactProviderNamesForDisplay } from "../../../ui/display-redaction";
 import { DetailRow, Stat } from "../shared";
 
-export type ConfigTabId = "node-detail" | "link-detail" | "steps";
+export type ConfigTabId = "node-detail" | "link-detail";
 
 export type SelectedTopologyItem =
   | { kind: "node"; id: string }
@@ -30,7 +28,6 @@ export type SelectedTopologyItem =
 const CONFIG_TABS: Array<{ id: ConfigTabId; label: string }> = [
   { id: "node-detail", label: "节点详情" },
   { id: "link-detail", label: "链路详情" },
-  { id: "steps", label: "执行步骤" },
 ];
 
 const nodeTypes = {
@@ -41,7 +38,6 @@ export interface WorkspacePaneProps {
   topologySnapshot: TopologyRowSnapshot | undefined;
   selectedTopologyItem: SelectedTopologyItem | undefined;
   activeConfigTab: ConfigTabId;
-  agentEvents: AgentEvent[];
   isAgentRunning: boolean;
   hasUserInteraction: boolean;
   onSelectConfigTab: (tab: ConfigTabId) => void;
@@ -53,7 +49,6 @@ export function WorkspacePane({
   topologySnapshot,
   selectedTopologyItem,
   activeConfigTab,
-  agentEvents,
   isAgentRunning,
   hasUserInteraction,
   onSelectConfigTab,
@@ -195,28 +190,6 @@ export function WorkspacePane({
             ) : (
               <div className="empty-panel mono">请选择拓扑画布中的链路</div>
             )}
-          </section>
-          )}
-
-          {activeConfigTab === "steps" && (
-            <section
-              className="steps-panel"
-              id="config-panel-steps"
-              role="tabpanel"
-              aria-label="执行步骤"
-            >
-            <div className="panel-heading">
-              <h2>执行步骤</h2>
-            </div>
-            <ol className="event-list">
-              {agentEvents.map((event, index) => (
-                <li className={event.kind} key={`${event.id}-${index}`}>
-                  <span>{redactProviderNamesForDisplay(event.skillName ?? event.title)}</span>
-                  <p>{redactProviderNamesForDisplay(event.content)}</p>
-                </li>
-              ))}
-              {agentEvents.length === 0 && <li className="empty-step">等待 Agent 输出</li>}
-            </ol>
           </section>
           )}
         </div>

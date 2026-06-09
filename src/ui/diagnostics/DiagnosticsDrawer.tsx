@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { RefreshCw } from "lucide-react";
 import type { DiagnosticLogEntry } from "../../diagnostics/diagnostic-log";
 import type { DiagnosticLogRepository } from "../../diagnostics/diagnostic-log-repository";
@@ -9,19 +9,8 @@ interface DiagnosticsLogViewProps {
   repository: DiagnosticLogRepository;
 }
 
-const FILTERS = [
-  { label: "全部", value: "all" },
-  { label: "Agent", value: "agent" },
-  { label: "会话", value: "session" },
-  { label: "文件", value: "artifact" },
-  { label: "错误", value: "error" },
-] as const;
-
-type FilterValue = (typeof FILTERS)[number]["value"];
-
 export function DiagnosticsLogView({ sessionId, repository }: DiagnosticsLogViewProps) {
   const [logs, setLogs] = useState<DiagnosticLogEntry[]>([]);
-  const [filter, setFilter] = useState<FilterValue>("all");
   const [selectedLogId, setSelectedLogId] = useState<string>();
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string>();
@@ -43,45 +32,22 @@ export function DiagnosticsLogView({ sessionId, repository }: DiagnosticsLogView
     void loadLogs();
   }, [sessionId]);
 
-  const filteredLogs = useMemo(() => {
-    if (filter === "all") {
-      return logs;
-    }
-
-    if (filter === "error") {
-      return logs.filter((log) => log.level === "error" || log.level === "warn");
-    }
-
-    return logs.filter((log) => log.category === filter);
-  }, [filter, logs]);
-  const selectedLog = filteredLogs.find((log) => log.id === selectedLogId) ?? filteredLogs[0];
+  const selectedLog = logs.find((log) => log.id === selectedLogId) ?? logs[0];
 
   useEffect(() => {
-    if (filteredLogs.length === 0) {
+    if (logs.length === 0) {
       setSelectedLogId(undefined);
       return;
     }
 
-    if (!filteredLogs.some((log) => log.id === selectedLogId)) {
-      setSelectedLogId(filteredLogs[0].id);
+    if (!logs.some((log) => log.id === selectedLogId)) {
+      setSelectedLogId(logs[0].id);
     }
-  }, [filteredLogs, selectedLogId]);
+  }, [logs, selectedLogId]);
 
   return (
     <div className="diagnostics-panel">
       <div className="diagnostics-toolbar">
-        <div className="diag-filter-group" role="group" aria-label="日志筛选">
-          {FILTERS.map((item) => (
-            <button
-              className={filter === item.value ? "diag-filter active" : "diag-filter"}
-              key={item.value}
-              type="button"
-              onClick={() => setFilter(item.value)}
-            >
-              {item.label}
-            </button>
-          ))}
-        </div>
         <button className="btn" type="button" onClick={loadLogs} disabled={isLoading}>
           <RefreshCw size={14} aria-hidden="true" />
           刷新
@@ -89,13 +55,13 @@ export function DiagnosticsLogView({ sessionId, repository }: DiagnosticsLogView
       </div>
 
       {error && <div className="diagnostics-error">日志加载失败：{redactProviderNamesForDisplay(error)}</div>}
-      {!error && filteredLogs.length === 0 && (
+      {!error && logs.length === 0 && (
         <div className="empty-panel mono">{isLoading ? "正在加载日志" : "当前会话暂无诊断日志"}</div>
       )}
-      {!error && filteredLogs.length > 0 && (
+      {!error && logs.length > 0 && (
         <div className="master-detail-layout diagnostics-detail-layout">
           <ol className="diagnostics-list master-list" aria-label="当前会话诊断日志">
-            {filteredLogs.map((log) => (
+            {logs.map((log) => (
               <li key={log.id}>
                 <button
                   className={`diagnostics-item master-list-item ${log.level} ${selectedLog?.id === log.id ? "active" : ""}`}

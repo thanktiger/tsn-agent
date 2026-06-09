@@ -53,7 +53,6 @@ function baseProps(overrides: Partial<WorkspacePaneProps> = {}): WorkspacePanePr
     topologySnapshot: undefined,
     selectedTopologyItem: undefined,
     activeConfigTab: "node-detail",
-    agentEvents: [],
     isAgentRunning: false,
     hasUserInteraction: false,
     onSelectConfigTab: vi.fn(),

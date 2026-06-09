@@ -399,7 +399,6 @@ export function App() {
           topologySnapshot={topologySnapshot}
           selectedTopologyItem={selectedTopologyItem}
           activeConfigTab={activeConfigTab}
-          agentEvents={currentSession.agentEvents}
           isAgentRunning={isAgentRunning}
           hasUserInteraction={hasUserInteraction}
           onSelectConfigTab={setActiveConfigTab}

@@ -187,7 +187,7 @@ describe("App", () => {
     expect(flowStep).toHaveAttribute("aria-disabled", "true");
   });
 
-  it("runs the agent and applies workflow plus events from the result", async () => {
+  it("runs the agent and applies workflow from the result", async () => {
     const user = userEvent.setup();
     render(<App />);
 
@@ -204,9 +204,6 @@ describe("App", () => {
     );
     expect(screen.getByText("拓扑等待确认")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "确认并继续" })).toBeEnabled();
-
-    await user.click(screen.getByRole("tab", { name: "执行步骤" }));
-    expect(screen.getByText("拓扑已写入工程数据库（mutation #1）。")).toBeInTheDocument();
   });
 
   it("renames the session after the first user message", async () => {

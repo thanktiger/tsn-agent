@@ -1,5 +1,4 @@
-import { render, screen, within } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
+import { render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { DiagnosticsLogView } from "./DiagnosticsDrawer";
 import type { DiagnosticLogEntry } from "../../diagnostics/diagnostic-log";
@@ -46,19 +45,6 @@ describe("DiagnosticsLogView", () => {
     expect(screen.getByRole("region", { name: "日志详情" })).toHaveTextContent("智能助手请求完成");
     expect(screen.getByText(/\"provider\": \"智能助手工具\"/)).toBeInTheDocument();
     expect(screen.queryByText(/Claude/)).not.toBeInTheDocument();
-  });
-
-  it("filters logs by category and updates the right detail panel", async () => {
-    const user = userEvent.setup();
-    render(<DiagnosticsLogView sessionId="session-1" repository={createRepository()} />);
-
-    expect((await screen.findAllByText("智能助手请求完成")).length).toBeGreaterThanOrEqual(1);
-    await user.click(screen.getByRole("button", { name: "文件" }));
-
-    expect(screen.queryByText("智能助手请求完成")).not.toBeInTheDocument();
-    expect(screen.getAllByText("artifact bundle 已生成").length).toBeGreaterThanOrEqual(1);
-    expect(screen.getByRole("region", { name: "日志详情" })).toHaveTextContent("artifact bundle 已生成");
-    expect(within(screen.getByRole("list", { name: "当前会话诊断日志" })).queryByText("details")).not.toBeInTheDocument();
   });
 
   it("shows an error state when loading fails", async () => {
