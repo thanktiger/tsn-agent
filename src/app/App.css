@@ -1144,6 +1144,8 @@ textarea:focus-visible {
 }
 
 .stage-confirmation div {
+  /* 文字块占满剩余宽度，把确认按钮推到右侧贴边。 */
+  flex: 1;
   min-width: 0;
 }
 
@@ -1161,6 +1163,7 @@ textarea:focus-visible {
 
 .stage-confirmation .btn-primary {
   flex: 0 0 auto;
+  align-self: center;
 }
 
 .composer-box {
