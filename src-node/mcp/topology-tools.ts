@@ -312,7 +312,7 @@ export function applyOperationsInputSchema(): z.ZodRawShape {
     name: z.string().optional(),
     srcImac: z.number().int(),
     dstImac: z.number().int(),
-    stylesJson: z.string().describe("复制 inspect 返回的既有链路 stylesJson 作为格式参照（leftLabel/rightLabel/speed）"),
+    stylesJson: z.string().describe("复制 inspect 返回的既有链路 stylesJson 作为格式参照（leftLabel/rightLabel/speed；模板链路可能另含 plane/role）。plane 表示平面归属（A/B），新链路须按两端节点实际平面填写或直接省略该键——抄错平面会让画布配色误导用户"),
   }).strict();
   const linkDeleteSchema = z.object({
     op: z.literal("link_delete"),

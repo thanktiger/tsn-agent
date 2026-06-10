@@ -563,6 +563,8 @@ fn create_link(
             port_id: target_port_id.into(),
         },
         medium: IntermediateLinkMedium::Ethernet,
+        plane: None,
+        role: None,
         data_rate_mbps,
     }
 }
@@ -1007,21 +1009,34 @@ fn create_dual_plane_redundant_topology(params: &DualPlaneParams, data_rate: i64
     }
 
     // 链路对（KTD3 序）：接入（primary 后 backup）→ 平面内 backbone。
-    let mut link_pairs: Vec<(String, String)> = Vec::new();
+    // 每条携带平面归属与角色（R6）：接入边 = 对端 SW 的平面，骨干边 = 所属平面。
+    let plane_of = |switch_id: &str| -> Option<String> {
+        switch_by_id.get(switch_id).map(|s| s.plane.clone())
+    };
+    let mut link_pairs: Vec<(String, String, Option<String>, Option<String>)> = Vec::new();
     for es in &ordered_es {
-        link_pairs.push((es.id.clone(), es.attachment.primary.switch_id.clone()));
-        link_pairs.push((es.id.clone(), es.attachment.backup.switch_id.clone()));
+        let primary = es.attachment.primary.switch_id.clone();
+        let backup = es.attachment.backup.switch_id.clone();
+        let primary_plane = plane_of(&primary);
+        let backup_plane = plane_of(&backup);
+        link_pairs.push((es.id.clone(), primary, primary_plane, Some("access".into())));
+        link_pairs.push((es.id.clone(), backup, backup_plane, Some("access".into())));
     }
     for plane in ["A", "B"] {
         let chain = plane_switch_chain(params, plane);
         for pair in chain.windows(2) {
-            link_pairs.push((pair[0].clone(), pair[1].clone()));
+            link_pairs.push((
+                pair[0].clone(),
+                pair[1].clone(),
+                Some(plane.to_string()),
+                Some("backbone".into()),
+            ));
         }
     }
 
     // 端口需求（两端各计一次）。
     let mut demand: HashMap<String, usize> = HashMap::new();
-    for (a, b) in &link_pairs {
+    for (a, b, _, _) in &link_pairs {
         *demand.entry(a.clone()).or_default() += 1;
         *demand.entry(b.clone()).or_default() += 1;
     }
@@ -1163,10 +1178,14 @@ fn create_dual_plane_redundant_topology(params: &DualPlaneParams, data_rate: i64
         format!("P{}", value)
     };
     let mut links: Vec<IntermediateLink> = Vec::new();
-    for (numeric_link_id, (src, dst)) in link_pairs.iter().enumerate() {
+    for (numeric_link_id, (src, dst, plane, role)) in link_pairs.iter().enumerate() {
         let src_port = next_port(src);
         let dst_port = next_port(dst);
-        links.push(create_link(numeric_link_id as i64, src, &src_port, dst, &dst_port, data_rate));
+        let mut link =
+            create_link(numeric_link_id as i64, src, &src_port, dst, &dst_port, data_rate);
+        link.plane = plane.clone();
+        link.role = role.clone();
+        links.push(link);
     }
 
     IntermediateTopology {
@@ -2576,6 +2595,50 @@ mod tests {
         assert!(dp_link_connects(&topo, "e3", "sw3"));
         // crossPlaneLinks=none：A/B 平面不直连。
         assert!(!dp_link_connects(&topo, "sw1", "sw2"), "unexpected cross-plane link");
+    }
+
+    #[test]
+    fn dual_plane_links_carry_plane_and_role() {
+        // R6：接入边 plane = 对端 SW 平面、role=access；骨干边 = 所属平面、role=backbone；
+        // generic 模板链路两字段为 None。
+        let (topo, _) = initialize_topology(&InitializeIntent {
+            template_id: "dual-plane-redundant".into(),
+            params: dual_plane_two_hop_params(),
+        })
+        .unwrap();
+        let link_to = |a: &str, b: &str| {
+            topo.links
+                .iter()
+                .find(|l| l.source.node_id == a && l.target.node_id == b)
+                .unwrap_or_else(|| panic!("link {}->{} missing", a, b))
+        };
+        let e1_primary = link_to("e1", "sw1");
+        assert_eq!(e1_primary.plane.as_deref(), Some("A"));
+        assert_eq!(e1_primary.role.as_deref(), Some("access"));
+        let e1_backup = link_to("e1", "sw2");
+        assert_eq!(e1_backup.plane.as_deref(), Some("B"));
+        assert_eq!(e1_backup.role.as_deref(), Some("access"));
+        let backbone_a = link_to("sw1", "sw3");
+        assert_eq!(backbone_a.plane.as_deref(), Some("A"));
+        assert_eq!(backbone_a.role.as_deref(), Some("backbone"));
+
+        let line = build_minimal_generic_line();
+        assert!(line.links.iter().all(|l| l.plane.is_none() && l.role.is_none()));
+    }
+
+    #[test]
+    fn intermediate_link_without_plane_fields_deserializes() {
+        // additive 回归：旧 JSON（无 plane/role 键）反序列化为 None，序列化不回写键。
+        let raw = json!({
+            "id": "link-0", "numericId": 0,
+            "source": { "nodeId": "a", "portId": "p1" },
+            "target": { "nodeId": "b", "portId": "p1" },
+            "medium": "ethernet", "dataRateMbps": 1000
+        });
+        let link: IntermediateLink = serde_json::from_value(raw).unwrap();
+        assert!(link.plane.is_none() && link.role.is_none());
+        let back = serde_json::to_value(&link).unwrap();
+        assert!(back.get("plane").is_none() && back.get("role").is_none());
     }
 
     fn dp_pos(topo: &IntermediateTopology, id: &str) -> (f64, f64) {

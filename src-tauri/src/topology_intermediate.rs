@@ -67,6 +67,12 @@ pub struct IntermediateLink {
     pub target: IntermediateLinkEndpoint,
     pub medium: IntermediateLinkMedium,
     pub data_rate_mbps: i64,
+    /// 平面归属（"A"/"B"），dual-plane 生成端写入；其余模板与旧数据为 None（R6）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plane: Option<String>,
+    /// 链路角色（"access"/"backbone"），与 plane 同生命周期。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
