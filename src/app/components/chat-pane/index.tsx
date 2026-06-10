@@ -1,4 +1,6 @@
 import { Fragment, type RefObject } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import type { ChatMessage } from "../../../sessions/session-repository";
 import type { ScenarioConfig } from "../../../domain/scenario-config";
 import type { WorkflowState, WorkflowStageState, WorkflowStepStatus } from "../../../project/project-state";
@@ -90,8 +92,15 @@ export function ChatPane({
             )}
             {message.id === pendingAssistantMessageId ? (
               <AgentWaitingIndicator />
+            ) : message.role === "assistant" ? (
+              // assistant 输出按 markdown 渲染；用户输入保持纯文本不做解释。
+              <div className="msg-markdown">
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                  {redactProviderNamesForDisplay(message.content)}
+                </ReactMarkdown>
+              </div>
             ) : (
-              <p>{message.role === "assistant" ? redactProviderNamesForDisplay(message.content) : message.content}</p>
+              <p>{message.content}</p>
             )}
           </article>
         ))}
