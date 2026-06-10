@@ -492,9 +492,9 @@ fn create_generic_distributed_topology(
             links.push(create_link(
                 numeric_link_id,
                 &host_id,
-                "p1",
+                "P0",
                 &switch_id,
-                &format!("p{}", host_index),
+                &format!("P{}", host_index - 1),
                 data_rate,
             ));
             numeric_link_id += 1;
@@ -506,9 +506,9 @@ fn create_generic_distributed_topology(
         links.push(create_link(
             numeric_link_id,
             &switch_ids[index],
-            &format!("p{}", switch_interconnect_port_offset + 1),
+            &format!("P{}", switch_interconnect_port_offset),
             &switch_ids[index + 1],
-            &format!("p{}", switch_interconnect_port_offset + 2),
+            &format!("P{}", switch_interconnect_port_offset + 1),
             data_rate,
         ));
         numeric_link_id += 1;
@@ -518,9 +518,9 @@ fn create_generic_distributed_topology(
         links.push(create_link(
             numeric_link_id,
             &switch_ids[switch_ids.len() - 1],
-            &format!("p{}", switch_interconnect_port_offset + 1),
+            &format!("P{}", switch_interconnect_port_offset),
             &switch_ids[0],
-            &format!("p{}", switch_interconnect_port_offset + 2),
+            &format!("P{}", switch_interconnect_port_offset + 1),
             data_rate,
         ));
     }
@@ -1076,7 +1076,7 @@ fn create_dual_plane_redundant_topology(params: &DualPlaneParams, data_rate: i64
         let counter = cursor.entry(node.to_string()).or_insert(0);
         let value = *counter;
         *counter += 1;
-        format!("p{}", value + 1)
+        format!("P{}", value)
     };
     let mut links: Vec<IntermediateLink> = Vec::new();
     for (numeric_link_id, (src, dst)) in link_pairs.iter().enumerate() {
@@ -2841,6 +2841,43 @@ mod tests {
     #[test]
     fn validate_intermediate_passes_for_initialize_output() {
         let topology = build_minimal_generic_line();
+        let raw = serde_json::to_value(&topology).unwrap();
+        let report = validate_intermediate_topology(&raw);
+        assert!(report.ok, "errors={:?}", report.errors);
+        assert!(report.summary.valid);
+    }
+
+    #[test]
+    fn ports_are_p0_indexed_across_templates() {
+        // R5：全模板 P0 起编——节点端口与链路标签同源一致。
+        let line = build_minimal_generic_line();
+        assert_eq!(line.nodes[0].ports[0].id, "P0");
+        assert!(line
+            .links
+            .iter()
+            .all(|l| l.source.port_id.starts_with('P') && l.target.port_id.starts_with('P')));
+        assert!(line.links.iter().any(|l| l.source.port_id == "P0"));
+
+        let (dual, _) = initialize_topology(&InitializeIntent {
+            template_id: "dual-plane-redundant".into(),
+            params: dual_plane_single_hop_params(),
+        })
+        .unwrap();
+        assert!(dual.nodes.iter().all(|n| n.ports[0].id == "P0"));
+        assert!(dual
+            .links
+            .iter()
+            .all(|l| l.source.port_id.starts_with('P') && l.target.port_id.starts_with('P')));
+    }
+
+    #[test]
+    fn validate_intermediate_passes_for_generic_ring_output() {
+        // ring 闭环块有独立端口字面量，漏改时悬空端口引用在此即红（U1 护栏）。
+        let (topology, _) = initialize_topology(&InitializeIntent {
+            template_id: "generic-ring".into(),
+            params: json!({ "switchCount": 4, "endSystemsPerSwitch": 2, "dataRateMbps": 1000 }),
+        })
+        .unwrap();
         let raw = serde_json::to_value(&topology).unwrap();
         let report = validate_intermediate_topology(&raw);
         assert!(report.ok, "errors={:?}", report.errors);
