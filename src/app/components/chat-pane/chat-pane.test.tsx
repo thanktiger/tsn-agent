@@ -85,6 +85,46 @@ describe("ChatPane", () => {
     expect(screen.getByRole("button", { name: "生成规划草案" })).toBeDisabled();
   });
 
+  it("submits on plain Enter and inserts a newline on Cmd/Ctrl+Enter", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn();
+    const onInputChange = vi.fn();
+    render(<ChatPane {...baseProps({ input: "需求", onSubmit, onInputChange })} />);
+    const textarea = screen.getByLabelText("输入你的 TSN 需求") as HTMLTextAreaElement;
+
+    textarea.focus();
+    textarea.setSelectionRange(2, 2);
+    await user.keyboard("{Enter}");
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+
+    // Cmd+Enter：不发送，在光标处插入换行。
+    textarea.setSelectionRange(2, 2);
+    await user.keyboard("{Meta>}{Enter}{/Meta}");
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+    expect(onInputChange).toHaveBeenCalledWith("需求\n");
+
+    // Ctrl+Enter 同理。
+    onInputChange.mockClear();
+    textarea.setSelectionRange(2, 2);
+    await user.keyboard("{Control>}{Enter}{/Control}");
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+    expect(onInputChange).toHaveBeenCalledWith("需求\n");
+  });
+
+  it("does not submit on Enter while the agent is running or input is empty", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn();
+    const { rerender } = render(<ChatPane {...baseProps({ input: "需求", onSubmit, isAgentRunning: true })} />);
+    screen.getByLabelText("输入你的 TSN 需求").focus();
+    await user.keyboard("{Enter}");
+    expect(onSubmit).not.toHaveBeenCalled();
+
+    rerender(<ChatPane {...baseProps({ input: "   ", onSubmit })} />);
+    screen.getByLabelText("输入你的 TSN 需求").focus();
+    await user.keyboard("{Enter}");
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
   it("calls onSubmit when the send button is clicked with input present", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn();

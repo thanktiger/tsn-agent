@@ -126,6 +126,37 @@ export function ChatPane({
             value={input}
             placeholder={INTENT_PLACEHOLDER}
             onChange={(event) => onInputChange(event.target.value)}
+            onKeyDown={(event) => {
+              // IME 选词中的 Enter 是确认候选，不发送。
+              if (event.key !== "Enter" || event.nativeEvent.isComposing) {
+                return;
+              }
+
+              // Cmd/Ctrl+Enter 插入换行（浏览器对修饰 Enter 默认不插，手动插入并复位光标）。
+              if (event.metaKey || event.ctrlKey) {
+                event.preventDefault();
+                const target = event.currentTarget;
+                const start = target.selectionStart ?? input.length;
+                const end = target.selectionEnd ?? input.length;
+                onInputChange(`${input.slice(0, start)}\n${input.slice(end)}`);
+                requestAnimationFrame(() => {
+                  target.selectionStart = start + 1;
+                  target.selectionEnd = start + 1;
+                });
+                return;
+              }
+
+              // Shift/Alt+Enter 保留默认换行。
+              if (event.shiftKey || event.altKey) {
+                return;
+              }
+
+              // 纯 Enter 发送（与发送按钮同条件）。
+              event.preventDefault();
+              if (!isAgentRunning && input.trim()) {
+                onSubmit();
+              }
+            }}
             rows={3}
           />
           <button type="button" aria-label="生成规划草案" onClick={onSubmit} disabled={isAgentRunning || !input.trim()}>
