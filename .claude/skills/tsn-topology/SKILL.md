@@ -65,7 +65,7 @@ description: TSN Agent 拓扑阶段指引。拓扑固定规则通过 tsn_topolog
   - 只有用户明确要求"交换机相互独立""交换机之间不互联""每台交换机单独成星型"时，才省略交换机互联（由 MCP 模板参数表达，本文件不定义生成细节）。
 - **`generic-ring`**：用户明确要环形、交换机环网、或环形冗余时。参数同 `generic-line`。
   - 示例："航天双环冗余""交换机组成环网" → `generic-ring`。
-- **`dual-plane-redundant`（Phase B，暂不可选）**：`describe_templates` 会列出该模板，但 `topology_initialize` 当前拒绝它。用户要 A/B 双平面、端系统双归属冗余时，说明该模板暂未开放，引导用 `generic-ring` 近似或记录需求待 Phase B —— 不要尝试用它初始化。
+- **`dual-plane-redundant`**：用户要 A/B 双平面、端系统双归属冗余时使用。典型场景：宇航双平面验收的**单跳**（端系统经一组 A/B 交换机双归属）与**双跳**（两组 A/B 交换机级联）。参数字段与合法域以 `describe_templates` 返回为准。
 
 ## 已有拓扑编辑路径
 

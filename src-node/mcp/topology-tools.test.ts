@@ -33,6 +33,7 @@ import {
   assertTopologyToolMapping,
   createTopologyToolRegistry,
   expectedAllowedToolName,
+  initializeInputSchema,
   runTopologyTool,
 } from "./topology-tools";
 import { createTsnTopologyMcpServer, isCliEntrypoint } from "./tsn-topology-server";
@@ -506,5 +507,49 @@ describe("applyOperationsInputSchema", () => {
     // 空批次在 sidecar 也会被拒（空事务会白白 mint mutationId）。
     const result = schema.safeParse({ operations: [] });
     expect(result.success).toBe(false);
+  });
+});
+
+describe("initializeInputSchema dual-plane narrowing (U2)", () => {
+  const schema = z.object(initializeInputSchema());
+  const base = {
+    templateId: "dual-plane-redundant",
+    params: {
+      dataRateMbps: 1000,
+      planes: [{ id: "A" }, { id: "B" }],
+      switches: [
+        { id: "sw1", plane: "A", groupId: "g1" },
+        { id: "sw2", plane: "B", groupId: "g1" },
+      ],
+      switchGroups: [{ id: "g1", planeSwitches: { A: "sw1", B: "sw2" } }],
+      endSystems: [
+        {
+          id: "es1",
+          groupId: "g1",
+          attachment: {
+            primary: { switchId: "sw1", plane: "A" },
+            backup: { switchId: "sw2", plane: "B" },
+          },
+        },
+      ],
+      backbone: { mode: "line", withinPlane: true },
+      crossPlaneLinks: { mode: "none" },
+    },
+  };
+
+  it("accepts backbone=line + crossPlaneLinks=none", () => {
+    expect(schema.safeParse(base).success).toBe(true);
+  });
+
+  it("rejects backbone.mode=ring after narrowing to line", () => {
+    const ring = structuredClone(base) as Record<string, any>;
+    ring.params.backbone.mode = "ring";
+    expect(schema.safeParse(ring).success).toBe(false);
+  });
+
+  it("rejects crossPlaneLinks.mode=paired after narrowing to none", () => {
+    const paired = structuredClone(base) as Record<string, any>;
+    paired.params.crossPlaneLinks.mode = "paired";
+    expect(schema.safeParse(paired).success).toBe(false);
   });
 });

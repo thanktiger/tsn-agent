@@ -332,7 +332,7 @@ export function applyOperationsInputSchema(): z.ZodRawShape {
   };
 }
 
-function initializeInputSchema(): z.ZodRawShape {
+export function initializeInputSchema(): z.ZodRawShape {
   const planeSchema = z.enum(["A", "B"]);
   const attachmentEndpointSchema = z.object({
     switchId: z.string().min(1),
@@ -369,12 +369,13 @@ function initializeInputSchema(): z.ZodRawShape {
         backup: attachmentEndpointSchema,
       }),
     })).min(1),
+    // Plan 2026-06-09-004 U2：收窄到已实现合法域（line/none）。ring/paired 待实现时 re-advertise。
     backbone: z.object({
-      mode: z.enum(["line", "ring"]),
+      mode: z.literal("line"),
       withinPlane: z.literal(true),
     }),
     crossPlaneLinks: z.object({
-      mode: z.enum(["none", "paired"]),
+      mode: z.literal("none"),
     }),
     allocation: z.object({
       idPrefix: z.object({
