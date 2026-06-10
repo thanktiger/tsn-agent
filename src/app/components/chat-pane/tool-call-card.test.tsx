@@ -56,4 +56,34 @@ describe("ToolCallCard", () => {
     expect(screen.getByLabelText("失败")).toBeInTheDocument();
     expect(screen.getByText("失败：boom")).toBeInTheDocument();
   });
+
+  it("renders the running state with placeholder result (U5/R5/R9)", async () => {
+    const user = userEvent.setup();
+    render(<ToolCallCard record={record({ status: "running", result: undefined })} />);
+
+    expect(screen.getByLabelText("运行中")).toBeInTheDocument();
+    expect(screen.getByText("…")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button"));
+
+    // 入参可看，出参为占位文案。
+    expect(screen.getByText(/"template": "line"/)).toBeInTheDocument();
+    expect(screen.getByText("执行中…")).toBeInTheDocument();
+  });
+
+  it("keeps the expanded state across running→success flip (U5/AE1)", async () => {
+    const user = userEvent.setup();
+    const { rerender } = render(<ToolCallCard record={record({ status: "running", result: undefined })} />);
+
+    await user.click(screen.getByRole("button"));
+    expect(screen.getByText("执行中…")).toBeInTheDocument();
+
+    rerender(<ToolCallCard record={record({ status: "success" })} />);
+
+    // 翻转就地更新：保持展开，出参占位被真实结果替换。
+    expect(screen.getByRole("button")).toHaveAttribute("aria-expanded", "true");
+    expect(screen.queryByText("执行中…")).not.toBeInTheDocument();
+    expect(screen.getByText(/"mutationId": 2/)).toBeInTheDocument();
+    expect(screen.getByLabelText("成功")).toBeInTheDocument();
+  });
 });

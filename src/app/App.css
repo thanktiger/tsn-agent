@@ -967,6 +967,11 @@ textarea:focus-visible {
   border-left-color: var(--error);
 }
 
+/* Plan 2026-06-10-001 U5：流式「运行中」态——accent 左边框 + 状态符脉冲。 */
+.tool-call-card.running {
+  border-left-color: var(--accent);
+}
+
 .tool-call-summary {
   display: flex;
   align-items: center;
@@ -1000,6 +1005,21 @@ textarea:focus-visible {
 
 .tool-call-card.failed .tool-call-status {
   background: var(--error);
+}
+
+.tool-call-card.running .tool-call-status {
+  background: var(--accent);
+  animation: toolCallRunningPulse 1.2s ease-in-out infinite;
+}
+
+@keyframes toolCallRunningPulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
 }
 
 .tool-call-name {

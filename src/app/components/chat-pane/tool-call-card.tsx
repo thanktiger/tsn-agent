@@ -5,21 +5,26 @@ import { redactProviderNamesForDisplay, redactProviderNamesInValue } from "../..
 /**
  * Plan 2026-06-09-003 U7：对话流内联工具调用卡片。折叠态一行（状态 + 友好名 +
  * 摘要），展开看完整入参 / 出参。展开态为组件瞬态、默认折叠（KTD6）。
+ *
+ * Plan 2026-06-10-001 U5：新增 running 流式态——状态符「…」+ accent 脉冲；卡片按
+ * `id` 为 key，状态翻转只换 props 不卸载组件，展开态自然保持。
  */
 export function ToolCallCard({ record }: { record: ToolCallRecord }) {
   const [expanded, setExpanded] = useState(false);
   const failed = record.status === "error";
+  const running = record.status === "running";
+  const statusClass = failed ? "failed" : running ? "running" : "ok";
 
   return (
-    <div className={`tool-call-card ${failed ? "failed" : "ok"}`}>
+    <div className={`tool-call-card ${statusClass}`}>
       <button
         type="button"
         className="tool-call-summary"
         aria-expanded={expanded}
         onClick={() => setExpanded((value) => !value)}
       >
-        <span className="tool-call-status" aria-label={failed ? "失败" : "成功"}>
-          {failed ? "✕" : "✓"}
+        <span className="tool-call-status" aria-label={failed ? "失败" : running ? "运行中" : "成功"}>
+          {failed ? "✕" : running ? "…" : "✓"}
         </span>
         <span className="tool-call-name mono">{redactProviderNamesForDisplay(record.friendlyName)}</span>
         <span className="tool-call-brief">{redactProviderNamesForDisplay(record.summary)}</span>
@@ -30,7 +35,14 @@ export function ToolCallCard({ record }: { record: ToolCallRecord }) {
       {expanded && (
         <div className="tool-call-detail">
           <ToolCallSection label="入参" value={record.args} />
-          <ToolCallSection label="出参" value={record.result} truncated={record.resultTruncated} />
+          {running ? (
+            <div className="tool-call-section">
+              <div className="tool-call-section-label">出参</div>
+              <pre className="tool-call-body mono">执行中…</pre>
+            </div>
+          ) : (
+            <ToolCallSection label="出参" value={record.result} truncated={record.resultTruncated} />
+          )}
         </div>
       )}
     </div>

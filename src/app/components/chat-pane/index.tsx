@@ -79,19 +79,19 @@ export function ChatPane({
             key={message.id}
           >
             <span className="message-role">{message.role === "user" ? "USER" : "AGENT"}</span>
+            {/* Plan 2026-06-10-001 U5：工具事件常先于首个文本 chunk（此时仍是 pending
+                态）——卡片在两个分支都渲染；pending 时卡片在上、等待指示器在下。 */}
+            {message.role === "assistant" && message.toolCalls && message.toolCalls.length > 0 && (
+              <div className="tool-call-list">
+                {message.toolCalls.map((record) => (
+                  <ToolCallCard key={record.id} record={record} />
+                ))}
+              </div>
+            )}
             {message.id === pendingAssistantMessageId ? (
               <AgentWaitingIndicator />
             ) : (
-              <>
-                {message.role === "assistant" && message.toolCalls && message.toolCalls.length > 0 && (
-                  <div className="tool-call-list">
-                    {message.toolCalls.map((record) => (
-                      <ToolCallCard key={record.id} record={record} />
-                    ))}
-                  </div>
-                )}
-                <p>{message.role === "assistant" ? redactProviderNamesForDisplay(message.content) : message.content}</p>
-              </>
+              <p>{message.role === "assistant" ? redactProviderNamesForDisplay(message.content) : message.content}</p>
             )}
           </article>
         ))}
