@@ -422,19 +422,12 @@ function SkillToolPanel() {
         <section className="detail-surface skill-detail" aria-label="Skill 详情">
           {selectedSkill ? (
             <>
-              <div className="detail-surface-header">
-                <div>
-                  <p className="drawer-kicker">Skill Detail</p>
-                  <h3>{selectedSkill.displayName}</h3>
-                </div>
+              {/* 描述 + 状态一行带过：标题已由上方选中卡片承担，不再重复占位。 */}
+              <div className="skill-detail-meta">
+                <p className="detail-description">{selectedSkill.description}</p>
                 <span className={`skill-status ${selectedSkill.status}`}>{skillStatusLabel(selectedSkill.status)}</span>
               </div>
-
-              <p className="detail-description">{selectedSkill.description}</p>
               <SkillFilePreview skillId={selectedSkill.id} />
-              <div className="detail-grid">
-                <DetailRow label="Skill ID" value={selectedSkill.id} />
-              </div>
             </>
           ) : (
             <div className="empty-panel mono">请选择一个 skill</div>

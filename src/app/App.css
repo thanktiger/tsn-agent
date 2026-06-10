@@ -508,8 +508,27 @@ textarea:focus-visible {
 }
 
 .skill-detail-layout > .master-list {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  max-height: 170px;
+  /* 四个 skill 卡并成一行，压缩纵向占用。 */
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+  max-height: none;
+}
+
+.skill-detail-layout .master-list-item {
+  gap: 2px;
+  padding: 7px 9px;
+}
+
+/* skill 详情顶部：描述 + 状态一行。 */
+.skill-detail-meta {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.skill-detail-meta .detail-description {
+  margin: 0;
 }
 
 .release-note-detail {
@@ -546,30 +565,21 @@ textarea:focus-visible {
 
 .skill-files-panel {
   display: grid;
-  gap: 10px;
-  margin: 12px 0;
-  padding: 12px 0;
+  gap: 8px;
+  margin: 10px 0 0;
+  padding: 10px 0 0;
   border-top: 1px solid var(--border);
-  border-bottom: 1px solid var(--border);
 }
 
 .skill-files-header,
 .skill-file-preview-header {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
   gap: 10px;
 }
 
-.skill-files-header h4 {
-  margin: 2px 0 0;
-  color: var(--text-primary);
-  font-size: 14px;
-}
-
 .skill-files-header small {
-  display: block;
-  margin-top: 3px;
   color: var(--text-muted);
   font-size: 11px;
 }
@@ -614,12 +624,13 @@ textarea:focus-visible {
 .skill-file-item {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
   gap: 4px 7px;
-  flex: 0 0 clamp(190px, 46%, 260px);
-  width: 46%;
+  flex: 0 0 clamp(150px, 34%, 210px);
+  width: 34%;
   min-width: 0;
-  max-width: 260px;
-  padding: 8px;
+  max-width: 210px;
+  padding: 6px 8px;
   border: 1px solid var(--border);
   border-radius: 4px;
   color: var(--text-secondary);
@@ -717,6 +728,71 @@ textarea:focus-visible {
   border-radius: 4px;
   color: var(--danger);
   background: var(--danger-dim);
+  font-size: 12px;
+}
+
+/* 参数合法域：模板分块 + 每参数一行（名称 | 约束）的紧凑网格。 */
+.skill-legal-domain {
+  display: grid;
+  gap: 8px;
+}
+
+.skill-legal-domain-header {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.skill-legal-domain-header h5 {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+.skill-legal-domain-header small {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.skill-legal-domain-templates {
+  display: grid;
+  gap: 6px;
+}
+
+.skill-legal-domain-template {
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-secondary);
+}
+
+.skill-legal-domain-template > .mono {
+  display: block;
+  margin-bottom: 5px;
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.skill-legal-domain-params {
+  display: grid;
+  grid-template-columns: minmax(150px, max-content) 1fr;
+  gap: 2px 16px;
+  margin: 0;
+}
+
+.skill-legal-domain-param {
+  display: contents;
+}
+
+.skill-legal-domain-param dt {
+  color: var(--text-primary);
+  font-size: 12px;
+}
+
+.skill-legal-domain-param dd {
+  margin: 0;
+  color: var(--text-secondary);
   font-size: 12px;
 }
 

@@ -200,11 +200,7 @@ export function SkillFilePreview({
   return (
     <section className="skill-files-panel" aria-label="Skill 文件">
       <div className="skill-files-header">
-        <div>
-          <p className="drawer-kicker">Files</p>
-          <h4>Skill 文件</h4>
-          <small>编辑会保存到当前选中的 skill 文件，下次 agent 运行生效。</small>
-        </div>
+        <small>编辑会保存到当前选中的 skill 文件，下次 agent 运行生效。</small>
         {fileList?.status && <span className={`skill-file-status ${fileList.status}`}>{rootStatusLabel(fileList.status)}</span>}
       </div>
 
