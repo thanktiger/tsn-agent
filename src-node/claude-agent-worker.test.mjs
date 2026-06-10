@@ -509,6 +509,90 @@ describe("claude-agent-worker", () => {
     });
   });
 
+  it("emits streaming tool_call start/result events per tool, zero-arg tools included (U1/AE1)", async () => {
+    const events = [];
+    const query = async function* () {
+      yield {
+        type: "assistant",
+        session_id: "s-stream-cards",
+        message: {
+          content: [{ type: "tool_use", id: "toolu-1", name: "mcp__tsn_topology__topology_describe_templates", input: {} }],
+        },
+      };
+      yield {
+        type: "user",
+        session_id: "s-stream-cards",
+        message: { content: [{ type: "tool_result", tool_use_id: "toolu-1", content: "templates" }] },
+      };
+      yield {
+        type: "assistant",
+        session_id: "s-stream-cards",
+        message: { content: [{ type: "tool_use", id: "toolu-2", name: "Bash", input: { command: "ls" } }] },
+      };
+      yield {
+        type: "user",
+        session_id: "s-stream-cards",
+        message: { content: [{ type: "tool_result", tool_use_id: "toolu-2", content: "ok" }] },
+      };
+      yield { type: "result", session_id: "s-stream-cards", result: "完成" };
+    };
+
+    const result = await runClaude("两个工具", { onEvent: (event) => events.push(event) }, query);
+
+    const toolEvents = events.filter((event) => event.event === "tool_call");
+    expect(toolEvents.map((event) => [event.toolCall.phase, event.toolCall.id])).toEqual([
+      ["start", "toolu-1"],
+      ["result", "toolu-1"],
+      ["start", "toolu-2"],
+      ["result", "toolu-2"],
+    ]);
+    // 零参工具（input:{}）也要发 start，args 为合法空对象。
+    expect(toolEvents[0].toolCall).toMatchObject({ name: "mcp__tsn_topology__topology_describe_templates", args: {} });
+    expect(toolEvents[1].toolCall).toMatchObject({ status: "success", result: "templates" });
+    expect(toolEvents[2].toolCall).toMatchObject({ name: "Bash", args: { command: "ls" } });
+    // done.toolCalls 仍为五字段完整列表（无 phase）。
+    expect(result.toolCalls).toHaveLength(2);
+    expect(result.toolCalls[0]).not.toHaveProperty("phase");
+    expect(result.toolCalls[1]).not.toHaveProperty("phase");
+  });
+
+  it("skips stream_event empty-input signals and never re-emits start per id (U1/AE2)", async () => {
+    const events = [];
+    const query = async function* () {
+      yield {
+        type: "stream_event",
+        session_id: "s-stream-guard",
+        event: { content_block: { type: "tool_use", id: "toolu-1", name: "Bash", input: {} } },
+      };
+      yield {
+        type: "assistant",
+        session_id: "s-stream-guard",
+        message: { content: [{ type: "tool_use", id: "toolu-1", name: "Bash", input: { command: "ls" } }] },
+      };
+      yield {
+        type: "assistant",
+        session_id: "s-stream-guard",
+        message: { content: [{ type: "tool_use", id: "toolu-1", name: "Bash", input: { command: "ls" } }] },
+      };
+      yield {
+        type: "user",
+        session_id: "s-stream-guard",
+        message: {
+          content: [{ type: "tool_result", tool_use_id: "toolu-1", content: "<tool_use_error>Exit code 1</tool_use_error>" }],
+        },
+      };
+      yield { type: "result", session_id: "s-stream-guard", result: "完成" };
+    };
+
+    await runClaude("一个工具", { onEvent: (event) => events.push(event) }, query);
+
+    const toolEvents = events.filter((event) => event.event === "tool_call");
+    expect(toolEvents).toHaveLength(2);
+    // stream_event 的空参早期信号不触发 start；start 携带完整 args 且不重发。
+    expect(toolEvents[0].toolCall).toMatchObject({ phase: "start", id: "toolu-1", args: { command: "ls" } });
+    expect(toolEvents[1].toolCall).toMatchObject({ phase: "result", id: "toolu-1", status: "error" });
+  });
+
   it("writes a per-session audit log with prompt, result, and tool traces", async () => {
     const auditDir = await mkdtemp(join(tmpdir(), "tsn-agent-audit-test-"));
     const query = async function* (input) {

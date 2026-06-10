@@ -40,6 +40,8 @@ export async function runClaude(userPrompt, options = {}, queryFn = query) {
   const toolUseNamesById = new Map();
   // Plan 2026-06-09-003：结构化工具记录按 tool_use id 累积，随 done 一次性返回。
   const toolCallsById = new Map();
+  // Plan 2026-06-10-001：流式 tool_call 事件每 id 各相至多发一次（start/result）。
+  const emittedToolCallPhases = new Set();
   const capturedStageResultKeys = new Set();
   const capturedStageResults = [];
   const stageResultPath = resolvedOptions.stageResultPath ?? await createStageResultPath();
@@ -243,10 +245,26 @@ export async function runClaude(userPrompt, options = {}, queryFn = query) {
         if (isNonEmptyToolInput(entry.args) || existing.args === undefined) {
           existing.args = entry.args;
         }
+        // Plan 2026-06-10-001 U1：完整 assistant 消息的 use 相才发 start（合法空入参
+        // 也发——零参工具不能漏卡）；stream_event 的早期空参信号不触发。
+        if (message.type === "assistant" && !emittedToolCallPhases.has(`${entry.id}:start`)) {
+          emittedToolCallPhases.add(`${entry.id}:start`);
+          resolvedOptions.onEvent?.({
+            event: "tool_call",
+            toolCall: { id: entry.id, name: existing.name, args: existing.args, phase: "start" },
+          });
+        }
       } else {
         existing.name = existing.name ?? entry.name;
         existing.status = entry.status;
         existing.result = entry.result;
+        if (!emittedToolCallPhases.has(`${entry.id}:result`)) {
+          emittedToolCallPhases.add(`${entry.id}:result`);
+          resolvedOptions.onEvent?.({
+            event: "tool_call",
+            toolCall: { id: entry.id, name: existing.name, status: existing.status, result: existing.result, phase: "result" },
+          });
+        }
       }
 
       toolCallsById.set(entry.id, existing);
