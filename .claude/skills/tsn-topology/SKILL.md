@@ -55,7 +55,7 @@ description: TSN Agent 拓扑阶段指引。拓扑固定规则通过 tsn_topolog
 1. 从用户需求和上面「推荐参数默认」提取结构化参数。
 2. 调用 `mcp__tsn_topology__topology_describe_templates` 获取可用模板目录与每个模板的参数 schema（字段名与**合法域**以该返回为准）。
 3. 按下面「场景 → 模板」决策树选择 `templateId`，并把参数（含上述默认值或用户指定值）**显式**传给 `mcp__tsn_topology__topology_initialize`；它会直接写入工程数据库并返回 `mutationId`（右侧据此落图），同时替换该会话已有拓扑。
-4. 必要时调用 `mcp__tsn_topology__topology_validate` 和 `mcp__tsn_topology__topology_build_artifacts` 获取 summary。
+4. `initialize` 已内置结构校验并落库，**之后不要再调用 `topology_validate` 复检**（它只接受完整 IntermediateTopology JSON，不接受 `mutationId`/summary；initialize 不返回完整拓扑）。需要查看落库结果用 `mcp__tsn_topology__topology_inspect`。
 5. 用中文说明当前拓扑摘要并等待用户确认；不要输出完整 topology JSON 或 stage result JSON。
 
 ### 场景 → 模板选择

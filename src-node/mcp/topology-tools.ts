@@ -81,7 +81,10 @@ export function createTopologyToolRegistry(): TopologyMcpToolDefinition[] {
       name: "topology.validate",
       allowedToolName: "mcp__tsn_topology__topology_validate",
       title: "Validate intermediate topology",
-      description: "Validate a topology snapshot and return structured errors.",
+      description:
+        "Validate a FULL IntermediateTopology JSON (must include schemaVersion/nodes/links) and return structured errors. "
+        + "Do NOT call this after topology.initialize: initialize already validates and persists, and its return "
+        + "(mutationId/summary) is not a topology. Use topology.inspect to read persisted rows.",
       inputSchema: {
         topology: z.unknown().optional(),
       },
