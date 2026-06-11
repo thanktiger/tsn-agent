@@ -72,18 +72,7 @@ pub fn run() {
             let emit_handle = app.handle().clone();
             let emit: topology_sidecar_routes::MutationEmitFn =
                 std::sync::Arc::new(move |record| {
-                    let payload = serde_json::json!({
-                        "sessionId": record.session_id,
-                        "domain": record.domain,
-                        "mutationId": record.mutation_id,
-                    });
-                    use tauri::Emitter;
-                    if emit_handle
-                        .emit_to("main", "session_db_changed", payload.clone())
-                        .is_err()
-                    {
-                        let _ = emit_handle.emit("session_db_changed", payload);
-                    }
+                    topology_position_command::emit_session_db_changed(&emit_handle, &record);
                 });
             let handle = tauri::async_runtime::block_on(topology_sidecar::launch(
                 pool, buffer, emit,

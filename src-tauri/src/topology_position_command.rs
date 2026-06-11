@@ -16,6 +16,9 @@ use crate::topology_mutation_buffer::TopologyMutationBuffer;
 pub struct UpdateNodePositionRequest {
     session_id: String,
     imac: i64,
+    /// 整数坐标契约：前端 Math.round 后提交。x/y 列为 REAL，但整数值的 f64
+    /// 表示无损；前端 overlay 写入确认依赖快照坐标与提交值严格相等，
+    /// 放开小数坐标前必须同步改前端比对逻辑。
     x: i64,
     y: i64,
     /// 前端拖动开始时记录的最近 mutationId；用于陈旧写检测（R11）。
@@ -75,17 +78,12 @@ async fn apply_position_update(
     Ok(buffer.push(request.session_id.clone(), "topology".into()))
 }
 
-#[tauri::command]
-pub async fn update_node_position(
-    app: tauri::AppHandle,
-    store: tauri::State<'_, SessionStore>,
-    buffer: tauri::State<'_, std::sync::Arc<TopologyMutationBuffer>>,
-    request: UpdateNodePositionRequest,
-) -> Result<UpdateNodePositionResponse, String> {
-    let pool = store.pool(&app).await?;
-    let record = apply_position_update(&pool, buffer.inner(), &request).await?;
-
-    // emit 形态镜像 lib.rs setup 的 MutationEmitFn：emit_to("main") 失败回退全局。
+/// `session_db_changed` 事件桥：emit_to("main") 失败回退全局 emit。
+/// lib.rs 的 sidecar MutationEmitFn 与本命令共用，防 payload 形状双处漂移。
+pub fn emit_session_db_changed(
+    app: &tauri::AppHandle,
+    record: &crate::topology_mutation_buffer::MutationRecord,
+) {
     let payload = serde_json::json!({
         "sessionId": record.session_id,
         "domain": record.domain,
@@ -95,7 +93,18 @@ pub async fn update_node_position(
     if app.emit_to("main", "session_db_changed", payload.clone()).is_err() {
         let _ = app.emit("session_db_changed", payload);
     }
+}
 
+#[tauri::command]
+pub async fn update_node_position(
+    app: tauri::AppHandle,
+    store: tauri::State<'_, SessionStore>,
+    buffer: tauri::State<'_, std::sync::Arc<TopologyMutationBuffer>>,
+    request: UpdateNodePositionRequest,
+) -> Result<UpdateNodePositionResponse, String> {
+    let pool = store.pool(&app).await?;
+    let record = apply_position_update(&pool, buffer.inner(), &request).await?;
+    emit_session_db_changed(&app, &record);
     Ok(UpdateNodePositionResponse { mutation_id: record.mutation_id })
 }
 

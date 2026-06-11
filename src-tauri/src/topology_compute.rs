@@ -2813,6 +2813,23 @@ mod tests {
     }
 
     #[test]
+    fn seg_intersects_rect_detects_known_cases() {
+        // 几何断言依赖该 helper 正确性：正反例独立验证（不靠布局集成测试间接覆盖）。
+        let center = (100.0, 100.0);
+        // 穿过矩形中心的对角线段 → true
+        assert!(seg_intersects_rect((0.0, 0.0), (200.0, 200.0), center, 50.0, 25.0, 0.0));
+        // 完全在矩形上方掠过的水平线段 → false
+        assert!(!seg_intersects_rect((0.0, 10.0), (200.0, 10.0), center, 50.0, 25.0, 0.0));
+        // 水平线段（delta_y≈0）y 在 slab 内且 x 覆盖矩形 → true
+        assert!(seg_intersects_rect((0.0, 100.0), (200.0, 100.0), center, 50.0, 25.0, 0.0));
+        // 垂直线段 x 在矩形外 → false；margin 膨胀后进入 → true
+        assert!(!seg_intersects_rect((160.0, 0.0), (160.0, 200.0), center, 50.0, 25.0, 0.0));
+        assert!(seg_intersects_rect((160.0, 0.0), (160.0, 200.0), center, 50.0, 25.0, 12.0));
+        // 端点恰落在矩形边缘（切边）→ true（t_min <= t_max 边界）
+        assert!(seg_intersects_rect((150.0, 100.0), (300.0, 100.0), center, 50.0, 25.0, 0.0));
+    }
+
+    #[test]
     fn dual_plane_stacked_lane_edges_clear_inner_nodes() {
         // R8/AE3：同 lane 堆叠时，外侧 ES 的 primary 与 backup 两条中心连线段
         // 均不得穿过内侧 ES 节点盒（126×56，margin 8）。

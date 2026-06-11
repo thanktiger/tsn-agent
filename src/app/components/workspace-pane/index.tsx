@@ -11,7 +11,6 @@ import {
   type Node,
   type NodeChange,
   type NodeProps,
-  type ReactFlowInstance,
 } from "@xyflow/react";
 import {
   countEndSystems,
@@ -58,9 +57,20 @@ export interface CommitNodePositionArgs {
   expectedMutationId: number;
 }
 
+export interface CommitNodePositionResult {
+  mutationId: number;
+}
+
 /** R5：默认写通道 = update_node_position Tauri command（测试可注入替身）。 */
-async function invokeCommitNodePosition(args: CommitNodePositionArgs): Promise<void> {
-  await invoke("update_node_position", { request: args });
+async function invokeCommitNodePosition(args: CommitNodePositionArgs): Promise<CommitNodePositionResult> {
+  return await invoke<CommitNodePositionResult>("update_node_position", { request: args });
+}
+
+interface PendingPosition {
+  x: number;
+  y: number;
+  /** commit 成功返回的 mutationId；其后观测到更新 mutation 时释放 overlay（接受 DB 权威，防 agent 覆写后永久钉死）。 */
+  committedMutationId?: number;
 }
 
 export interface WorkspacePaneProps {
@@ -76,7 +86,7 @@ export interface WorkspacePaneProps {
   onLinkSelect: (event: unknown, edge: Edge) => void;
   /** 写入失败/陈旧时的回正：重拉快照覆盖本地（R10/R11）。 */
   onRefreshTopology: () => void;
-  commitNodePosition?: (args: CommitNodePositionArgs) => Promise<void>;
+  commitNodePosition?: (args: CommitNodePositionArgs) => Promise<CommitNodePositionResult>;
 }
 
 export function WorkspacePane({
@@ -102,25 +112,59 @@ export function WorkspacePane({
   // —— 拖动状态（R5/R7/R10/R11）——
   const [flowNodes, setFlowNodes] = useState<Node[]>([]);
   // pending 坐标 overlay：dragStop 起覆盖到达快照中该节点的位置，
-  // 快照坐标与 overlay 一致（写入确认）或 NACK 回正时清除。
-  const [pendingPositions, setPendingPositions] = useState<Map<string, { x: number; y: number }>>(new Map());
+  // 快照坐标与 overlay 一致（写入确认）/出现更新 mutation/NACK 回正时清除。
+  // ref 为权威（回调同步读写，无闭包过期）；state 仅供渲染（详情面板）。
+  const pendingRef = useRef<Map<string, PendingPosition>>(new Map());
+  const [pendingPositions, setPendingPositions] = useState<ReadonlyMap<string, PendingPosition>>(new Map());
   const draggingRef = useRef(false);
   const dragStartMutationIdRef = useRef(0);
+  const dragSessionRef = useRef<string | undefined>(undefined);
   const bufferedNodesRef = useRef<Node[] | undefined>(undefined);
+  // 本地 mutationId 基准 = max(prop, 本组件 commit 响应)：事件丢失时后续拖动不被连环误判 stale。
+  const lastMutationIdRef = useRef(0);
+  const currentSessionIdRef = useRef<string | undefined>(undefined);
+  const resetSessionRef = useRef<string | undefined>(undefined);
   const [saveFailed, setSaveFailed] = useState(false);
   const saveFailedTimerRef = useRef<number | undefined>(undefined);
-  const flowInstanceRef = useRef<ReactFlowInstance | null>(null);
   const fittedSessionRef = useRef<string | undefined>(undefined);
 
+  // 拖动回调身份须稳定（拖动中回调换引用可能丢 dragStop）→ 经 ref 读最新值。
+  useEffect(() => {
+    currentSessionIdRef.current = topologySnapshot?.sessionId;
+  });
+  useEffect(() => {
+    lastMutationIdRef.current = Math.max(lastMutationIdRef.current, lastMutationId);
+  }, [lastMutationId]);
+
+  const mutatePending = useCallback((mutator: (next: Map<string, PendingPosition>) => void) => {
+    const next = new Map(pendingRef.current);
+    mutator(next);
+    pendingRef.current = next;
+    setPendingPositions(next);
+  }, []);
+
+  // session 切换：overlay/拖动/缓存/基准全部重置——overlay 按 imac 键控，
+  // 不重置会污染另一 session 同 imac 节点；拖动中切换时 dragStop 不再触发，
+  // draggingRef 也在此回正，防快照永久滞留缓存。
+  useEffect(() => {
+    const sessionId = topologySnapshot?.sessionId;
+    if (!sessionId || sessionId === resetSessionRef.current) {
+      return;
+    }
+    resetSessionRef.current = sessionId;
+    pendingRef.current = new Map();
+    setPendingPositions(new Map());
+    draggingRef.current = false;
+    bufferedNodesRef.current = undefined;
+    lastMutationIdRef.current = lastMutationId;
+  }, [topologySnapshot?.sessionId, lastMutationId]);
+
   const applySnapshotNodes = useCallback(
-    (nodes: Node[], overlay: Map<string, { x: number; y: number }>) => {
+    (nodes: Node[], overlay: ReadonlyMap<string, PendingPosition>) => {
       const next = nodes.map((node) => {
         const pending = overlay.get(node.id);
-        if (!pending) {
+        if (!pending || (node.position.x === pending.x && node.position.y === pending.y)) {
           return node;
-        }
-        if (node.position.x === pending.x && node.position.y === pending.y) {
-          return node; // 写入已确认；overlay 在下方 effect 中清除。
         }
         return { ...node, position: { x: pending.x, y: pending.y } };
       });
@@ -129,50 +173,50 @@ export function WorkspacePane({
     [],
   );
 
+  // overlay 释放：写入确认（快照坐标一致），或已提交后出现更新 mutation
+  // （如 agent 覆写同节点）→ 接受 DB 权威，防止 overlay 永久钉死旧坐标。
+  const releasePendingAgainst = useCallback(
+    (nodes: Node[]) => {
+      if (pendingRef.current.size === 0) {
+        return;
+      }
+      const released: string[] = [];
+      for (const [id, pending] of pendingRef.current) {
+        const row = nodes.find((node) => node.id === id);
+        if (!row) {
+          continue;
+        }
+        const confirmed = row.position.x === pending.x && row.position.y === pending.y;
+        const superseded = pending.committedMutationId !== undefined
+          && lastMutationIdRef.current > pending.committedMutationId;
+        if (confirmed || superseded) {
+          released.push(id);
+        }
+      }
+      if (released.length > 0) {
+        mutatePending((next) => {
+          for (const id of released) {
+            next.delete(id);
+          }
+        });
+      }
+    },
+    [mutatePending],
+  );
+
   // 快照 → 本地 nodes：拖动中缓存，拖毕应用；overlay 覆盖未确认坐标（R7 全窗口）。
+  // 释放与应用合并为单一 effect（拆分时两个 effect 会经 pendingPositions 相互追逐）；
+  // 依赖 pendingPositions 是为 commit 响应迟于快照到达时重评估释放——
+  // 释放是单 effect 内批量完成的，最多多收敛一轮，不会循环。
   useEffect(() => {
     const nodes = flowTopology?.nodes ?? [];
     if (draggingRef.current) {
       bufferedNodesRef.current = nodes;
       return;
     }
-    applySnapshotNodes(nodes, pendingPositions);
-  }, [flowTopology, pendingPositions, applySnapshotNodes]);
-
-  // 写入确认：快照坐标与 overlay 一致时清除该 overlay 条目。
-  useEffect(() => {
-    if (!flowTopology || pendingPositions.size === 0) {
-      return;
-    }
-    const confirmed: string[] = [];
-    for (const [id, pending] of pendingPositions) {
-      const row = flowTopology.nodes.find((node) => node.id === id);
-      if (row && row.position.x === pending.x && row.position.y === pending.y) {
-        confirmed.push(id);
-      }
-    }
-    if (confirmed.length > 0) {
-      setPendingPositions((prev) => {
-        const next = new Map(prev);
-        for (const id of confirmed) {
-          next.delete(id);
-        }
-        return next;
-      });
-    }
-  }, [flowTopology, pendingPositions]);
-
-  // R12：每个 session 首次出现拓扑时 fitView 一次；其后快照刷新与拖动不重置视口。
-  useEffect(() => {
-    const sessionId = topologySnapshot?.sessionId;
-    if (!sessionId || !flowTopology || !flowInstanceRef.current) {
-      return;
-    }
-    if (fittedSessionRef.current !== sessionId) {
-      fittedSessionRef.current = sessionId;
-      void flowInstanceRef.current.fitView();
-    }
-  }, [topologySnapshot?.sessionId, flowTopology]);
+    releasePendingAgainst(nodes);
+    applySnapshotNodes(nodes, pendingRef.current);
+  }, [flowTopology, pendingPositions, releasePendingAgainst, applySnapshotNodes]);
 
   useEffect(() => () => {
     if (saveFailedTimerRef.current !== undefined) {
@@ -194,50 +238,60 @@ export function WorkspacePane({
 
   const handleNodeDragStart = useCallback(() => {
     draggingRef.current = true;
-    dragStartMutationIdRef.current = lastMutationId;
-  }, [lastMutationId]);
+    dragStartMutationIdRef.current = lastMutationIdRef.current;
+    dragSessionRef.current = currentSessionIdRef.current;
+  }, []);
 
   const handleNodeDragStop = useCallback(
     (event: unknown, node: Node) => {
       draggingRef.current = false;
+      const sessionId = currentSessionIdRef.current;
+      // 拖动期间发生 session 切换：丢弃本次拖动（不写 overlay、不提交到新 session）。
+      if (!sessionId || sessionId !== dragSessionRef.current) {
+        bufferedNodesRef.current = undefined;
+        return;
+      }
       const x = Math.round(node.position.x);
       const y = Math.round(node.position.y);
-      const sessionId = topologySnapshot?.sessionId;
-
-      const overlay = new Map(pendingPositions);
-      overlay.set(node.id, { x, y });
-      setPendingPositions(overlay);
+      mutatePending((next) => next.set(node.id, { x, y }));
 
       // 拖毕视同选中该节点（R9），详情面板坐标经 overlay 即时显示新值。
       onNodeSelect(event, node);
 
       // 拖动中缓存的快照现在应用（位置仍被 overlay 保护）。
       if (bufferedNodesRef.current) {
-        applySnapshotNodes(bufferedNodesRef.current, overlay);
+        applySnapshotNodes(bufferedNodesRef.current, pendingRef.current);
         bufferedNodesRef.current = undefined;
       }
 
-      if (!sessionId) {
-        return;
-      }
       void commitNodePosition({
         sessionId,
         imac: Number(node.id),
         x,
         y,
         expectedMutationId: dragStartMutationIdRef.current,
-      }).catch(() => {
-        // R10/R11：失败或陈旧 → 清 overlay、重拉快照回正、可见提示。
-        setPendingPositions((prev) => {
-          const next = new Map(prev);
-          next.delete(node.id);
-          return next;
+      })
+        .then((result) => {
+          if (currentSessionIdRef.current !== sessionId) {
+            return; // 迟到响应：session 已切换，状态已重置。
+          }
+          lastMutationIdRef.current = Math.max(lastMutationIdRef.current, result.mutationId);
+          const entry = pendingRef.current.get(node.id);
+          if (entry && entry.x === x && entry.y === y) {
+            mutatePending((next) => next.set(node.id, { x, y, committedMutationId: result.mutationId }));
+          }
+        })
+        .catch(() => {
+          if (currentSessionIdRef.current !== sessionId) {
+            return;
+          }
+          // R10/R11：失败或陈旧 → 清 overlay、重拉快照回正、可见提示。
+          mutatePending((next) => next.delete(node.id));
+          showSaveFailed();
+          onRefreshTopology();
         });
-        showSaveFailed();
-        onRefreshTopology();
-      });
     },
-    [topologySnapshot?.sessionId, pendingPositions, onNodeSelect, applySnapshotNodes, commitNodePosition, showSaveFailed, onRefreshTopology],
+    [mutatePending, onNodeSelect, applySnapshotNodes, commitNodePosition, showSaveFailed, onRefreshTopology],
   );
 
   const hasTopology = !isEmptyTopologySnapshot(topologySnapshot);
@@ -289,7 +343,9 @@ export function WorkspacePane({
               selectionOnDrag={false}
               multiSelectionKeyCode={null}
               onInit={(instance) => {
-                flowInstanceRef.current = instance;
+                // R12：每 session 首次挂载 fitView 一次。session 切换时快照必经
+                // undefined 过渡（hook 同步清空）→ ReactFlow 重挂载 → onInit 重触发，
+                // 单路径即可覆盖；fittedSessionRef 兜 StrictMode 双触发。
                 const sessionId = topologySnapshot?.sessionId;
                 if (sessionId && fittedSessionRef.current !== sessionId) {
                   fittedSessionRef.current = sessionId;

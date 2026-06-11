@@ -1,10 +1,12 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(async () => undefined),
 }));
+
+const flowMocks = vi.hoisted(() => ({ fitView: vi.fn() }));
 
 vi.mock("@xyflow/react", () => ({
   Background: () => null,
@@ -16,47 +18,76 @@ vi.mock("@xyflow/react", () => ({
   useInternalNode: () => undefined,
   applyNodeChanges: (_changes: unknown[], nodes: Array<{ id: string }>) => nodes,
   Position: { Left: "left", Right: "right", Top: "top", Bottom: "bottom" },
-  ReactFlow: ({
-    nodes,
-    edges,
-    onNodeClick,
-    onEdgeClick,
-    onNodeDragStart,
-    onNodeDragStop,
-  }: {
-    nodes: Array<{ id: string }>;
+  ReactFlow: (props: {
+    nodes: Array<{ id: string; position: { x: number; y: number } }>;
     edges: Array<{ id: string }>;
+    nodesDraggable?: boolean;
+    selectionOnDrag?: boolean;
+    multiSelectionKeyCode?: string | null;
+    fitView?: boolean;
+    onInit?: (instance: { fitView: () => void }) => void;
     onNodeClick?: (event: unknown, node: { id: string }) => void;
     onEdgeClick?: (event: unknown, edge: { id: string }) => void;
     onNodeDragStart?: (event: unknown, node: unknown) => void;
     onNodeDragStop?: (event: unknown, node: unknown) => void;
-  }) => (
-    <div aria-label="拓扑画布">
-      {nodes.length} nodes / {edges.length} edges
-      {nodes.map((node) => (
-        <button key={node.id} type="button" onClick={() => onNodeClick?.({}, node)}>
-          选择节点 {node.id}
-        </button>
-      ))}
-      {nodes.map((node) => (
-        <button
-          key={`drag-${node.id}`}
-          type="button"
-          onClick={() => {
-            onNodeDragStart?.({}, node);
-            onNodeDragStop?.({}, { ...node, position: { x: 480.4, y: 95.6 } });
-          }}
-        >
-          拖毕节点 {node.id}
-        </button>
-      ))}
-      {edges.map((edge) => (
-        <button key={edge.id} type="button" onClick={() => onEdgeClick?.({}, edge)}>
-          选择链路 {edge.id}
-        </button>
-      ))}
-    </div>
-  ),
+  }) => {
+    const { nodes, edges, onNodeClick, onEdgeClick, onNodeDragStart, onNodeDragStop } = props;
+    // 真实 ReactFlow 仅在挂载后调 onInit 一次；mock 每次渲染都调——
+    // 让「每 session 仅 fit 一次」的守卫断言更严格。
+    props.onInit?.({ fitView: flowMocks.fitView });
+    return (
+      <div
+        data-testid="rf-mock"
+        data-nodes-draggable={String(props.nodesDraggable)}
+        data-selection-on-drag={String(props.selectionOnDrag)}
+        data-multi-selection-key={String(props.multiSelectionKeyCode)}
+        data-has-fitview-prop={String(props.fitView !== undefined)}
+      >
+        {nodes.length} nodes / {edges.length} edges
+        {nodes.map((node) => (
+          <span key={`pos-${node.id}`} data-testid={`node-pos-${node.id}`}>
+            {node.position.x},{node.position.y}
+          </span>
+        ))}
+        {nodes.map((node) => (
+          <button key={node.id} type="button" onClick={() => onNodeClick?.({}, node)}>
+            选择节点 {node.id}
+          </button>
+        ))}
+        {nodes.map((node) => (
+          <button
+            key={`drag-${node.id}`}
+            type="button"
+            onClick={() => {
+              onNodeDragStart?.({}, node);
+              onNodeDragStop?.({}, { ...node, position: { x: 480.4, y: 95.6 } });
+            }}
+          >
+            拖毕节点 {node.id}
+          </button>
+        ))}
+        {nodes.map((node) => (
+          <button key={`start-${node.id}`} type="button" onClick={() => onNodeDragStart?.({}, node)}>
+            拖起节点 {node.id}
+          </button>
+        ))}
+        {nodes.map((node) => (
+          <button
+            key={`stop-${node.id}`}
+            type="button"
+            onClick={() => onNodeDragStop?.({}, { ...node, position: { x: 480.4, y: 95.6 } })}
+          >
+            放下节点 {node.id}
+          </button>
+        ))}
+        {edges.map((edge) => (
+          <button key={edge.id} type="button" onClick={() => onEdgeClick?.({}, edge)}>
+            选择链路 {edge.id}
+          </button>
+        ))}
+      </div>
+    );
+  },
 }));
 
 import {
@@ -94,7 +125,7 @@ function baseProps(overrides: Partial<WorkspacePaneProps> = {}): WorkspacePanePr
     onNodeSelect: vi.fn(),
     onLinkSelect: vi.fn(),
     onRefreshTopology: vi.fn(),
-    commitNodePosition: vi.fn(async () => undefined),
+    commitNodePosition: vi.fn(async () => ({ mutationId: 1 })),
     ...overrides,
   };
 }
@@ -147,7 +178,7 @@ describe("WorkspacePane", () => {
 describe("WorkspacePane 拖动持久化（U4）", () => {
   it("Covers AE2：拖毕以整数坐标 + 拖动起始 mutationId 调用写入，并选中该节点", async () => {
     const user = userEvent.setup();
-    const commitNodePosition = vi.fn(async () => undefined);
+    const commitNodePosition = vi.fn(async () => ({ mutationId: 8 }));
     const onNodeSelect = vi.fn();
     render(
       <WorkspacePane
@@ -193,8 +224,8 @@ describe("WorkspacePane 拖动持久化（U4）", () => {
 
   it("R9：拖毕后详情面板坐标经 overlay 即时显示新值（写入确认前）", async () => {
     const user = userEvent.setup();
-    // commit 永不 resolve 快照——overlay 应当独立支撑显示。
-    const commitNodePosition = vi.fn(async () => undefined);
+    // 快照不刷新——overlay 应当独立支撑显示。
+    const commitNodePosition = vi.fn(async () => ({ mutationId: 2 }));
     render(
       <WorkspacePane
         {...baseProps({
@@ -207,6 +238,119 @@ describe("WorkspacePane 拖动持久化（U4）", () => {
     await user.click(screen.getByRole("button", { name: "拖毕节点 2" }));
     const panel = screen.getByRole("tabpanel", { name: "节点详情" });
     await waitFor(() => expect(within(panel).getByText("480, 96")).toBeInTheDocument());
+  });
+
+  it("R7：拖动中到达的快照先缓存，拖毕后应用且拖动节点被 overlay 保护", async () => {
+    const user = userEvent.setup();
+    const commitNodePosition = vi.fn(async () => ({ mutationId: 3 }));
+    const { rerender } = render(
+      <WorkspacePane {...baseProps({ topologySnapshot: sampleSnapshot(), commitNodePosition })} />,
+    );
+    await user.click(screen.getByRole("button", { name: "拖起节点 2" }));
+
+    // 拖动中到达新快照：本地位置不被立即覆盖
+    const moved = sampleSnapshot();
+    moved.nodes = [
+      { ...moved.nodes[0], x: 50, y: 60 },
+      { ...moved.nodes[1], x: 999, y: 999 },
+    ];
+    rerender(<WorkspacePane {...baseProps({ topologySnapshot: moved, commitNodePosition })} />);
+    expect(screen.getByTestId("node-pos-2")).toHaveTextContent("160,0");
+    expect(screen.getByTestId("node-pos-1")).toHaveTextContent("0,0");
+
+    // 拖毕：缓存快照应用（节点 1 用新坐标），拖动节点保持拖后坐标
+    await user.click(screen.getByRole("button", { name: "放下节点 2" }));
+    expect(screen.getByTestId("node-pos-1")).toHaveTextContent("50,60");
+    expect(screen.getByTestId("node-pos-2")).toHaveTextContent("480,96");
+  });
+
+  it("覆写释放：写入确认后出现更新 mutation（agent 移动同节点），overlay 不钉死旧坐标", async () => {
+    const user = userEvent.setup();
+    const commitNodePosition = vi.fn(async () => ({ mutationId: 5 }));
+    const { rerender } = render(
+      <WorkspacePane
+        {...baseProps({ topologySnapshot: sampleSnapshot(), lastMutationId: 4, commitNodePosition })}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: "拖毕节点 2" }));
+    await waitFor(() => expect(commitNodePosition).toHaveBeenCalled());
+
+    // agent 覆写节点 2 → mutationId 推进到 6，快照坐标 (300, 200)
+    const overwritten = sampleSnapshot();
+    overwritten.nodes = [overwritten.nodes[0], { ...overwritten.nodes[1], x: 300, y: 200 }];
+    rerender(
+      <WorkspacePane
+        {...baseProps({ topologySnapshot: overwritten, lastMutationId: 6, commitNodePosition })}
+      />,
+    );
+    await waitFor(() => expect(screen.getByTestId("node-pos-2")).toHaveTextContent("300,200"));
+  });
+
+  it("session 切换：overlay/拖动状态全部重置，不污染新 session 同 imac 节点", async () => {
+    const user = userEvent.setup();
+    // commit 永不 resolve：overlay 停留在未确认状态
+    const commitNodePosition = vi.fn(() => new Promise<{ mutationId: number }>(() => {}));
+    const { rerender } = render(
+      <WorkspacePane {...baseProps({ topologySnapshot: sampleSnapshot(), commitNodePosition })} />,
+    );
+    await user.click(screen.getByRole("button", { name: "拖毕节点 2" }));
+    expect(screen.getByTestId("node-pos-2")).toHaveTextContent("480,96");
+
+    // 切换 session（经 undefined 过渡），新 session 同 imac 节点在 (10, 20)
+    rerender(<WorkspacePane {...baseProps({ commitNodePosition })} />);
+    const s2 = sampleSnapshot();
+    s2.sessionId = "s2";
+    s2.nodes = [s2.nodes[0], { ...s2.nodes[1], x: 10, y: 20 }];
+    rerender(<WorkspacePane {...baseProps({ topologySnapshot: s2, commitNodePosition })} />);
+    expect(screen.getByTestId("node-pos-2")).toHaveTextContent("10,20");
+  });
+
+  it("连续快速拖动两个节点：两条 overlay 同时存活（无闭包覆盖丢失）", () => {
+    const commitNodePosition = vi.fn(() => new Promise<{ mutationId: number }>(() => {}));
+    const { rerender } = render(
+      <WorkspacePane {...baseProps({ topologySnapshot: sampleSnapshot(), commitNodePosition })} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "拖毕节点 1" }));
+    fireEvent.click(screen.getByRole("button", { name: "拖毕节点 2" }));
+
+    // 新快照到达（原坐标）：两个节点都保持拖动后坐标
+    rerender(
+      <WorkspacePane {...baseProps({ topologySnapshot: sampleSnapshot(), commitNodePosition })} />,
+    );
+    expect(screen.getByTestId("node-pos-1")).toHaveTextContent("480,96");
+    expect(screen.getByTestId("node-pos-2")).toHaveTextContent("480,96");
+  });
+});
+
+describe("WorkspacePane 画布配置与视口（R9/R12）", () => {
+  it("R9：节点可拖动、禁用框选与多选（ReactFlow 配置）", () => {
+    render(<WorkspacePane {...baseProps({ topologySnapshot: sampleSnapshot() })} />);
+    const canvas = screen.getByTestId("rf-mock");
+    expect(canvas).toHaveAttribute("data-nodes-draggable", "true");
+    expect(canvas).toHaveAttribute("data-selection-on-drag", "false");
+    expect(canvas).toHaveAttribute("data-multi-selection-key", "null");
+  });
+
+  it("R12：fitView 每 session 仅一次（onInit 单路径，无常驻 fitView prop）", () => {
+    flowMocks.fitView.mockClear();
+    const { rerender } = render(
+      <WorkspacePane {...baseProps({ topologySnapshot: sampleSnapshot() })} />,
+    );
+    expect(screen.getByTestId("rf-mock")).toHaveAttribute("data-has-fitview-prop", "false");
+    expect(flowMocks.fitView).toHaveBeenCalledTimes(1);
+
+    // 同 session 快照刷新（mock 每次渲染都触发 onInit）：不再 fit
+    const refreshed = sampleSnapshot();
+    refreshed.nodes = [refreshed.nodes[0], { ...refreshed.nodes[1], x: 300, y: 300 }];
+    rerender(<WorkspacePane {...baseProps({ topologySnapshot: refreshed })} />);
+    expect(flowMocks.fitView).toHaveBeenCalledTimes(1);
+
+    // session 切换（经 undefined 过渡 → 重挂载）：再 fit 一次
+    rerender(<WorkspacePane {...baseProps()} />);
+    const s2 = sampleSnapshot();
+    s2.sessionId = "s2";
+    rerender(<WorkspacePane {...baseProps({ topologySnapshot: s2 })} />);
+    expect(flowMocks.fitView).toHaveBeenCalledTimes(2);
   });
 });
 
