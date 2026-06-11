@@ -46,6 +46,11 @@ export async function runClaude(userPrompt, options = {}, queryFn = query) {
   const capturedStageResults = [];
   const stageResultPath = resolvedOptions.stageResultPath ?? await createStageResultPath();
   const skillOutputDir = resolvedOptions.skillOutputDir ?? await createSkillOutputDir(stageResultPath);
+  // 同源（R2）：skill 指引读取根优先取 Tauri 决策的有效根（payload skillRoot，
+  // release 下指向 app-data 播种副本），缺省回退 cwd 下仓库/资源路径。
+  const skillRoot = typeof resolvedOptions.skillRoot === "string" && resolvedOptions.skillRoot.length > 0
+    ? resolvedOptions.skillRoot
+    : join(cwd, ".claude", "skills");
   const topologyMcpServerPath = resolvedOptions.topologyMcpServerPath ?? resolveTopologyMcpServerPath(cwd);
   // Plan v3 U4b + Spike B：MCP child env 必须显式声明（Node child_process.spawn
   // 显式 env 字段语义是 REPLACE 不是 merge）；CLAUDECODE 必须不带过去防嵌套
@@ -86,7 +91,7 @@ export async function runClaude(userPrompt, options = {}, queryFn = query) {
       }
     : undefined;
   const stageRunnerInputPath = await writeStageRunnerInputFile(stageResultPath, resolvedOptions.stageRunnerInput);
-  const { systemPrompt, skillReadWarning } = await buildSystemPromptForStage(resolvedOptions.stageRunnerInput, cwd);
+  const { systemPrompt, skillReadWarning } = await buildSystemPromptForStage(resolvedOptions.stageRunnerInput, skillRoot);
   const finalPrompt = buildPrompt(
     userPrompt,
     resolvedOptions.conversationContext,
@@ -128,6 +133,7 @@ export async function runClaude(userPrompt, options = {}, queryFn = query) {
     appSessionId: resolvedOptions.appSessionId,
     runId: resolvedOptions.runId,
     cwd,
+    skillRoot,
     userPrompt,
     prompt: finalPrompt,
     conversationContext: resolvedOptions.conversationContext,
@@ -367,8 +373,8 @@ const SYSTEM_PROMPT_SKELETON = "你是 TSN Agent 的规划助手。你面向懂�
 // SKILL.md 正文每次运行注入骨架之后，用固定 sentinel 分隔，便于切分骨架段与注入段。
 const SKILL_GUIDANCE_SENTINEL = "<<<SKILL_GUIDANCE>>>";
 
-async function buildSystemPromptForStage(_stageRunnerInput, cwd) {
-  const skillPath = join(cwd, ".claude", "skills", "tsn-topology", "SKILL.md");
+async function buildSystemPromptForStage(_stageRunnerInput, skillRoot) {
+  const skillPath = join(skillRoot, "tsn-topology", "SKILL.md");
 
   try {
     const guidance = await readFile(skillPath, "utf8");
@@ -505,6 +511,8 @@ async function createAgentRunAuditLog(input) {
         conversationContext: input.conversationContext,
       }),
       cwd: input.cwd,
+      // skill 指引实际读取根（真机排查「agent 用的指引对不对」直接看此字段）。
+      skillRoot: input.skillRoot ?? null,
       prompt: redactSecrets(input.prompt),
       userPrompt: redactSecrets(input.userPrompt),
       conversationContext: typeof input.conversationContext === "string" ? redactSecrets(input.conversationContext) : null,
@@ -1467,6 +1475,7 @@ export async function runWorker(rawInput) {
     appSessionId: typeof input.appSessionId === "string" ? input.appSessionId : undefined,
     runId: typeof input.runId === "string" ? input.runId : undefined,
     auditDir: typeof input.auditDir === "string" ? input.auditDir : undefined,
+    skillRoot: typeof input.skillRoot === "string" ? input.skillRoot : undefined,
     onEvent: (event) => {
       if (typeof input.runId !== "string" || !input.runId) {
         return;

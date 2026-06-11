@@ -162,6 +162,54 @@ describe("claude-agent-worker", () => {
     expect(capturedSystemPrompt).toContain("工程状态只接受结构化校验结果");
   });
 
+  it("prefers the injected skillRoot over the cwd fallback when reading SKILL.md", async () => {
+    // R2 同源：Tauri 决策的有效根（release 下指向 app-data 播种副本）优先于 cwd。
+    const projectDir = await mkdtemp(join(tmpdir(), "tsn-agent-skillroot-cwd-"));
+    const cwdSkillDir = join(projectDir, ".claude", "skills", "tsn-topology");
+    await mkdir(cwdSkillDir, { recursive: true });
+    await writeFile(join(cwdSkillDir, "SKILL.md"), "[CWD-COPY] 不应被读取", "utf8");
+
+    const rootDir = await mkdtemp(join(tmpdir(), "tsn-agent-skillroot-injected-"));
+    const injectedSkillDir = join(rootDir, "tsn-topology");
+    await mkdir(injectedSkillDir, { recursive: true });
+    await writeFile(join(injectedSkillDir, "SKILL.md"), "[APPDATA-COPY] 注入根正文", "utf8");
+
+    let capturedSystemPrompt;
+    const query = async function* (input) {
+      capturedSystemPrompt = input.options.systemPrompt;
+      yield { type: "result", structured_output: { assistantText: "已注入" } };
+    };
+
+    await runClaude("我需要4个交换机", { cwd: projectDir, skillRoot: rootDir }, query);
+
+    expect(capturedSystemPrompt).toContain("[APPDATA-COPY] 注入根正文");
+    expect(capturedSystemPrompt).not.toContain("[CWD-COPY]");
+  });
+
+  it("fails open to the skeleton when the injected skillRoot does not exist", async () => {
+    const projectDir = await mkdtemp(join(tmpdir(), "tsn-agent-skillroot-missing-"));
+    const cwdSkillDir = join(projectDir, ".claude", "skills", "tsn-topology");
+    await mkdir(cwdSkillDir, { recursive: true });
+    await writeFile(join(cwdSkillDir, "SKILL.md"), "[CWD-COPY] 指定根失效时也不回退 cwd", "utf8");
+
+    let capturedSystemPrompt;
+    const query = async function* (input) {
+      capturedSystemPrompt = input.options.systemPrompt;
+      yield { type: "result", structured_output: { assistantText: "降级" } };
+    };
+
+    await runClaude(
+      "我需要4个交换机",
+      { cwd: projectDir, skillRoot: join(tmpdir(), "tsn-agent-skillroot-does-not-exist") },
+      query,
+    );
+
+    // 指定根读不到 → 仅骨架（fail-open），不静默换源回退 cwd 副本。
+    expect(capturedSystemPrompt).not.toContain("<<<SKILL_GUIDANCE>>>");
+    expect(capturedSystemPrompt).not.toContain("[CWD-COPY]");
+    expect(capturedSystemPrompt).toContain("工程状态只接受结构化校验结果");
+  });
+
   it("does not synthesize a topology stage result from assistant-authored topology JSON without an MCP tool call", () => {
     // 机制层 AE3：agent 在 assistantText 里输出整份拓扑 JSON、不调任何 MCP 工具，
     // trusted-signal 提取器只认 MCP tool_result 的 mutationId → 返回空。
