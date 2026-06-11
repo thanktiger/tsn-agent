@@ -59,7 +59,7 @@ export function createTopologyToolRegistry(): TopologyMcpToolDefinition[] {
       name: "topology.inspect",
       allowedToolName: "mcp__tsn_topology__topology_inspect",
       title: "Inspect topology",
-      description: "Return the session's full persisted topology rows: nodes (imac/syncName/nodeType/syncType/x/y/insertOrder) and links (linkSeq/name/srcImac/dstImac/stylesJson). No parameters. Call this first to locate existing imac/linkSeq values before building apply_operations batches. UI 显示名 = 类型前缀 + syncName（SW-1 即 syncName=\"1\" 的交换机行，ES-4 即 syncName=\"4\" 的端系统行）；用户引用 SW-N/ES-N 时按 syncName 精确匹配，不要按序数折算。",
+      description: "Return the session's full persisted topology rows: nodes (imac/syncName/name/nodeType/syncType/x/y/insertOrder) and links (linkSeq/name/srcImac/dstImac/stylesJson). No parameters. Call this first to locate existing imac/linkSeq values before building apply_operations batches. UI 显示名优先节点 name 列（与对话命名一致），name 缺失才回退「类型前缀-syncName」派生；用户引用 SW-N/ES-N 时优先按 name 匹配。links 的 stylesJson 是 JSON 串：plane（A/B）控制画布链路配色（A=蓝、B=红，错值会误导用户）、role（access/backbone）为链路角色、leftLabel/rightLabel 作为端口号渲染在连线两端。",
       inputSchema: {},
       handler: async (args) => callSidecarTool("/db/topology/inspect", args, {}),
     },
@@ -312,7 +312,7 @@ export function applyOperationsInputSchema(): z.ZodRawShape {
     name: z.string().optional(),
     srcImac: z.number().int(),
     dstImac: z.number().int(),
-    stylesJson: z.string().describe("复制 inspect 返回的既有链路 stylesJson 作为格式参照（leftLabel/rightLabel/speed）"),
+    stylesJson: z.string().describe("复制 inspect 返回的既有链路 stylesJson 作为格式参照（leftLabel/rightLabel/speed；模板链路可能另含 plane/role）。plane 表示平面归属（A/B），新链路须按两端节点实际平面填写或直接省略该键——抄错平面会让画布配色误导用户。leftLabel/rightLabel 会作为端口号渲染在连线两端（源端/目标端），新链路应填两端节点实际端口（新生成拓扑为 P0 起编）或省略，不要照抄参照链路的值"),
   }).strict();
   const linkDeleteSchema = z.object({
     op: z.literal("link_delete"),

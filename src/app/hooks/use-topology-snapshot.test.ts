@@ -136,3 +136,39 @@ describe("useTopologySnapshot", () => {
     expect(invokeMock).not.toHaveBeenCalled();
   });
 });
+
+describe("useTopologySnapshot lastMutationId（R11 陈旧检测基准）", () => {
+  beforeEach(() => {
+    invokeMock.mockReset();
+    Object.defineProperty(window, "__TAURI_INTERNALS__", {
+      configurable: true,
+      value: {},
+    });
+  });
+
+  afterEach(() => {
+    Reflect.deleteProperty(window, "__TAURI_INTERNALS__");
+  });
+
+  it("跟踪 catch-up 返回的最大 mutationId", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "query_topology") {
+        return snapshotFor("s1", 1);
+      }
+      if (command === "get_topology_mutations_since") {
+        return {
+          mutations: [
+            { sessionId: "s1", domain: "topology", mutationId: 4, timestampMs: 1 },
+            { sessionId: "s1", domain: "topology", mutationId: 6, timestampMs: 2 },
+          ],
+          latest: 6,
+          outOfRange: false,
+        };
+      }
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    const { result } = renderHook(() => useTopologySnapshot("s1"));
+    await waitFor(() => expect(result.current.lastMutationId).toBe(6));
+  });
+});

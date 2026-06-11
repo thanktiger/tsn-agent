@@ -17,6 +17,9 @@
   --error-dim: rgba(255, 77, 79, 0.1);
   --info: #1677ff;
   --info-dim: rgba(22, 119, 255, 0.1);
+  /* 双平面链路配色（AFDX 惯例 A 蓝 / B 红）——独立 token，不复用 --info/--error 语义。 */
+  --plane-a: #1d5fa8;
+  --plane-b: #c0392b;
   color: var(--text-primary);
   background: var(--bg-primary);
   font-family:
@@ -353,9 +356,19 @@ textarea:focus-visible {
 
 .workspace-tool-panel {
   display: grid;
+  flex: 1;
   gap: 12px;
   padding: 14px;
   overflow-y: auto;
+  /* WKWebView：flex 子项默认 min-height auto 不收缩，滚动容器会被内容撑破导致底部被裁。 */
+  min-height: 0;
+}
+
+/* WebKit 滚动容器忽略 padding-bottom：占位元素把底部留白计入滚动高度。 */
+.workspace-tool-panel::after {
+  content: "";
+  display: block;
+  height: 2px;
 }
 
 .diagnostics-panel {
@@ -517,6 +530,12 @@ textarea:focus-visible {
 .skill-detail-layout .master-list-item {
   gap: 2px;
   padding: 7px 9px;
+}
+
+/* skill 详情不做内层滚动：嵌套滚动在 WKWebView 下把底部内容（参数合法域）
+   裁在不可见的内层滚动区里——抽屉面板是唯一滚动上下文。 */
+.skill-detail-layout .detail-surface {
+  overflow: visible;
 }
 
 /* skill 详情顶部：描述 + 状态一行。 */
@@ -1579,16 +1598,6 @@ textarea:focus-visible {
   background-size: 60px 60px;
 }
 
-.topology-meta {
-  position: absolute;
-  z-index: 2;
-  top: 10px;
-  right: 14px;
-  color: var(--text-muted);
-  font-size: 10px;
-  pointer-events: none;
-}
-
 .topology-stats {
   position: absolute;
   z-index: 2;
@@ -1642,9 +1651,58 @@ textarea:focus-visible {
   stroke: #a8b0c0;
 }
 
+/* 平面配色按 className 着色，规则置于 .selected 之前——级联顺序保证选中态回到 --accent。 */
+.topology-canvas .react-flow__edge.plane-a .react-flow__edge-path {
+  stroke: var(--plane-a);
+}
+
+.topology-canvas .react-flow__edge.plane-b .react-flow__edge-path {
+  stroke: var(--plane-b);
+}
+
+.topology-canvas .react-flow__edge.plane-neutral .react-flow__edge-path {
+  stroke: #a8b0c0;
+}
+
 .topology-canvas .react-flow__edge.selected .react-flow__edge-path,
 .topology-canvas .react-flow__edge:focus .react-flow__edge-path {
   stroke: var(--accent);
+}
+
+.tsn-port-label {
+  position: absolute;
+  font-size: 10px;
+  line-height: 1.4;
+  color: var(--text-secondary);
+  background: rgba(255, 255, 255, 0.88);
+  border-radius: 3px;
+  padding: 0 3px;
+  pointer-events: none;
+}
+
+/* 选中边的端口标签随边色同步到 accent（标签在 EdgeLabelRenderer portal，
+   边的 .selected 选择器够不到，由组件注入 selected className）。 */
+.tsn-port-label.selected {
+  color: var(--accent);
+}
+
+/* R9：节点可拖动的光标反馈；精确选择器避免波及 Controls 按钮。 */
+.topology-canvas .react-flow__node {
+  cursor: grab;
+}
+
+.topology-canvas .react-flow__node.dragging {
+  cursor: grabbing;
+}
+
+/* R10 回滚提示：复用 transfer-notice.error 配色，画布内底部居中。 */
+.tsn-position-notice {
+  position: absolute;
+  bottom: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 5;
+  margin: 0;
 }
 
 .topology-canvas .react-flow__edge.flow-highlighted .react-flow__edge-path {
@@ -1690,18 +1748,31 @@ textarea:focus-visible {
   column-gap: 8px;
   align-items: center;
   min-width: 96px;
+  /* 须 ≤ Rust 布局间距 ES_PITCH(180) − 留白；改宽时同步 topology_compute.rs 布局常量。 */
   max-width: 126px;
   padding: 8px 10px;
-  border: 1px solid rgba(250, 84, 28, 0.48);
+  border: 1px solid rgba(100, 116, 139, 0.45);
   border-radius: 6px;
   color: var(--text-primary);
   background: rgba(255, 255, 255, 0.96);
   box-shadow: 0 3px 10px rgba(0, 0, 0, 0.08);
 }
 
+/* 节点类型视觉系统：交换机钢蓝、端系统橙、控制器紫——
+   与边的平面配色（A 蓝 --plane-a / B 红 --plane-b）保持区分。 */
 .tsn-node.switch {
   min-width: 118px;
-  border-color: rgba(250, 84, 28, 0.72);
+  border-color: rgba(51, 65, 85, 0.55);
+  background: #f3f6fa;
+}
+
+.tsn-node.endSystem {
+  border-color: rgba(250, 84, 28, 0.55);
+}
+
+.tsn-node.controller {
+  border-color: rgba(124, 58, 237, 0.55);
+  background: #faf7ff;
 }
 
 .tsn-node-type {
@@ -1709,13 +1780,22 @@ textarea:focus-visible {
   grid-area: type;
   align-items: center;
   justify-content: center;
-  width: 26px;
+  min-width: 26px;
   height: 26px;
+  padding: 0 4px;
   border-radius: 5px;
-  color: var(--accent);
+  color: #ffffff;
   font-size: 10px;
   font-weight: 700;
-  background: var(--accent-dim);
+  background: var(--accent);
+}
+
+.tsn-node.switch .tsn-node-type {
+  background: #334155;
+}
+
+.tsn-node.controller .tsn-node-type {
+  background: #7c3aed;
 }
 
 .tsn-node strong {
@@ -1736,11 +1816,16 @@ textarea:focus-visible {
   white-space: nowrap;
 }
 
+/* R2：handle 不再承担视觉与交互（floating 边自算锚点）；保留 DOM 但完全隐形。
+   不用 opacity——避免 hover 时 React Flow 默认高亮残留。 */
 .tsn-node .react-flow__handle {
-  width: 6px;
-  height: 6px;
-  border: 1px solid #ffffff;
-  background: var(--text-primary);
+  width: 0;
+  height: 0;
+  min-width: 0;
+  min-height: 0;
+  border: 0;
+  background: transparent;
+  pointer-events: none;
 }
 
 .topology-canvas .react-flow__controls {
@@ -1800,6 +1885,24 @@ textarea:focus-visible {
   padding: 10px 14px;
   color: var(--text-muted);
   font-size: 10px;
+}
+
+.config-close {
+  flex: 0 0 auto;
+  margin-right: 8px;
+  padding: 2px 8px;
+  border: none;
+  border-radius: 4px;
+  color: var(--text-muted);
+  font-size: 14px;
+  line-height: 1;
+  background: transparent;
+  cursor: pointer;
+}
+
+.config-close:hover {
+  color: var(--text-primary);
+  background: var(--bg-tertiary, rgba(0, 0, 0, 0.06));
 }
 
 .config-body {
@@ -2654,10 +2757,6 @@ textarea:focus-visible {
 
   .topology-stats {
     right: 12px;
-  }
-
-  .topology-meta {
-    display: none;
   }
 
   .config-body {

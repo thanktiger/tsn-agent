@@ -20,10 +20,17 @@ export interface UseTopologySnapshotResult {
   snapshot: TopologyRowSnapshot | undefined;
   /** 命令式刷新：retry_backfill / import 等非 mutation-buffer 写路径后由调用方显式触发。 */
   refetch: () => Promise<void>;
+  /**
+   * 本 session 已观测到的最大 mutationId（拖动写入的陈旧检测基准，R11）。
+   * 已知 nil 路径：listener outOfRange 回调空数组时该值可能短暂过期——
+   * 由 update_node_position 的一次性 stale NACK 回正自愈。
+   */
+  lastMutationId: number;
 }
 
 export function useTopologySnapshot(sessionId: string | undefined): UseTopologySnapshotResult {
   const [snapshot, setSnapshot] = useState<TopologyRowSnapshot | undefined>(undefined);
+  const [lastMutationId, setLastMutationId] = useState(0);
   const requestSeqRef = useRef(0);
 
   const refetch = useCallback(async (): Promise<void> => {
@@ -45,15 +52,20 @@ export function useTopologySnapshot(sessionId: string | undefined): UseTopologyS
 
   useEffect(() => {
     setSnapshot(undefined);
+    setLastMutationId(0);
     void refetch();
   }, [refetch]);
 
   useSessionDbListener({
     sessionId: isTauriRuntime() ? sessionId : undefined,
-    onChange: () => {
+    onChange: (mutations) => {
+      if (mutations.length > 0) {
+        const max = Math.max(...mutations.map((m) => m.mutationId));
+        setLastMutationId((prev) => Math.max(prev, max));
+      }
       void refetch();
     },
   });
 
-  return { snapshot, refetch };
+  return { snapshot, refetch, lastMutationId };
 }

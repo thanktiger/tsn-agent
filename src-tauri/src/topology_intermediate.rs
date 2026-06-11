@@ -67,6 +67,12 @@ pub struct IntermediateLink {
     pub target: IntermediateLinkEndpoint,
     pub medium: IntermediateLinkMedium,
     pub data_rate_mbps: i64,
+    /// 平面归属（"A"/"B"），dual-plane 生成端写入；其余模板与旧数据为 None（R6）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plane: Option<String>,
+    /// 链路角色（"access"/"backbone"），与 plane 同生命周期。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -154,7 +160,8 @@ pub fn sort_links_by_numeric_id(links: &[IntermediateLink]) -> Vec<IntermediateL
 pub fn create_ports(count: usize) -> Vec<IntermediatePort> {
     (0..count)
         .map(|i| IntermediatePort {
-            id: format!("p{}", i + 1),
+            // 端口 id 对齐规范 P0 起编（R5）；存量数据保持 p1 起编不迁移。
+            id: format!("P{}", i),
             name: format!("eth{}", i),
             index: i as i64,
         })
@@ -234,10 +241,10 @@ mod tests {
     fn create_ports_yields_p_prefixed_zero_indexed() {
         let p = create_ports(3);
         assert_eq!(p.len(), 3);
-        assert_eq!(p[0].id, "p1");
+        assert_eq!(p[0].id, "P0");
         assert_eq!(p[0].name, "eth0");
         assert_eq!(p[0].index, 0);
-        assert_eq!(p[2].id, "p3");
+        assert_eq!(p[2].id, "P2");
         assert_eq!(p[2].index, 2);
     }
 

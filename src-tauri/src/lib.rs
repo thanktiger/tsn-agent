@@ -19,6 +19,7 @@ mod topology_intermediate;
 mod topology_mutation_buffer;
 mod topology_mutations_command;
 mod topology_ops;
+mod topology_position_command;
 mod topology_query_command;
 mod topology_sidecar;
 mod topology_sidecar_routes;
@@ -71,18 +72,7 @@ pub fn run() {
             let emit_handle = app.handle().clone();
             let emit: topology_sidecar_routes::MutationEmitFn =
                 std::sync::Arc::new(move |record| {
-                    let payload = serde_json::json!({
-                        "sessionId": record.session_id,
-                        "domain": record.domain,
-                        "mutationId": record.mutation_id,
-                    });
-                    use tauri::Emitter;
-                    if emit_handle
-                        .emit_to("main", "session_db_changed", payload.clone())
-                        .is_err()
-                    {
-                        let _ = emit_handle.emit("session_db_changed", payload);
-                    }
+                    topology_position_command::emit_session_db_changed(&emit_handle, &record);
                 });
             let handle = tauri::async_runtime::block_on(topology_sidecar::launch(
                 pool, buffer, emit,
@@ -104,6 +94,7 @@ pub fn run() {
             topology_backfill::retry_backfill,
             topology_backfill::view_session_payload,
             topology_mutations_command::get_topology_mutations_since,
+            topology_position_command::update_node_position,
             topology_query_command::query_topology,
             session_store::get_current_session,
             session_store::list_sessions,

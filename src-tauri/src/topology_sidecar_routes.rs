@@ -296,12 +296,19 @@ async fn persist_initialized_topology(
         let dst_imac = *imac_by_node_id
             .get(link.target.node_id.as_str())
             .ok_or_else(|| format!("link {} references unknown target node", link.id))?;
-        let styles_json = json!({
+        let mut styles = json!({
             "leftLabel": link.source.port_id,
             "rightLabel": link.target.port_id,
             "speed": link.data_rate_mbps,
-        })
-        .to_string();
+        });
+        // R6：仅 Some 时写键——generic/存量链路不得出现 null 值键。
+        if let Some(plane) = &link.plane {
+            styles["plane"] = json!(plane);
+        }
+        if let Some(role) = &link.role {
+            styles["role"] = json!(role);
+        }
+        let styles_json = styles.to_string();
         sqlx::query(
             r#"INSERT INTO topology_links
                (session_id, link_seq, name, src_imac, dst_imac, styles_json)
@@ -764,6 +771,71 @@ mod tests {
                     .collect();
 
             assert_eq!(names, vec![Some("SW-1".to_string()), Some("ES-1".to_string())]);
+        });
+    }
+
+    #[test]
+    fn persist_merges_plane_role_into_styles_json_only_when_present() {
+        // R6/AE4：带 plane/role 的链路合并写入 styles_json；None 路径不得写键（null 也不行）。
+        tauri::async_runtime::block_on(async {
+            let pool = SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect("sqlite::memory:")
+                .await
+                .unwrap();
+            sqlx::query(&crate::db::safety_net_schema_sql()).execute(&pool).await.unwrap();
+            sqlx::query("INSERT INTO sessions (id, title, created_at, updated_at, payload) VALUES ('s1', 't', 'now', 'now', '{}')")
+                .execute(&pool)
+                .await
+                .unwrap();
+
+            let topology: crate::topology_intermediate::IntermediateTopology =
+                serde_json::from_value(serde_json::json!({
+                    "schemaVersion": "tsn-agent.topology.intermediate.v0",
+                    "metadata": { "templateId": "dual-plane-redundant", "layout": "dual-plane", "source": "template" },
+                    "nodes": [
+                        { "id": "sw1", "numericId": 0, "name": "SW-1", "type": "switch",
+                          "ports": [{ "id": "P0", "name": "eth0", "index": 0 }, { "id": "P1", "name": "eth1", "index": 1 }],
+                          "position": { "x": 0.0, "y": 0.0 } },
+                        { "id": "es1", "numericId": 1, "name": "ES-1", "type": "endSystem",
+                          "ports": [{ "id": "P0", "name": "eth0", "index": 0 }, { "id": "P1", "name": "eth1", "index": 1 }],
+                          "position": { "x": 1.0, "y": 1.0 } }
+                    ],
+                    "links": [
+                        { "id": "link-0", "numericId": 0,
+                          "source": { "nodeId": "es1", "portId": "P0" },
+                          "target": { "nodeId": "sw1", "portId": "P0" },
+                          "medium": "ethernet", "dataRateMbps": 1000,
+                          "plane": "A", "role": "access" },
+                        { "id": "link-1", "numericId": 1,
+                          "source": { "nodeId": "es1", "portId": "P1" },
+                          "target": { "nodeId": "sw1", "portId": "P1" },
+                          "medium": "ethernet", "dataRateMbps": 1000 }
+                    ],
+                    "diagnostics": []
+                }))
+                .unwrap();
+
+            super::persist_initialized_topology(&pool, "s1", &topology)
+                .await
+                .unwrap();
+
+            let styles: Vec<String> =
+                sqlx::query("SELECT styles_json FROM topology_links WHERE session_id = 's1' ORDER BY link_seq")
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap()
+                    .iter()
+                    .map(|row| row.get("styles_json"))
+                    .collect();
+            let with_plane: serde_json::Value = serde_json::from_str(&styles[0]).unwrap();
+            assert_eq!(with_plane["plane"], "A");
+            assert_eq!(with_plane["role"], "access");
+            assert_eq!(with_plane["leftLabel"], "P0");
+            assert_eq!(with_plane["speed"], 1000);
+            let without_plane: serde_json::Value = serde_json::from_str(&styles[1]).unwrap();
+            assert!(without_plane.get("plane").is_none(), "None 路径不得写 plane 键");
+            assert!(without_plane.get("role").is_none(), "None 路径不得写 role 键");
         });
     }
 }
