@@ -532,6 +532,12 @@ textarea:focus-visible {
   padding: 7px 9px;
 }
 
+/* skill 详情不做内层滚动：嵌套滚动在 WKWebView 下把底部内容（参数合法域）
+   裁在不可见的内层滚动区里——抽屉面板是唯一滚动上下文。 */
+.skill-detail-layout .detail-surface {
+  overflow: visible;
+}
+
 /* skill 详情顶部：描述 + 状态一行。 */
 .skill-detail-meta {
   display: flex;
