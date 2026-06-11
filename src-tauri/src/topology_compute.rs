@@ -1070,6 +1070,9 @@ fn create_dual_plane_redundant_topology(params: &DualPlaneParams, data_rate: i64
     // 多组双平面行（R2）：规范图二 B 行在上、A 行在下。
     const PLANE_B_Y: f64 = 160.0;
     const PLANE_A_Y: f64 = 360.0;
+    // R8：同 lane 堆叠 ES 的纵向错位（朝行间走廊方向：A 行向上、B 行向下），
+    // floating 直线不穿内侧节点盒；幅度由几何间隙测试驱动（双线段断言）。
+    const LANE_STAGGER: f64 = 130.0;
     // 空/未知 group 的退化输入：独立溢出行，保确定性与坐标唯一。
     const OVERFLOW_Y: f64 = 780.0;
 
@@ -1175,7 +1178,12 @@ fn create_dual_plane_redundant_topology(params: &DualPlaneParams, data_rate: i64
             } else {
                 right_edge_x + ES_PITCH * k as f64
             };
-            let y = if primary_plane_b { PLANE_B_Y } else { PLANE_A_Y };
+            // k=0 严格对齐 primary 平面行；k>0 朝走廊错位（R8）。
+            let y = if primary_plane_b {
+                PLANE_B_Y + LANE_STAGGER * k as f64
+            } else {
+                PLANE_A_Y - LANE_STAGGER * k as f64
+            };
             IntermediatePosition { x, y }
         };
         nodes.push(IntermediateNode {
@@ -2724,9 +2732,13 @@ mod tests {
         assert_eq!(sw1x, sw2x, "group g1 switches stack vertically");
         assert_eq!(sw3x, sw4x, "group g2 switches stack vertically");
         assert!(sw1x < sw3x, "groups spread along x by declaration order");
-        // 全部 ES primary 在平面 A → y 对齐 A 行。
-        for id in ["e1", "e2", "e3", "e4"] {
-            assert_eq!(dp_pos(&topo, id).1, sw1y, "{} must align to primary plane row", id);
+        // R8：lane 首台（k=0）严格对齐 primary 平面行；堆叠台（k=1）朝走廊错位。
+        for id in ["e1", "e3"] {
+            assert_eq!(dp_pos(&topo, id).1, sw1y, "{} (k=0) must align to primary plane row", id);
+        }
+        for id in ["e2", "e4"] {
+            let dy = dp_pos(&topo, id).1 - sw1y;
+            assert!(dy != 0.0, "{} (k=1) must be staggered off the plane row", id);
         }
         // g1 在左外端、g2 在右外端。
         assert!(dp_pos(&topo, "e1").0 < sw1x && dp_pos(&topo, "e2").0 < sw1x);
@@ -2761,6 +2773,69 @@ mod tests {
             "backbone": {"mode": "line", "withinPlane": true},
             "crossPlaneLinks": {"mode": "none"}
         })
+    }
+
+    /// 线段与（含 margin 膨胀的）AABB 相交检测——slab 法。
+    fn seg_intersects_rect(
+        p: (f64, f64),
+        q: (f64, f64),
+        center: (f64, f64),
+        half_w: f64,
+        half_h: f64,
+        margin: f64,
+    ) -> bool {
+        let (min_x, max_x) = (center.0 - half_w - margin, center.0 + half_w + margin);
+        let (min_y, max_y) = (center.1 - half_h - margin, center.1 + half_h + margin);
+        let d = (q.0 - p.0, q.1 - p.1);
+        let mut t_min: f64 = 0.0;
+        let mut t_max: f64 = 1.0;
+        for (start, delta, lo, hi) in
+            [(p.0, d.0, min_x, max_x), (p.1, d.1, min_y, max_y)]
+        {
+            if delta.abs() < f64::EPSILON {
+                if start < lo || start > hi {
+                    return false;
+                }
+            } else {
+                let mut t1 = (lo - start) / delta;
+                let mut t2 = (hi - start) / delta;
+                if t1 > t2 {
+                    std::mem::swap(&mut t1, &mut t2);
+                }
+                t_min = t_min.max(t1);
+                t_max = t_max.min(t2);
+                if t_min > t_max {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    #[test]
+    fn dual_plane_stacked_lane_edges_clear_inner_nodes() {
+        // R8/AE3：同 lane 堆叠时，外侧 ES 的 primary 与 backup 两条中心连线段
+        // 均不得穿过内侧 ES 节点盒（126×56，margin 8）。
+        let (topo, _) = initialize_topology(&InitializeIntent {
+            template_id: "dual-plane-redundant".into(),
+            params: dual_plane_two_hop_params(),
+        })
+        .unwrap();
+        // e1 = lane k=0（内侧）、e2 = lane k=1（外侧）；两者 primary→sw1、backup→sw2。
+        let inner = dp_pos(&topo, "e1");
+        let outer = dp_pos(&topo, "e2");
+        let sw1 = dp_pos(&topo, "sw1");
+        let sw2 = dp_pos(&topo, "sw2");
+        for (label, target) in [("primary", sw1), ("backup", sw2)] {
+            assert!(
+                !seg_intersects_rect(outer, target, inner, 63.0, 28.0, 8.0),
+                "outer ES {} edge ({:?}->{:?}) crosses inner ES box at {:?}",
+                label,
+                outer,
+                target,
+                inner
+            );
+        }
     }
 
     #[test]
