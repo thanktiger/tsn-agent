@@ -331,7 +331,6 @@ export function WorkspacePane({
   return (
     <section className="workspace-pane" aria-label="工程状态">
       <div className="topology-stage grid-bg">
-        <div className="topology-meta mono">TSN PROJECT DB · REACT FLOW</div>
         <div className="topology-stats" aria-label="拓扑统计">
           <Stat label="交换机" value={switchCount} />
           <Stat label="端系统" value={endSystemCount} />
@@ -352,6 +351,7 @@ export function WorkspacePane({
               nodesDraggable
               selectionOnDrag={false}
               multiSelectionKeyCode={null}
+              proOptions={{ hideAttribution: true }}
               onInit={(instance) => {
                 // R12：每 session 首次挂载 fitView 一次。session 切换时快照必经
                 // undefined 过渡（hook 同步清空）→ ReactFlow 重挂载 → onInit 重触发，
