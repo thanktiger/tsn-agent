@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { FileText, Pencil } from "lucide-react";
+import { FileText, Pencil, RotateCcw } from "lucide-react";
 import type { StageSkillName } from "../../agent/stage-skill-contract";
 import {
   createSkillFileService,
+  type RestoreFactorySkillsResult,
   type SkillFileContent,
   type SkillFileEntry,
   type SkillFileListResult,
@@ -20,6 +21,13 @@ type CatalogState =
   | { kind: "loading" }
   | { kind: "ready"; catalog: TopologyTemplateCatalog }
   | { kind: "unavailable"; message: string };
+
+type RestoreState =
+  | { kind: "idle" }
+  | { kind: "previewing" }
+  | { kind: "confirming"; plan: RestoreFactorySkillsResult }
+  | { kind: "restoring" }
+  | { kind: "done"; result: RestoreFactorySkillsResult };
 
 export function SkillFilePreview({
   skillId,
@@ -39,6 +47,8 @@ export function SkillFilePreview({
   const [savedNotice, setSavedNotice] = useState(false);
   const [error, setError] = useState<string>();
   const [catalogState, setCatalogState] = useState<CatalogState>({ kind: "idle" });
+  const [restoreState, setRestoreState] = useState<RestoreState>({ kind: "idle" });
+  const [reloadToken, setReloadToken] = useState(0);
 
   const isTopologySkill = skillId === "tsn-topology";
 
@@ -93,7 +103,7 @@ export function SkillFilePreview({
     return () => {
       cancelled = true;
     };
-  }, [service, skillId]);
+  }, [service, skillId, reloadToken]);
 
   useEffect(() => {
     if (!isTopologySkill) {
@@ -199,14 +209,95 @@ export function SkillFilePreview({
     }
   }
 
+  // 恢复内置版本（R2）：dryRun 枚举差异清单 → 内联确认 → 执行并刷新列表。
+  // 影响全部 skill（不止当前 tab）；dev 直连仓库/Resource 缺失由后端报错说明。
+  async function previewRestore() {
+    setRestoreState({ kind: "previewing" });
+    setError(undefined);
+    try {
+      const plan = await service.restoreFactorySkills(true);
+      setRestoreState({ kind: "confirming", plan });
+    } catch (cause) {
+      setError(errorMessage(cause));
+      setRestoreState({ kind: "idle" });
+    }
+  }
+
+  async function confirmRestore() {
+    setRestoreState({ kind: "restoring" });
+    setError(undefined);
+    try {
+      const result = await service.restoreFactorySkills(false);
+      setRestoreState({ kind: "done", result });
+      setReloadToken((token) => token + 1);
+    } catch (cause) {
+      setError(errorMessage(cause));
+      setRestoreState({ kind: "idle" });
+    }
+  }
+
   return (
     <section className="skill-files-panel" aria-label="Skill 文件">
       <div className="skill-files-header">
         <small>编辑会保存到当前选中的 skill 文件，下次 agent 运行生效。</small>
-        {fileList?.status && <span className={`skill-file-status ${fileList.status}`}>{rootStatusLabel(fileList.status)}</span>}
+        <div className="skill-files-header-actions">
+          <button
+            className="btn"
+            type="button"
+            onClick={previewRestore}
+            disabled={
+              fileList?.status !== "available"
+              || restoreState.kind === "previewing"
+              || restoreState.kind === "restoring"
+              || restoreState.kind === "confirming"
+            }
+          >
+            <RotateCcw size={14} aria-hidden="true" />
+            {restoreState.kind === "previewing" ? "正在比对..." : "恢复内置版本"}
+          </button>
+          {fileList?.status && <span className={`skill-file-status ${fileList.status}`}>{rootStatusLabel(fileList.status)}</span>}
+        </div>
       </div>
 
       {error && <div className="skill-file-error">{error}</div>}
+
+      {restoreState.kind === "confirming" && (
+        <div className="skill-restore-confirm" role="alertdialog" aria-label="恢复内置版本确认">
+          <p>将把全部 skill 文件恢复为内置出厂版本（影响所有 skill，下次 agent 运行生效）：</p>
+          <ul>
+            <li>
+              {restoreState.plan.restored.length > 0
+                ? `恢复 ${restoreState.plan.restored.length} 个文件：${restoreState.plan.restored.join("、")}`
+                : "没有需要恢复的文件（已与内置版本一致）"}
+            </li>
+            {restoreState.plan.removed.length > 0 && (
+              <li>删除 {restoreState.plan.removed.length} 个出厂已移除文件：{restoreState.plan.removed.join("、")}</li>
+            )}
+            {restoreState.plan.preserved.length > 0 && (
+              <li>自建文件不受影响：{restoreState.plan.preserved.join("、")}</li>
+            )}
+          </ul>
+          <div className="skill-file-actions">
+            <button
+              className="btn-primary"
+              type="button"
+              onClick={confirmRestore}
+              disabled={restoreState.plan.restored.length === 0 && restoreState.plan.removed.length === 0}
+            >
+              确认恢复
+            </button>
+            <button className="btn" type="button" onClick={() => setRestoreState({ kind: "idle" })}>
+              取消
+            </button>
+          </div>
+        </div>
+      )}
+
+      {restoreState.kind === "done" && (
+        <div className="skill-file-saved-notice" role="status">
+          已恢复内置版本（恢复 {restoreState.result.restored.length} 个、删除 {restoreState.result.removed.length} 个文件），下次 agent 运行生效。
+        </div>
+      )}
 
       {isLoadingList ? (
         <div className="empty-panel mono">正在加载 skill 文件...</div>

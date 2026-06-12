@@ -881,6 +881,35 @@ textarea:focus-visible {
   font-size: 12px;
 }
 
+.skill-files-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* 恢复内置版本：dry-run 差异清单 + 确认/取消（R2 内联确认，不弹窗）。 */
+.skill-restore-confirm {
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  background: var(--accent-soft);
+  font-size: 12px;
+}
+
+.skill-restore-confirm p {
+  margin: 0;
+  color: var(--text-primary);
+}
+
+.skill-restore-confirm ul {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--text-secondary);
+  word-break: break-all;
+}
+
 /* 参数合法域：模板分块 + 每参数一行（名称 | 约束）的紧凑网格。 */
 .skill-legal-domain {
   display: grid;

@@ -53,10 +53,22 @@ export interface TopologyTemplateCatalog {
   templates: TopologyTemplateDescriptor[];
 }
 
+export interface RestoreFactorySkillsResult {
+  dryRun: boolean;
+  /** 将被（或已被）恢复为出厂内容的文件。 */
+  restored: string[];
+  /** 将被（或已被）删除的出厂移除清单文件。 */
+  removed: string[];
+  /** 用户自建文件，恢复不触碰。 */
+  preserved: string[];
+}
+
 export interface SkillFileService {
   listFiles(skillId: StageSkillName): Promise<SkillFileListResult>;
   readFile(skillId: StageSkillName, path: string): Promise<SkillFileContent>;
   writeFile(skillId: StageSkillName, path: string, content: string): Promise<SkillFileContent>;
+  /** dryRun=true 仅枚举差异清单；false 执行恢复（覆写出厂文件 + 删除移除清单文件）。 */
+  restoreFactorySkills(dryRun: boolean): Promise<RestoreFactorySkillsResult>;
   describeTopologyTemplates(): Promise<TopologyTemplateCatalog>;
 }
 
@@ -81,6 +93,11 @@ export function createSkillFileService(): SkillFileService {
         request: { skillId, path, content },
       });
     },
+    restoreFactorySkills(dryRun) {
+      return invoke<RestoreFactorySkillsResult>("restore_factory_skills", {
+        request: { dryRun },
+      });
+    },
     describeTopologyTemplates() {
       return invoke<TopologyTemplateCatalog>("describe_topology_templates");
     },
@@ -102,6 +119,9 @@ export function createBrowserSkillFileService(): SkillFileService {
     },
     async writeFile() {
       throw new Error("请在桌面应用中编辑本地 skill 文件。");
+    },
+    async restoreFactorySkills() {
+      throw new Error("请在桌面应用中恢复内置 skill 版本。");
     },
     async describeTopologyTemplates() {
       throw new Error("请在桌面应用中查看拓扑参数合法域。");

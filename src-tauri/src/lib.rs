@@ -104,7 +104,8 @@ pub fn run() {
             session_store::set_current_session,
             skill_files::list_skill_files,
             skill_files::read_skill_file,
-            skill_files::write_skill_file
+            skill_files::write_skill_file,
+            skill_files::restore_factory_skills
         ])
         .build(tauri::generate_context!())
         .expect("failed to build TSN Agent")
