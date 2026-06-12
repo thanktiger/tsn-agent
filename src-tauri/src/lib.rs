@@ -12,6 +12,7 @@ mod redaction;
 mod session_export;
 mod session_import;
 mod session_store;
+mod skill_factory_hashes;
 mod skill_files;
 mod topology_backfill;
 mod topology_compute;
