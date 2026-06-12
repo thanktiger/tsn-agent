@@ -139,6 +139,9 @@ describe("claude-agent-worker", () => {
     // 骨架段仍在 sentinel 之前。
     const [skeleton, guidance] = capturedSystemPrompt.split("<<<SKILL_GUIDANCE>>>");
     expect(skeleton).toContain("工程状态只接受结构化校验结果");
+    // KTD8 迁入骨架的协议不变量（骨架是唯一载体，回退即丢失）。
+    expect(skeleton).toContain("不要再调用 topology_validate 复检");
+    expect(skeleton).toContain("逐字节复用上一次的同一 operations");
     expect(guidance).toContain("[SKILL-PROBE-v1] 注入指引正文");
   });
 
@@ -310,6 +313,77 @@ describe("claude-agent-worker", () => {
 
     expect(prompt).toContain("[INDEX-PROBE] 主索引正文");
     expect(prompt).not.toContain("<<<SCENARIO_REFERENCE>>>");
+  });
+
+  it("treats a malformed scenario id as unknown instead of joining it into a path", async () => {
+    // 畸形值（路径遍历形态）不得参与 join——按未知场景回退 generic-tsn。
+    const { rootDir } = await makeScenarioSkillRoot({
+      scenarios: { "generic-tsn": "[REF-GENERIC] 通用指引" },
+    });
+
+    const prompt = await captureScenarioPrompt(rootDir, {
+      userIntent: "x",
+      stage: "topology",
+      scenarioConfigId: "../../tsn-flow-planning/SKILL",
+    });
+
+    expect(prompt.split("<<<SCENARIO_REFERENCE>>>")[1]).toContain("[REF-GENERIC] 通用指引");
+  });
+
+  it("records scenarioReference and degradation events in the audit log", async () => {
+    const auditDir = await mkdtemp(join(tmpdir(), "tsn-agent-scenario-audit-"));
+    const { rootDir, referenceDir } = await makeScenarioSkillRoot({
+      scenarios: { "generic-tsn": "[REF-GENERIC] 通用指引" },
+    });
+    const query = async function* () {
+      yield { type: "result", structured_output: { assistantText: "ok" } };
+    };
+
+    // 未知场景 → fallback generic-tsn：审计头字段 + timeline info 事件。
+    const result = await runClaude(
+      "我需要4个交换机",
+      {
+        cwd: "/tmp/project",
+        skillRoot: rootDir,
+        auditDir,
+        appSessionId: "scenario-audit",
+        runId: "run-scenario-audit",
+        stageRunnerInput: { userIntent: "x", stage: "topology", scenarioConfigId: "industrial" },
+      },
+      query,
+    );
+    const audit = JSON.parse(await readFile(result.auditPath, "utf8"));
+    expect(audit.scenarioReference).toMatchObject({
+      requestedScenario: "industrial",
+      resolvedScenario: "generic-tsn",
+      referencePath: join(referenceDir, "generic-tsn.md"),
+      fallback: true,
+    });
+    expect(audit.timeline).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: "skill_reference_fallback", requestedScenario: "industrial" }),
+      ]),
+    );
+
+    // reference 全缺 → 仅索引：timeline warn 事件带失败原因。
+    const { rootDir: emptyRoot } = await makeScenarioSkillRoot();
+    const result2 = await runClaude(
+      "我需要4个交换机",
+      {
+        cwd: "/tmp/project",
+        skillRoot: emptyRoot,
+        auditDir,
+        appSessionId: "scenario-audit",
+        runId: "run-scenario-audit-2",
+        stageRunnerInput: { userIntent: "x", stage: "topology", scenarioConfigId: "aerospace-onboard" },
+      },
+      query,
+    );
+    const audit2 = JSON.parse(await readFile(result2.auditPath, "utf8"));
+    expect(audit2.scenarioReference).toMatchObject({ resolvedScenario: null, fallback: false });
+    const unavailable = audit2.timeline.find((event) => event.type === "skill_reference_unavailable");
+    expect(unavailable).toBeDefined();
+    expect(unavailable.errors.length).toBeGreaterThan(0);
   });
 
   it("does not synthesize a topology stage result from assistant-authored topology JSON without an MCP tool call", () => {

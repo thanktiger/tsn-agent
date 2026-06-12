@@ -217,6 +217,45 @@ describe("SkillFilePreview", () => {
     });
   });
 
+  it("disables confirmation when the dry-run plan is empty", async () => {
+    const user = userEvent.setup();
+    const service = createService({
+      restoreFactorySkills: vi.fn().mockResolvedValue({
+        dryRun: true,
+        restored: [],
+        removed: [],
+        preserved: [],
+      }),
+    });
+
+    render(<SkillFilePreview skillId="tsn-topology" service={service} />);
+    await screen.findByText("原始 skill 内容");
+    await user.click(screen.getByRole("button", { name: /恢复内置版本/ }));
+
+    const dialog = await screen.findByRole("alertdialog", { name: "恢复内置版本确认" });
+    expect(dialog).toHaveTextContent("没有需要恢复的文件（已与内置版本一致）");
+    expect(screen.getByRole("button", { name: "确认恢复" })).toBeDisabled();
+    // 确认按钮禁用：不会触发 dryRun=false 的二次调用。
+    expect(service.restoreFactorySkills).toHaveBeenCalledTimes(1);
+    expect(service.restoreFactorySkills).toHaveBeenCalledWith(true);
+  });
+
+  it("locks file editing while the restore confirmation is open", async () => {
+    const user = userEvent.setup();
+    const service = createService();
+
+    render(<SkillFilePreview skillId="tsn-topology" service={service} />);
+    await screen.findByText("原始 skill 内容");
+    await user.click(screen.getByRole("button", { name: /恢复内置版本/ }));
+    await screen.findByRole("alertdialog", { name: "恢复内置版本确认" });
+
+    // 确认窗口期编辑入口禁用（防确认清单与实际恢复集合漂移）。
+    expect(screen.getByRole("button", { name: "编辑文件" })).toBeDisabled();
+
+    await user.click(screen.getByRole("button", { name: "取消" }));
+    expect(screen.getByRole("button", { name: "编辑文件" })).toBeEnabled();
+  });
+
   it("cancels the restore confirmation without touching disk", async () => {
     const user = userEvent.setup();
     const service = createService();

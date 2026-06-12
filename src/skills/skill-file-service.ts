@@ -61,6 +61,8 @@ export interface RestoreFactorySkillsResult {
   removed: string[];
   /** 用户自建文件，恢复不触碰。 */
   preserved: string[];
+  /** 文件已全部恢复但记录清单失败时的提示（下次启动自动校正）。 */
+  warning?: string;
 }
 
 export interface SkillFileService {

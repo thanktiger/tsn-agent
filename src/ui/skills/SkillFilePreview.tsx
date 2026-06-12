@@ -51,6 +51,9 @@ export function SkillFilePreview({
   const [reloadToken, setReloadToken] = useState(0);
 
   const isTopologySkill = skillId === "tsn-topology";
+  // 恢复确认/执行期间锁编辑：确认清单是按当下盘面枚举的，窗口内的保存会被
+  // 恢复覆盖却不在清单里（确认内容与实际操作漂移）。
+  const isRestoreLocked = restoreState.kind === "confirming" || restoreState.kind === "restoring";
 
   const previewableFiles = useMemo(
     () => fileList?.files.filter((file) => file.canPreview) ?? [],
@@ -189,7 +192,7 @@ export function SkillFilePreview({
   }
 
   async function saveDraft() {
-    if (!content || !hasDraftChanges || !content.editable) {
+    if (!content || !hasDraftChanges || !content.editable || isRestoreLocked) {
       return;
     }
 
@@ -296,6 +299,7 @@ export function SkillFilePreview({
       {restoreState.kind === "done" && (
         <div className="skill-file-saved-notice" role="status">
           已恢复内置版本（恢复 {restoreState.result.restored.length} 个、删除 {restoreState.result.removed.length} 个文件），下次 agent 运行生效。
+          {restoreState.result.warning ? ` ${restoreState.result.warning}` : ""}
         </div>
       )}
 
@@ -340,7 +344,7 @@ export function SkillFilePreview({
                             className="btn-primary"
                             type="button"
                             onClick={saveDraft}
-                            disabled={!hasDraftChanges || isSaving}
+                            disabled={!hasDraftChanges || isSaving || isRestoreLocked}
                           >
                             {isSaving ? "保存中..." : "保存"}
                           </button>
@@ -356,7 +360,7 @@ export function SkillFilePreview({
                           </button>
                         </>
                       ) : (
-                        <button className="btn" type="button" onClick={startEditing}>
+                        <button className="btn" type="button" onClick={startEditing} disabled={isRestoreLocked}>
                           <Pencil size={14} aria-hidden="true" />
                           编辑文件
                         </button>

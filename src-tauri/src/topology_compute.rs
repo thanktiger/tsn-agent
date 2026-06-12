@@ -96,6 +96,9 @@ pub fn describe_templates_catalog() -> Value {
 /// R7：可选按场景过滤模板候选集。未知场景值返回空列表 + warning（不报错，
 /// 前向兼容工业等未来场景）；None 返回全量（向后兼容）。
 pub fn describe_templates_catalog_filtered(scenario: Option<&str>) -> Value {
+    // verify-skills.mjs 正则锚点：`let all = [...]` 清单与各 descriptor 函数内
+    // 首个 "id" 字段（必须先于 example 的伪 id）被 R9 对账消费——改名/重排前
+    // 同步 scripts/verify-skills.mjs。
     let all = [
         generic_line_descriptor(),
         generic_ring_descriptor(),
@@ -576,9 +579,10 @@ fn create_generic_line_ends_only_topology(
     } else {
         IntermediatePosition { x: last_pos.x - ES_GAP, y: last_pos.y }
     };
+    // es2 的 ip_octet 取 max(2) 防 switchCount=1 时与 es1（octet=1）撞出重复 IP。
     for (ordinal, (id, name, pos, ip_octet)) in [
         ("es1", "ES-1", e1_pos, 1usize),
-        ("es2", "ES-2", e2_pos, switch_count),
+        ("es2", "ES-2", e2_pos, switch_count.max(2)),
     ]
     .into_iter()
     .enumerate()
@@ -2832,6 +2836,61 @@ mod tests {
     }
 
     #[test]
+    fn ends_only_even_and_max_fold_hold_invariants() {
+        // 偶数折叠（6 → 3+3）与上限 12（6+6）的反向行算式、防穿框、唯一性、
+        // 校验兜底（坐标快照只钉规范图 5-1 的 N=5，其余只验不变量）。
+        for switch_count in [1i64, 2, 6, 12] {
+            let (topo, summary) = initialize_topology(&ends_only_intent(switch_count, 1)).unwrap();
+            assert_eq!(summary.node_count, switch_count as usize + 2);
+            assert_eq!(summary.link_count, switch_count as usize + 1);
+
+            let pos = |id: &str| {
+                let node = topo.nodes.iter().find(|n| n.id == id).expect("node");
+                (node.position.x, node.position.y)
+            };
+            for link in &topo.links {
+                let from = pos(&link.source.node_id);
+                let to = pos(&link.target.node_id);
+                for node in &topo.nodes {
+                    if node.id == link.source.node_id || node.id == link.target.node_id {
+                        continue;
+                    }
+                    assert!(
+                        !seg_intersects_rect(
+                            from,
+                            to,
+                            (node.position.x, node.position.y),
+                            63.0,
+                            28.0,
+                            8.0
+                        ),
+                        "N={switch_count}: link {}-{} crosses {}",
+                        link.source.node_id,
+                        link.target.node_id,
+                        node.id
+                    );
+                }
+            }
+
+            let coords: Vec<_> = topo.nodes.iter().map(|n| (n.position.x, n.position.y)).collect();
+            for (i, a) in coords.iter().enumerate() {
+                for b in coords.iter().skip(i + 1) {
+                    assert_ne!(a, b, "N={switch_count}: 任意两节点不得同坐标");
+                }
+            }
+
+            // IP 唯一性（N=1 时 es1/es2 同挂 sw1，octet 必须仍不同）。
+            let ips: Vec<_> = topo.nodes.iter().filter_map(|n| n.ip_address.clone()).collect();
+            let unique: std::collections::BTreeSet<_> = ips.iter().collect();
+            assert_eq!(ips.len(), unique.len(), "N={switch_count}: IP 不得重复");
+
+            let report =
+                validate_intermediate_topology(&serde_json::to_value(&topo).unwrap_or(Value::Null));
+            assert!(report.ok, "N={switch_count}: {:?}", report.errors);
+        }
+    }
+
+    #[test]
     fn ends_only_rejects_invalid_parameter_combinations() {
         // endSystemsPerSwitch 必须为 1（不做语义重载）。
         let errors = initialize_topology(&ends_only_intent(5, 2)).unwrap_err();
@@ -2872,6 +2931,10 @@ mod tests {
 
         let aero = describe_templates_catalog_filtered(Some("aerospace-onboard"));
         assert_eq!(aero["templateCount"], 3, "宇航场景含全部三模板（ring 双场景归属）");
+        // 匹配场景与全量均不得携带 warning（否则 agent 每次过滤都收到误导警告）。
+        assert!(aero.get("warning").is_none());
+        assert!(full.get("warning").is_none());
+        assert!(full.get("scenario").is_none());
 
         let generic = describe_templates_catalog_filtered(Some("generic-tsn"));
         assert_eq!(generic["templateCount"], 2);
@@ -2881,6 +2944,10 @@ mod tests {
         let unknown = describe_templates_catalog_filtered(Some("industrial"));
         assert_eq!(unknown["templateCount"], 0);
         assert!(unknown["warning"].as_str().unwrap().contains("industrial"));
+        // 未知场景回显 scenario，空结果是空数组而非 null。
+        assert_eq!(unknown["scenario"], json!("industrial"));
+        assert!(unknown["templates"].as_array().unwrap().is_empty());
+        assert!(unknown["templateIds"].as_array().unwrap().is_empty());
     }
 
     #[test]
@@ -3671,6 +3738,10 @@ mod tests {
                 end_systems_clause
             )),
             "zod endSystemsPerSwitch bounds drifted from Rust END_SYSTEMS_PER_SWITCH_MIN/MAX ({end_systems_clause})"
+        );
+        assert!(
+            zod_src.contains(r#"endSystemPlacement: z.enum(["per-switch", "ends-only"]).optional()"#),
+            "zod endSystemPlacement enum drifted from Rust placement parsing (per-switch/ends-only)"
         );
     }
 

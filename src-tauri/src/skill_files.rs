@@ -48,6 +48,9 @@ pub struct RestoreFactorySkillsResponse {
     removed: Vec<String>,
     /// 用户自建文件（不在出厂清单内），恢复不触碰。
     preserved: Vec<String>,
+    /// 文件已全部恢复但 manifest 写入失败时的提示（下次播种按内容自愈）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    warning: Option<String>,
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -215,6 +218,22 @@ pub fn restore_factory_skills(
     request: RestoreFactorySkillsRequest,
 ) -> Result<RestoreFactorySkillsResponse, String> {
     let (dev, app_data, resource) = skill_root_candidates(&app);
+    let (app_data, resource) = restore_guard(dev.as_deref(), app_data.as_deref(), resource.as_deref())?;
+    restore_factory_with(
+        &app_data,
+        &resource,
+        crate::skill_factory_hashes::FACTORY_REMOVED_FILES,
+        request.dry_run,
+    )
+}
+
+/// 恢复入口守卫（候选路径注入，可单测）：dev 直连仓库无播种副本、app-data
+/// 不可定位、Resource 缺失三种环境拒绝恢复。文案直达 UI。
+fn restore_guard(
+    dev: Option<&Path>,
+    app_data: Option<&Path>,
+    resource: Option<&Path>,
+) -> Result<(PathBuf, PathBuf), String> {
     if dev.is_some_and(|dev| dev.exists()) {
         return Err("开发模式直接使用仓库 skill 文件，没有可恢复的播种副本。".to_string());
     }
@@ -224,17 +243,14 @@ pub fn restore_factory_skills(
     let Some(resource) = resource.filter(|resource| resource.exists()) else {
         return Err("内置 skill 资源不可用，无法恢复内置版本。".to_string());
     };
-    restore_factory_with(
-        &app_data,
-        &resource,
-        crate::skill_factory_hashes::FACTORY_REMOVED_FILES,
-        request.dry_run,
-    )
+    Ok((app_data.to_path_buf(), resource.to_path_buf()))
 }
 
 /// 恢复核心（候选路径注入，可单测）。与播种的保守语义不同：恢复是用户显式
 /// 确认过枚举清单的操作——出厂文件无条件覆写为当前出厂、移除清单文件无条件
 /// 删除（含用户改过的）；仅用户自建文件保留。
+/// 实跑两阶段（KTD3）：先把全部待恢复文件写 tmp（任一失败清掉全部 tmp，dst
+/// 零触碰——磁盘满等常见诱因不产生混代半成品），再连续 rename 落位。
 fn restore_factory_with(
     app_data_root: &Path,
     resource: &Path,
@@ -245,37 +261,8 @@ fn restore_factory_with(
     let factory_set: std::collections::BTreeSet<&str> =
         factory_files.iter().map(|(_, rel)| rel.as_str()).collect();
 
-    let mut restored = Vec::new();
-    let mut manifest_files = std::collections::BTreeMap::new();
-    for (src, rel) in &factory_files {
-        let factory_bytes = std::fs::read(src)
-            .map_err(|error| format!("无法读取内置 skill 文件 {rel}：{error}"))?;
-        let factory_hash = sha256_hex(&factory_bytes);
-        let dst = app_data_root.join(rel);
-        let needs_restore = match std::fs::read(&dst) {
-            Ok(bytes) => sha256_hex(&bytes) != factory_hash,
-            Err(_) => true,
-        };
-        if needs_restore {
-            if !dry_run {
-                write_file_atomic(&dst, &factory_bytes)?;
-            }
-            restored.push(rel.clone());
-        }
-        manifest_files.insert(rel.clone(), factory_hash);
-    }
-
-    let mut removed = Vec::new();
-    for rel in removed_files {
-        let dst = app_data_root.join(rel);
-        if dst.exists() {
-            if !dry_run {
-                std::fs::remove_file(&dst).map_err(|error| format!("无法删除 {rel}：{error}"))?;
-            }
-            removed.push((*rel).to_string());
-        }
-    }
-
+    // preserved 枚举先于任何变更：清单反映用户确认时点的自建文件集合，
+    // 且枚举失败（个别子目录不可读）不会把已成功的恢复误报为失败。
     let mut preserved: Vec<String> = if app_data_root.exists() {
         collect_files_recursive(app_data_root)?
             .into_iter()
@@ -291,20 +278,110 @@ fn restore_factory_with(
     };
     preserved.sort();
 
-    if !dry_run {
-        let manifest = FactoryManifest {
-            files: manifest_files,
-            ..FactoryManifest::default()
+    let mut restored = Vec::new();
+    let mut pending_writes: Vec<(PathBuf, Vec<u8>)> = Vec::new();
+    let mut manifest_files = std::collections::BTreeMap::new();
+    for (src, rel) in &factory_files {
+        let factory_bytes = std::fs::read(src)
+            .map_err(|error| format!("无法读取内置 skill 文件 {rel}：{error}"))?;
+        let factory_hash = sha256_hex(&factory_bytes);
+        let dst = app_data_root.join(rel);
+        let needs_restore = match std::fs::read(&dst) {
+            Ok(bytes) => sha256_hex(&bytes) != factory_hash,
+            Err(_) => true,
         };
-        write_manifest(app_data_root, &manifest)?;
+        if needs_restore {
+            restored.push(rel.clone());
+            if !dry_run {
+                pending_writes.push((dst, factory_bytes));
+            }
+        }
+        manifest_files.insert(rel.clone(), factory_hash);
     }
+
+    let mut removed = Vec::new();
+    for rel in removed_files {
+        if app_data_root.join(rel).exists() {
+            removed.push((*rel).to_string());
+        }
+    }
+
+    if dry_run {
+        return Ok(RestoreFactorySkillsResponse {
+            dry_run,
+            restored,
+            removed,
+            preserved,
+            warning: None,
+        });
+    }
+
+    // 阶段一：全部写 tmp，任一失败回滚（删除全部 tmp，dst 未动）。
+    let mut staged: Vec<(PathBuf, PathBuf)> = Vec::new();
+    for (dst, bytes) in &pending_writes {
+        match stage_file_tmp(dst, bytes) {
+            Ok(tmp) => staged.push((tmp, dst.clone())),
+            Err(error) => {
+                for (tmp, _) in &staged {
+                    let _ = std::fs::remove_file(tmp);
+                }
+                return Err(error);
+            }
+        }
+    }
+    // 阶段二：连续 rename 落位（同目录 rename，失败概率远低于写入）。
+    for (tmp, dst) in &staged {
+        std::fs::rename(tmp, dst).map_err(|error| {
+            let _ = std::fs::remove_file(tmp);
+            format!("无法落位 skill 副本文件 {}：{error}", dst.display())
+        })?;
+    }
+
+    for rel in &removed {
+        let dst = app_data_root.join(rel);
+        std::fs::remove_file(&dst).map_err(|error| format!("无法删除 {rel}：{error}"))?;
+    }
+
+    // manifest 写失败不整体报错：文件已全部恢复成功，下次播种按内容哈希自愈；
+    // 整体 Err 会让用户重试时拿到空清单、确认按钮禁用而无法收尾。
+    let manifest = FactoryManifest {
+        files: manifest_files,
+        ..FactoryManifest::default()
+    };
+    let warning = write_manifest(app_data_root, &manifest)
+        .err()
+        .map(|error| format!("文件已恢复，但记录清单失败（{error}）；不影响使用，下次启动自动校正。"));
 
     Ok(RestoreFactorySkillsResponse {
         dry_run,
         restored,
         removed,
         preserved,
+        warning,
     })
+}
+
+/// 把内容写到 dst 同目录的 tmp 文件（不落位），返回 tmp 路径。
+fn stage_file_tmp(dst: &Path, bytes: &[u8]) -> Result<PathBuf, String> {
+    if let Some(parent) = dst.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("无法创建 skill 副本目录：{error}"))?;
+    }
+    let tmp = {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        dst.with_extension(format!(
+            "tmp-{}-{}-{}",
+            timestamp_nanos(),
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ))
+    };
+    std::fs::write(&tmp, bytes).map_err(|error| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("无法写入 skill 副本文件：{error}")
+    })?;
+    Ok(tmp)
 }
 
 fn resolve_existing_skill_root(
@@ -448,7 +525,11 @@ fn write_manifest(app_data_root: &Path, manifest: &FactoryManifest) -> Result<()
     let tmp = path.with_extension(format!("tmp-{}-{}", timestamp_nanos(), std::process::id()));
     let raw = serde_json::to_string_pretty(manifest)
         .map_err(|error| format!("无法序列化 skill manifest：{error}"))?;
-    std::fs::write(&tmp, raw).map_err(|error| format!("无法写入 skill manifest：{error}"))?;
+    std::fs::write(&tmp, raw).map_err(|error| {
+        // 写失败（如磁盘满）会留下半截 tmp，清掉防累积进面板/恢复清单。
+        let _ = std::fs::remove_file(&tmp);
+        format!("无法写入 skill manifest：{error}")
+    })?;
     std::fs::rename(&tmp, &path).map_err(|error| {
         let _ = std::fs::remove_file(&tmp);
         format!("无法落位 skill manifest：{error}")
@@ -462,15 +543,23 @@ fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", hasher.finalize())
 }
 
-/// 递归收集根下全部文件（跳过 symlink），返回 (绝对路径, 根相对路径)。
-/// 播种用于枚举内置出厂文件，恢复用于枚举 app-data 现状。
+/// 递归收集根下全部文件（跳过 symlink 与系统/编辑器残留），返回
+/// (绝对路径, 根相对路径)。播种用于枚举内置出厂文件，恢复用于枚举 app-data 现状。
+/// 过滤 .DS_Store/*.swp/原子写 tmp 残片：整目录打包会把开发机 Finder 元数据带进
+/// Resource，无此过滤会被当出厂文件播种进用户 app-data 并污染恢复清单。
 fn collect_files_recursive(base: &Path) -> Result<Vec<(PathBuf, String)>, String> {
+    fn is_junk_name(name: &str) -> bool {
+        name == ".DS_Store" || name.ends_with(".swp") || name.contains(".tmp-")
+    }
     fn walk(base: &Path, current: &Path, out: &mut Vec<(PathBuf, String)>) -> Result<(), String> {
         let entries = std::fs::read_dir(current)
             .map_err(|error| format!("无法读取 skill 目录 {}：{error}", current.display()))?;
         for entry in entries {
             let entry = entry.map_err(|error| format!("无法读取 skill 目录项：{error}"))?;
             let path = entry.path();
+            if is_junk_name(&entry.file_name().to_string_lossy()) {
+                continue;
+            }
             let metadata = std::fs::symlink_metadata(&path)
                 .map_err(|error| format!("无法检查 skill 文件：{error}"))?;
             if metadata.file_type().is_symlink() {
@@ -499,21 +588,7 @@ fn collect_files_recursive(base: &Path) -> Result<Vec<(PathBuf, String)>, String
 
 /// 单文件原子写：tmp（pid+序号防微秒碰撞）+ rename（同父目录同设备）。
 fn write_file_atomic(dst: &Path, bytes: &[u8]) -> Result<(), String> {
-    if let Some(parent) = dst.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|error| format!("无法创建 skill 副本目录：{error}"))?;
-    }
-    let tmp = {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static SEQ: AtomicU64 = AtomicU64::new(0);
-        dst.with_extension(format!(
-            "tmp-{}-{}-{}",
-            timestamp_nanos(),
-            std::process::id(),
-            SEQ.fetch_add(1, Ordering::Relaxed)
-        ))
-    };
-    std::fs::write(&tmp, bytes).map_err(|error| format!("无法写入 skill 副本文件：{error}"))?;
+    let tmp = stage_file_tmp(dst, bytes)?;
     std::fs::rename(&tmp, dst).map_err(|error| {
         let _ = std::fs::remove_file(&tmp);
         format!("无法落位 skill 副本文件 {}：{error}", dst.display())
@@ -534,11 +609,19 @@ fn ensure_seeded(app_data_root: &Path, resource: Option<&Path>) -> Result<(), St
     )
 }
 
+/// 同路径历代出厂哈希命中判定：表按 (rel, hash) 分键，防跨文件碰撞
+/// （用户把 A 文件的旧出厂内容贴进 B 文件不得被静默覆写/删除）。
+fn matches_historical(historical_hashes: &[(&str, &str)], rel: &str, hash: &str) -> bool {
+    historical_hashes
+        .iter()
+        .any(|(path, value)| *path == rel && *value == hash)
+}
+
 /// 三态判定核心（历代哈希表与移除清单参数化注入，测试用 fixture 自算哈希）。
 fn ensure_seeded_with(
     app_data_root: &Path,
     resource: Option<&Path>,
-    historical_hashes: &[&str],
+    historical_hashes: &[(&str, &str)],
     removed_files: &[&str],
 ) -> Result<(), String> {
     std::fs::create_dir_all(app_data_root)
@@ -579,8 +662,12 @@ fn ensure_seeded_with(
 
         if dst_hash == factory_hash {
             // 已是当前出厂内容：仅登记，不重写（重写会与 write_skill_file 竞态）。
+            // modified 残留无条件清除（用户手工贴回出厂内容时 files 表可能已匹配）。
             if manifest.files.get(rel) != Some(&factory_hash) {
                 manifest.files.insert(rel.clone(), factory_hash);
+                changed = true;
+            }
+            if manifest.modified.iter().any(|p| p == rel) {
                 manifest.modified.retain(|p| p != rel);
                 changed = true;
             }
@@ -588,7 +675,7 @@ fn ensure_seeded_with(
         }
 
         let recorded_factory = manifest.files.get(rel);
-        let is_unedited_old_factory = historical_hashes.contains(&dst_hash.as_str())
+        let is_unedited_old_factory = matches_historical(historical_hashes, rel, &dst_hash)
             || recorded_factory == Some(&dst_hash);
         if is_unedited_old_factory {
             // 未编辑的旧出厂内容：静默升级为新出厂。
@@ -624,7 +711,7 @@ fn ensure_seeded_with(
         };
         let hash = sha256_hex(&bytes);
         let recorded = manifest.files.get(*rel);
-        if historical_hashes.contains(&hash.as_str()) || recorded == Some(&hash) {
+        if matches_historical(historical_hashes, rel, &hash) || recorded == Some(&hash) {
             if std::fs::remove_file(&dst).is_ok() {
                 manifest.files.remove(*rel);
                 manifest.modified.retain(|p| p != rel);
@@ -1201,11 +1288,12 @@ mod tests {
         write_file(&app_data.join("tsn-flow-planning/SKILL.md"), old_factory_flow);
         write_file(&app_data.join("tsn-topology/package.json"), old_factory_pkg);
         let historical = [
-            sha256_hex(old_factory_skill.as_bytes()),
-            sha256_hex(old_factory_flow.as_bytes()),
-            sha256_hex(old_factory_pkg.as_bytes()),
+            ("tsn-topology/SKILL.md", sha256_hex(old_factory_skill.as_bytes())),
+            ("tsn-flow-planning/SKILL.md", sha256_hex(old_factory_flow.as_bytes())),
+            ("tsn-topology/package.json", sha256_hex(old_factory_pkg.as_bytes())),
         ];
-        let historical_refs: Vec<&str> = historical.iter().map(String::as_str).collect();
+        let historical_refs: Vec<(&str, &str)> =
+            historical.iter().map(|(p, h)| (*p, h.as_str())).collect();
 
         ensure_seeded_with(
             &app_data,
@@ -1284,8 +1372,8 @@ mod tests {
         let app_data = unique_temp_path("tsn-skill-appdata");
         write_file(&app_data.join("tsn-topology/SKILL.md"), "factory-v1");
         write_file(&app_data.join(FACTORY_MANIFEST_NAME), "{not-json!!");
-        let historical = [sha256_hex("factory-v1".as_bytes())];
-        let refs: Vec<&str> = historical.iter().map(String::as_str).collect();
+        let historical = [("tsn-topology/SKILL.md", sha256_hex("factory-v1".as_bytes()))];
+        let refs: Vec<(&str, &str)> = historical.iter().map(|(p, h)| (*p, h.as_str())).collect();
 
         ensure_seeded_with(&app_data, Some(&resource), &refs, &[]).expect("seed");
 
@@ -1332,6 +1420,134 @@ mod tests {
 
     fn read(root: &Path, rel: &str) -> String {
         std::fs::read_to_string(root.join(rel)).expect("read seeded file")
+    }
+
+    #[test]
+    fn historical_hash_match_is_path_scoped() {
+        // 跨路径碰撞防线：A 文件的旧出厂内容被用户贴进 B 文件时不得被静默覆写。
+        let resource = create_test_skill_root();
+        write_file(&resource.join("tsn-topology/SKILL.md"), "topo-v2");
+        write_file(&resource.join("tsn-flow-planning/SKILL.md"), "flow-v2");
+        let app_data = unique_temp_path("tsn-skill-appdata");
+        let old_topo = "topo-v1-monolith";
+        // 用户把旧 topology 出厂内容贴进 flow 文件当编辑起点。
+        write_file(&app_data.join("tsn-topology/SKILL.md"), old_topo);
+        write_file(&app_data.join("tsn-flow-planning/SKILL.md"), old_topo);
+        let hash = sha256_hex(old_topo.as_bytes());
+        let historical = [("tsn-topology/SKILL.md", hash.as_str())];
+
+        ensure_seeded_with(&app_data, Some(&resource), &historical, &[]).expect("seed");
+
+        // 同路径命中 → 静默升级；跨路径 → 视为用户修改保留。
+        assert_eq!(read(&app_data, "tsn-topology/SKILL.md"), "topo-v2");
+        assert_eq!(read(&app_data, "tsn-flow-planning/SKILL.md"), old_topo);
+        let manifest = read_manifest(&app_data);
+        assert!(manifest.modified.iter().any(|p| p == "tsn-flow-planning/SKILL.md"));
+
+        cleanup(resource);
+        cleanup(app_data);
+    }
+
+    #[test]
+    fn seeding_skips_ds_store_and_tmp_junk_from_resource() {
+        // 整目录打包会把开发机 Finder 元数据带进 Resource——播种侧必须过滤。
+        let resource = create_test_skill_root();
+        write_file(&resource.join("tsn-topology/SKILL.md"), "factory");
+        write_file(&resource.join(".DS_Store"), "finder-junk");
+        write_file(&resource.join("tsn-topology/SKILL.tmp-123-456-0"), "stale-tmp");
+        let app_data = unique_temp_path("tsn-skill-appdata");
+
+        ensure_seeded_with(&app_data, Some(&resource), &[], &[]).expect("seed");
+
+        assert!(app_data.join("tsn-topology/SKILL.md").exists());
+        assert!(!app_data.join(".DS_Store").exists());
+        assert!(!app_data.join("tsn-topology/SKILL.tmp-123-456-0").exists());
+        let manifest = read_manifest(&app_data);
+        assert!(!manifest.files.keys().any(|k| k.contains(".DS_Store") || k.contains(".tmp-")));
+
+        cleanup(resource);
+        cleanup(app_data);
+    }
+
+    #[test]
+    fn seeding_without_resource_leaves_app_data_untouched() {
+        // 早退守卫：Resource 缺失（None / 路径不存在）时不得执行 R1a 删除循环。
+        let app_data = unique_temp_path("tsn-skill-appdata");
+        let orphan = "{\"type\":\"commonjs\"}";
+        write_file(&app_data.join("tsn-topology/package.json"), orphan);
+        let hash = sha256_hex(orphan.as_bytes());
+        let historical = [("tsn-topology/package.json", hash.as_str())];
+        let removed = ["tsn-topology/package.json"];
+
+        ensure_seeded_with(&app_data, None, &historical, &removed).expect("seed none");
+        assert_eq!(read(&app_data, "tsn-topology/package.json"), orphan);
+
+        let missing = unique_temp_path("tsn-skill-missing-resource");
+        ensure_seeded_with(&app_data, Some(&missing), &historical, &removed).expect("seed missing");
+        assert_eq!(read(&app_data, "tsn-topology/package.json"), orphan);
+
+        cleanup(app_data);
+    }
+
+    #[test]
+    fn removal_list_deletes_orphan_recorded_in_manifest() {
+        // R1a 的 manifest-recorded 分支：上一版播种登记的文件进入移除清单后
+        // 删除（未来发版移除文件的常态路径，历代常量表只覆盖发布前存量）。
+        let resource = create_test_skill_root();
+        write_file(&resource.join("tsn-topology/SKILL.md"), "factory");
+        write_file(&resource.join("tsn-topology/references/old.md"), "old-ref");
+        let app_data = unique_temp_path("tsn-skill-appdata");
+        ensure_seeded_with(&app_data, Some(&resource), &[], &[]).expect("seed v1");
+
+        std::fs::remove_file(resource.join("tsn-topology/references/old.md")).expect("rm factory");
+        ensure_seeded_with(
+            &app_data,
+            Some(&resource),
+            &[],
+            &["tsn-topology/references/old.md"],
+        )
+        .expect("seed v2");
+
+        assert!(!app_data.join("tsn-topology/references/old.md").exists());
+        let manifest = read_manifest(&app_data);
+        assert!(!manifest.files.contains_key("tsn-topology/references/old.md"));
+
+        cleanup(resource);
+        cleanup(app_data);
+    }
+
+    #[test]
+    fn restore_guard_rejects_dev_missing_appdata_and_missing_resource() {
+        let dev = create_test_skill_root();
+        let app_data = unique_temp_path("tsn-skill-appdata");
+        let resource = create_test_skill_root();
+
+        // dev 仓库根存在 → 拒绝（无播种副本概念）。
+        let error = restore_guard(Some(&dev), Some(&app_data), Some(&resource))
+            .expect_err("dev rejects");
+        assert!(error.contains("开发模式"));
+
+        // app-data 不可定位 → 拒绝。
+        let error = restore_guard(None, None, Some(&resource)).expect_err("no app-data");
+        assert!(error.contains("无法定位可写 skill 目录"));
+
+        // Resource 缺失（None / 不存在）→ 拒绝。
+        let missing = unique_temp_path("tsn-skill-missing-resource");
+        let error = restore_guard(None, Some(&app_data), None).expect_err("no resource");
+        assert!(error.contains("内置 skill 资源不可用"));
+        let error =
+            restore_guard(None, Some(&app_data), Some(&missing)).expect_err("missing resource");
+        assert!(error.contains("内置 skill 资源不可用"));
+
+        // dev 路径不存在（release 形态）→ 通过。
+        let missing_dev = unique_temp_path("tsn-skill-nodev");
+        let (got_app_data, got_resource) =
+            restore_guard(Some(&missing_dev), Some(&app_data), Some(&resource)).expect("passes");
+        assert_eq!(got_app_data, app_data);
+        assert_eq!(got_resource, resource);
+
+        cleanup(dev);
+        cleanup(resource);
     }
 
     #[test]

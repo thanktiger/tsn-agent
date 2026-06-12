@@ -2,6 +2,8 @@ export const WORKFLOW_STEPS = ["topology", "time-sync", "flow-template", "planni
 
 export type WorkflowStep = (typeof WORKFLOW_STEPS)[number];
 
+// verify-skills.mjs 正则锚点：此 union 须保持单行（R9 对账 reference 文件名）；
+// 改名/换行前同步 scripts/verify-skills.mjs。
 export type ScenarioConfigId = "generic-tsn" | "aerospace-onboard";
 
 export interface ScenarioFlowTemplate {

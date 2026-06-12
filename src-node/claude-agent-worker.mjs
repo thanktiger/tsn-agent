@@ -91,7 +91,8 @@ export async function runClaude(userPrompt, options = {}, queryFn = query) {
       }
     : undefined;
   const stageRunnerInputPath = await writeStageRunnerInputFile(stageResultPath, resolvedOptions.stageRunnerInput);
-  const { systemPrompt, skillReadWarning, scenarioReference } = await buildSystemPromptForStage(resolvedOptions.stageRunnerInput, skillRoot);
+  const { systemPrompt, skillReadWarning, scenarioReference, scenarioReferenceWarning } =
+    await buildSystemPromptForStage(resolvedOptions.stageRunnerInput, skillRoot);
   const finalPrompt = buildPrompt(
     userPrompt,
     resolvedOptions.conversationContext,
@@ -146,6 +147,9 @@ export async function runClaude(userPrompt, options = {}, queryFn = query) {
   });
   if (skillReadWarning) {
     recordAuditTimeline(auditLog, skillReadWarning);
+  }
+  if (scenarioReferenceWarning) {
+    recordAuditTimeline(auditLog, scenarioReferenceWarning);
   }
   let currentPromptRunId = "initial";
   const handleSdkMessage = (message) => {
@@ -407,19 +411,24 @@ async function buildSystemPromptForStage(stageRunnerInput, skillRoot) {
     typeof stageRunnerInput?.scenarioConfigId === "string" && stageRunnerInput.scenarioConfigId.length > 0
       ? stageRunnerInput.scenarioConfigId
       : null;
-  const candidates = requestedScenario && requestedScenario !== FALLBACK_SCENARIO_ID
+  // 场景 id 进文件路径前做格式校验：畸形值（如含 ../ 的路径遍历）按未知场景
+  // 走 generic-tsn 回退，不参与 join。
+  const isSafeScenarioId = requestedScenario !== null && /^[a-z0-9][a-z0-9-]*$/.test(requestedScenario);
+  const candidates = isSafeScenarioId && requestedScenario !== FALLBACK_SCENARIO_ID
     ? [requestedScenario, FALLBACK_SCENARIO_ID]
     : [FALLBACK_SCENARIO_ID];
 
   let referenceBody = null;
   let resolvedScenario = null;
+  const referenceReadErrors = [];
   for (const scenario of candidates) {
     try {
       referenceBody = await readFile(join(referenceDir, `${scenario}.md`), "utf8");
       resolvedScenario = scenario;
       break;
-    } catch {
-      // 逐级降级：尝试下一个候选。
+    } catch (error) {
+      // 逐级降级：记录失败原因供审计，尝试下一个候选。
+      referenceReadErrors.push({ scenario, error: normalizeError(error) });
     }
   }
 
@@ -430,11 +439,31 @@ async function buildSystemPromptForStage(stageRunnerInput, skillRoot) {
     referencePath: resolvedScenario ? join(referenceDir, `${resolvedScenario}.md`) : null,
     fallback: resolvedScenario !== null && resolvedScenario !== requestedScenario,
   };
+  // 降级路径产生 timeline 事件（与 skillReadWarning 同管道）：reference 全缺是
+  // 播种半失败的典型症状，仅靠审计头字段排查不醒目。
+  const scenarioReferenceWarning = referenceBody === null
+    ? {
+        type: "skill_reference_unavailable",
+        level: "warn",
+        requestedScenario,
+        referenceDir,
+        errors: referenceReadErrors,
+      }
+    : scenarioReference.fallback
+      ? {
+          type: "skill_reference_fallback",
+          level: "info",
+          requestedScenario,
+          resolvedScenario,
+          errors: referenceReadErrors,
+        }
+      : undefined;
 
   if (referenceBody === null) {
     return {
       systemPrompt: `${SYSTEM_PROMPT_SKELETON}\n\n${SKILL_GUIDANCE_SENTINEL}\n${guidance}`,
       scenarioReference,
+      scenarioReferenceWarning,
     };
   }
 
@@ -455,6 +484,7 @@ async function buildSystemPromptForStage(stageRunnerInput, skillRoot) {
   return {
     systemPrompt: `${SYSTEM_PROMPT_SKELETON}\n\n${SKILL_GUIDANCE_SENTINEL}\n${guidance}\n\n${SCENARIO_REFERENCE_SENTINEL}\n${referenceBody}${pathTable}`,
     scenarioReference,
+    scenarioReferenceWarning,
   };
 }
 

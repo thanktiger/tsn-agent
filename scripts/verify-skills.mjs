@@ -39,6 +39,17 @@ async function main() {
     }
   }
 
+  // 整目录映射把 .claude/skills 全树打进包：根层散文件（含 .DS_Store）与
+  // 无 SKILL.md 的目录无法在打包时排除，必须在构建前阻断。
+  const rootEntries = await readdir(skillRoot, { withFileTypes: true });
+  for (const entry of rootEntries) {
+    if (entry.isFile()) {
+      errors.push(`${skillRoot}/${entry.name} is a stray root-level file; the directory bundle would ship it — remove it.`);
+    } else if (entry.isDirectory() && !skillNames.includes(entry.name)) {
+      errors.push(`${skillRoot}/${entry.name}/ has no SKILL.md; the directory bundle would ship it — remove it or add SKILL.md.`);
+    }
+  }
+
   for (const skillName of skillNames) {
     const skillPath = `${skillRoot}/${skillName}/SKILL.md`;
     const skillSource = await readFile(skillPath, "utf8");
@@ -162,26 +173,18 @@ async function verifyScenarioAccounting() {
     }
   }
 
-  // preset 表 `templateId` 锚点：markdown 表格行内反引号代码字段。
+  // preset 表 `templateId` 锚点：定位表头含 templateId 的列，只取该列数据行的
+  // 反引号 token——该列只装模板 id，全部无条件对账（不靠前缀启发式，typo 或
+  // 新模板族写错都响亮报红）。
   const presetTemplateIdsByScenario = new Map();
   for (const file of referenceFiles) {
     const content = await readFile(`${referenceDir}/${file}`, "utf8");
-    const ids = new Set();
-    for (const line of content.split(/\r?\n/)) {
-      if (!line.trimStart().startsWith("|")) {
-        continue;
-      }
-      for (const match of line.matchAll(/`([a-z0-9-]+)`/g)) {
-        ids.add(match[1]);
-      }
-    }
+    const ids = collectPresetTemplateIds(content);
     presetTemplateIdsByScenario.set(file.replace(/\.md$/, ""), ids);
 
     for (const id of ids) {
-      if (id.startsWith("generic-") || id.startsWith("dual-")) {
-        if (!templateIds.includes(id)) {
-          errors.push(`${referenceDir}/${file} references unknown templateId \`${id}\` (catalog: ${templateIds.join(", ")}).`);
-        }
+      if (!templateIds.includes(id)) {
+        errors.push(`${referenceDir}/${file} preset table references unknown templateId \`${id}\` (catalog: ${templateIds.join(", ")}).`);
       }
     }
   }
@@ -203,15 +206,49 @@ async function verifyScenarioAccounting() {
   return errors;
 }
 
+// 取 markdown 表中 `templateId` 列的全部反引号 token（跨表累计）。
+function collectPresetTemplateIds(content) {
+  const ids = new Set();
+  const lines = content.split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line.trimStart().startsWith("|") || !line.includes("templateId")) {
+      continue;
+    }
+    const column = splitTableRow(line).findIndex((cell) => cell.includes("templateId"));
+    if (column === -1) {
+      continue;
+    }
+    // i+1 是分隔行，数据行从 i+2 起到表结束。
+    for (let j = i + 2; j < lines.length; j++) {
+      if (!lines[j].trimStart().startsWith("|")) {
+        break;
+      }
+      const match = splitTableRow(lines[j])[column]?.match(/`([^`]+)`/);
+      if (match) {
+        ids.add(match[1]);
+      }
+    }
+  }
+  return ids;
+}
+
+function splitTableRow(line) {
+  return line
+    .trim()
+    .replace(/^\|/, "")
+    .replace(/\|$/, "")
+    .split("|")
+    .map((cell) => cell.trim());
+}
+
 async function listSkillFiles(skillDir) {
   const entries = await readdir(skillDir, { withFileTypes: true });
   const files = [];
 
+  // 不豁免 .DS_Store/*.swp：整目录打包会把它们带进 Resource，落入白名单
+  // 检查报错让开发者在构建前删除。
   for (const entry of entries) {
-    if (entry.name === ".DS_Store" || entry.name.endsWith(".swp")) {
-      continue;
-    }
-
     const path = `${skillDir}/${entry.name}`;
     if (entry.isDirectory()) {
       files.push(...await listSkillFiles(path));
