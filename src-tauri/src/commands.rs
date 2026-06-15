@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader};
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -186,7 +187,8 @@ fn run_claude_agent_blocking(
     })
     .to_string();
 
-    let mut child = Command::new("node")
+    let mut command = Command::new("node");
+    command
         .arg(&worker_path)
         .arg(payload)
         .current_dir(cwd)
@@ -197,11 +199,14 @@ fn run_claude_agent_blocking(
         .env("TSN_AGENT_SESSION_ID", &app_session_id_for_env)
         // CLAUDECODE=1 在 Claude Code 进程下会被 SDK 拒绝（Spike B + plan v3 KTD）。
         .env_remove("CLAUDECODE")
-        // 审计 P1#3：worker 独立进程组（pgid = worker pid），超时可 kill(-pgid)
-        // 连根端掉 SDK 拉起的 MCP child，避免孤儿进程继续持有 DB_RPC_TOKEN。
-        .process_group(0)
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    // 审计 P1#3：worker 独立进程组（pgid = worker pid），超时可 kill(-pgid)
+    // 连根端掉 SDK 拉起的 MCP child，避免孤儿进程继续持有 DB_RPC_TOKEN。
+    // Windows 无进程组语义：超时改用 taskkill /T 按 PID 树端掉（见 try_wait 超时分支）。
+    #[cfg(unix)]
+    command.process_group(0);
+    let mut child = command
         .spawn()
         .map_err(|error| {
             log_worker_event(
@@ -227,7 +232,8 @@ fn run_claude_agent_blocking(
         None,
         serde_json::json!({ "workerPath": worker_path.display().to_string() }),
     );
-    // process_group(0) 后 worker 是组长，pgid 等于其 pid。
+    // process_group(0) 后 worker 是组长，pgid 等于其 pid（仅 Unix 用于 kill(-pgid)）。
+    #[cfg(unix)]
     let worker_pgid = child.id() as i32;
     let started_at = Instant::now();
     let stdout = child
@@ -260,8 +266,19 @@ fn run_claude_agent_blocking(
             Ok(None) if started_at.elapsed() > CLAUDE_BRIDGE_SYNC_TIMEOUT => {
                 // 向整个进程组发 SIGKILL：worker + SDK 拉起的 MCP child 一并端掉，
                 // 避免孤儿进程继续持有 sidecar 的 DB_RPC_TOKEN（审计 P1#3）。
+                #[cfg(unix)]
                 unsafe {
                     libc::kill(-worker_pgid, libc::SIGKILL);
+                }
+                // Windows 无 pgid：taskkill /T 按进程树端掉 worker + MCP child（/F 强制）。
+                #[cfg(windows)]
+                {
+                    let _ = Command::new("taskkill")
+                        .arg("/F")
+                        .arg("/T")
+                        .arg("/PID")
+                        .arg(child.id().to_string())
+                        .output();
                 }
                 let _ = child.wait();
                 log_worker_event(
