@@ -1,9 +1,12 @@
 ---
 title: "refactor: 让拓扑阶段直接消费 MCP 结果"
 type: refactor
-status: active
+status: superseded
 date: 2026-05-28
 origin: docs/brainstorms/2026-05-27-tsn-topology-mcp-requirements.md
+superseded_by: docs/plans/2026-06-03-001-refactor-topology-mcp-single-db-domain-plan.md
+superseded_on: 2026-06-05
+superseded_reason: "stage result 边界契约被 06-03-001 改为 payload:{kind:topology,sessionId,mutationId} 重写，旧 canonical-based 边界作废"
 ---
 
 # refactor: 让拓扑阶段直接消费 MCP 结果

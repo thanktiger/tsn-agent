@@ -1,9 +1,12 @@
 ---
 title: feat: 对接 TSN 规划中转服务
 type: feat
-status: active
+status: superseded
 date: 2026-05-22
 origin: docs/brainstorms/2026-05-22-tsn-planner-service-integration-requirements.md
+superseded_by: docs/plans/2026-06-03-001-refactor-topology-mcp-single-db-domain-plan.md
+superseded_on: 2026-06-05
+superseded_reason: "planner/流量规划服务在 06-03-001 single-DB 重构中整体下线（canonical/exporters 删除），预计随流量规划 Phase B 在 DB-backed 路径重建"
 ---
 
 # feat: 对接 TSN 规划中转服务

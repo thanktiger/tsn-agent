@@ -1,7 +1,7 @@
 ---
 title: "feat: dual-plane-redundant 拓扑生成（宇航双平面单跳/双跳）"
 type: feat
-status: active
+status: completed
 date: 2026-06-09
 origin: docs/brainstorms/2026-06-09-dual-plane-topology-generation-requirements.md
 ---

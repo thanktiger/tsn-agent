@@ -1,9 +1,12 @@
 ---
 title: "feat: 完善 TSN Agent 分阶段交互工作流"
 type: feat
-status: active
+status: superseded
 date: 2026-05-20
 origin: docs/brainstorms/2026-05-20-tsn-agent-tauri-ned-requirements.md
+superseded_by: docs/plans/2026-06-03-001-refactor-topology-mcp-single-db-domain-plan.md
+superseded_on: 2026-06-05
+superseded_reason: "分阶段工作流的 stage runner / stage-skill-result.v0 协议被 06-03-001 single-DB 重构移除；拓扑阶段保留但走 sidecar+P0 表重写，流量规划阶段下线"
 ---
 
 # feat: 完善 TSN Agent 分阶段交互工作流

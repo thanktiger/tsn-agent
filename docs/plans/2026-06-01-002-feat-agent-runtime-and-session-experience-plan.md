@@ -1,12 +1,15 @@
 ---
 title: "feat+refactor: 移除 fake agent 运行时并整合 Agent 步骤摘要与日志体验"
 type: feat
-status: active
+status: superseded
 date: 2026-06-01
 origin: user request — merge of 2026-06-01-001 (refactor) and 2026-05-29-002 (feat)
 supersedes:
   - docs/plans/2026-06-01-001-refactor-remove-fake-agent-runtime-plan.md
   - docs/plans/2026-05-29-002-feat-agent-step-summary-detail-plan.md
+superseded_by: docs/plans/2026-06-03-001-refactor-topology-mcp-single-db-domain-plan.md
+superseded_on: 2026-06-05
+superseded_reason: "agent runtime/session UX 的基础设施（agent-types/sanitizer/三态 adapter/agent_step）被 06-03-001 single-DB 重构的 PR-β1 沿用并重写：adapter 改 query_topology 路径、fake-agent test runtime 整体删除；原 PR #2 分支落后 main 177 commits 且与已删文件冲突，已关闭"
 ---
 
 # feat+refactor: 移除 fake agent 运行时并整合 Agent 步骤摘要与日志体验

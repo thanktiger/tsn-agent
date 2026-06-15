@@ -1,7 +1,7 @@
 ---
 title: refactor 重构 topology MCP 到 single-DB 领域事实源
 type: refactor
-status: active
+status: completed
 date: 2026-06-03
 origin: docs/brainstorms/2026-06-03-session-db-mcp-requirements.md
 ---

@@ -1,7 +1,7 @@
 ---
 title: "refactor: 让 SKILL.md 成为可编辑的 agent 指引事实源"
 type: refactor
-status: active
+status: completed
 date: 2026-06-09
 deepened: 2026-06-09
 origin: docs/brainstorms/2026-06-09-editable-skill-guidance-source-requirements.md

@@ -1,9 +1,12 @@
 ---
 title: "feat: 接入真实阶段 skills 和 INET smoke 验证"
 type: feat
-status: active
+status: superseded
 date: 2026-05-21
 origin: docs/brainstorms/2026-05-20-tsn-agent-tauri-ned-requirements.md
+superseded_by: docs/plans/2026-06-03-001-refactor-topology-mcp-single-db-domain-plan.md
+superseded_on: 2026-06-05
+superseded_reason: "real stage skills 的 stage runner 路径被 06-03-001 移除；topology skill 重写为 MCP+DB 路径，flow skill 下线占位"
 ---
 
 # feat: 接入真实阶段 skills 和 INET smoke 验证

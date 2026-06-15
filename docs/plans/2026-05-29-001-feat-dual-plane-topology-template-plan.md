@@ -1,9 +1,12 @@
 ---
 title: "feat: 重构双平面拓扑模板契约"
 type: feat
-status: active
+status: superseded
 date: 2026-05-29
 origin: docs/brainstorms/2026-05-27-tsn-topology-mcp-requirements.md
+superseded_by: docs/plans/2026-06-09-004-feat-dual-plane-topology-generation-plan.md
+superseded_on: 2026-06-10
+superseded_reason: "dual-plane 模板方案被 06-09-004 的 dual-plane-redundant 生成方案取代（sidecar 端确定性生成 + P0 表落库）"
 ---
 
 # feat: 重构双平面拓扑模板契约

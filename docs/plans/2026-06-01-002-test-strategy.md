@@ -1,10 +1,13 @@
 ---
 title: "test: 2026-06-01-002 计划的单测与 E2E 测试方案"
 type: test-strategy
-status: active
+status: superseded
 date: 2026-06-01
 related_plan: docs/plans/2026-06-01-002-feat-agent-runtime-and-session-experience-plan.md
 origin: ce:work 实施前测试方案对齐
+superseded_by: docs/plans/2026-06-03-001-refactor-topology-mcp-single-db-domain-plan.md
+superseded_on: 2026-06-05
+superseded_reason: "配套 2026-06-01-002 的测试策略；实现经 06-03-001 PR-β1 重写后测试基线随之重建（269→194），原策略作废"
 ---
 
 # 2026-06-01-002 单测与 E2E 测试方案
