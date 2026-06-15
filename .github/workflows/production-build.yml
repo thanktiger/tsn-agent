@@ -125,11 +125,11 @@ jobs:
       - name: Verify bundled skills
         run: npm run verify:skills
 
-      - name: Run unit tests
-        run: npm test
-
       - name: Build worker bundle
         run: npm run build:worker
+
+      - name: Run unit tests
+        run: npm test
 
       - name: Build Tauri application
         uses: tauri-apps/tauri-action@v0
