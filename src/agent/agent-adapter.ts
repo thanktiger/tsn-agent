@@ -107,28 +107,8 @@ export async function runTsnAgent(requestOrIntent: TsnAgentRequest | string): Pr
     return confirmResult;
   }
 
-  const localResult = runLocalBoundaryProgression(userIntent, workflow);
-  if (localResult) {
-    logAgent(request.diagnostics, {
-      sessionId,
-      runId,
-      message: "Agent 使用本地确定性边界回复",
-      durationMs: Date.now() - startedAt,
-      details: {
-        workflowStep: localResult.workflow.currentStep,
-        workflowStatus: localResult.workflow.stages[localResult.workflow.currentStep].status,
-      },
-    });
-
-    return localResult;
-  }
-
-  // 灰阶段（flow-template / planning-export）收到拓扑修改意图：回退到拓扑阶段再走 Claude。
-  const effectiveWorkflow =
-    (workflow.currentStep === "flow-template" || workflow.currentStep === "planning-export")
-      && hasTopologyChangeIntent(userIntent)
-      ? requestStageChanges(workflow, "topology")
-      : workflow;
+  // 自由文本一律走大模型判断意图（不再有正则快速路径）。跨阶段意图由大模型调
+  // request_stage_change 工具表达，应用层在 applyStageResults 校验后执行。
   const snapshot = await fetchTopologySnapshot(sessionId);
   const streamStats = {
     chunkCount: 0,
@@ -170,18 +150,18 @@ export async function runTsnAgent(requestOrIntent: TsnAgentRequest | string): Pr
         runId,
         appSessionId: sessionId,
         resumeSessionId: request.session?.claudeSessionId,
-        conversationContext: buildConversationContext(request.session, effectiveWorkflow, snapshot, userIntent),
+        conversationContext: buildConversationContext(request.session, workflow, snapshot, userIntent),
         stageRunnerInput: {
           userIntent,
-          stage: effectiveWorkflow.currentStep,
-          scenarioConfigId: effectiveWorkflow.scenarioConfigId,
+          stage: workflow.currentStep,
+          scenarioConfigId: workflow.scenarioConfigId,
         },
       },
     });
     runFinished = true;
     const application = applyStageResults({
       stageResults: claude.stageResults ?? [],
-      workflow: effectiveWorkflow,
+      workflow,
       sessionId,
     });
     logAgent(request.diagnostics, {
@@ -248,34 +228,7 @@ export async function runTsnAgent(requestOrIntent: TsnAgentRequest | string): Pr
   }
 }
 
-// ---------- 本地边界推进 ----------
-
-function runLocalBoundaryProgression(userIntent: string, workflow: WorkflowState): TsnAgentResult | undefined {
-  if (isSimulationExecutionIntent(userIntent)) {
-    return createSimulationUnsupportedResult(workflow);
-  }
-
-  const currentStatus = workflow.stages[workflow.currentStep].status;
-
-  if (isBoundaryProgressionIntent(userIntent) && currentStatus === "waiting_confirmation") {
-    return runAfterConfirmation(workflow);
-  }
-
-  if (workflow.currentStep === "time-sync" && currentStatus === "current") {
-    return runTimeSyncStage(workflow);
-  }
-
-  if (workflow.currentStep === "flow-template" || workflow.currentStep === "planning-export") {
-    if (hasTopologyChangeIntent(userIntent)) {
-      // 用户在灰阶段想改拓扑：回退到拓扑阶段，由调用方下一轮走 Claude。
-      return undefined;
-    }
-
-    return createStageOfflineResult(workflow);
-  }
-
-  return undefined;
-}
+// ---------- 阶段推进（确定性） ----------
 
 // 确认按钮的确定性入口：先处理待确认的破坏性回退，否则普通推进。不调用大模型。
 function runConfirmAction(workflow: WorkflowState): TsnAgentResult {
@@ -390,46 +343,6 @@ function runTimeSyncStage(workflow: WorkflowState): TsnAgentResult {
   return {
     events,
     workflow: nextWorkflow,
-    assistantText: events.map((event) => event.content).join("\n"),
-    mode: "local",
-  };
-}
-
-function createSimulationUnsupportedResult(workflow: WorkflowState): TsnAgentResult {
-  const events = [
-    createEvent({
-      id: "event-simulation-unsupported",
-      kind: "error",
-      title: "仿真未执行",
-      content: "当前版本还没有接入 OMNeT++/远程服务器仿真 runner。本次不会在后台启动仿真，也不会异步返回仿真结果。",
-      status: "warning",
-    }),
-  ];
-
-  return {
-    events,
-    workflow,
-    assistantText: events.map((event) => event.content).join("\n"),
-    mode: "local",
-  };
-}
-
-function createStageOfflineResult(workflow: WorkflowState): TsnAgentResult {
-  const scenarioConfig = getScenarioConfig(workflow.scenarioConfigId);
-  const events = [
-    createEvent({
-      id: "event-stage-offline",
-      kind: "stage-result",
-      stage: workflow.currentStep,
-      title: "阶段暂下线",
-      content: `${scenarioConfig.stageLabels[workflow.currentStep]}在当前版本暂时下线，预计 Phase B 回归。如需调整拓扑，请直接描述新的拓扑需求。`,
-      status: "info",
-    }),
-  ];
-
-  return {
-    events,
-    workflow,
     assistantText: events.map((event) => event.content).join("\n"),
     mode: "local",
   };
@@ -823,24 +736,7 @@ async function fetchTopologySnapshot(sessionId: string | undefined): Promise<Top
   }
 }
 
-// ---------- intent 判定 ----------
-
-function isBoundaryProgressionIntent(userIntent: string): boolean {
-  const trimmed = userIntent.trim();
-  const isShortConfirmation = /^(确认|可以|好的|没问题|对|正确|按这个|就这样|同意|通过|使用|采用|先给默认|默认|用默认|采用默认|使用默认|继续|下一步)\s*[。.!！]?$/i.test(trimmed);
-  const confirmsPreviousUnderstanding = /^理解的对(?:，|,|\s|。|！|!|$)/i.test(trimmed)
-    || /按照上面的理解/.test(trimmed);
-
-  return isShortConfirmation || confirmsPreviousUnderstanding;
-}
-
-function isSimulationExecutionIntent(text: string): boolean {
-  return /启动仿真|运行仿真|执行仿真|跑仿真|跑一下|跑起来|simulation|simulate|omnet|inet|devserver|ssh|服务器/i.test(text);
-}
-
-function hasTopologyChangeIntent(text: string): boolean {
-  return /交换机|端系统|终端|网卡|拓扑|switch|topology/i.test(text);
-}
+// ---------- 输出侧守卫（大模型回复的安全兜底） ----------
 
 function isUnsupportedSimulationClaim(text: string): boolean {
   return /启动仿真|正在.*仿真|后台.*仿真|远程.*仿真|SSH|ssh|devserver|稍后.*结果|完成后.*通知|跑完.*通知/i.test(text);

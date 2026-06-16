@@ -323,13 +323,14 @@ describe("runTsnAgent", () => {
     expect(context).not.toContain("[工具]");
   });
 
-  it("returns empty toolCalls on the local boundary path (U4)", async () => {
+  it("returns empty toolCalls on the deterministic confirm path (U4)", async () => {
     enableTauriRuntime();
     const { runTsnAgent } = await import("./agent-adapter");
 
     const result = await runTsnAgent({
-      userIntent: "启动仿真",
-      session: sessionWithWorkflow(createInitialWorkflowState()),
+      userIntent: "继续",
+      action: "confirm-stage",
+      session: sessionWithWorkflow(topologyWaitingWorkflow()),
     });
 
     expect(result.mode).toBe("local");
@@ -475,12 +476,13 @@ describe("runTsnAgent", () => {
     );
   });
 
-  it("confirms a waiting topology stage locally and advances into time-sync defaults", async () => {
+  it("confirms a waiting topology stage via the button and auto-generates time-sync defaults (U4 regression)", async () => {
     enableTauriRuntime();
     const { runTsnAgent } = await import("./agent-adapter");
 
     const result = await runTsnAgent({
       userIntent: "继续",
+      action: "confirm-stage",
       session: sessionWithWorkflow(topologyWaitingWorkflow()),
     });
 
@@ -489,6 +491,8 @@ describe("runTsnAgent", () => {
     expect(result.workflow.stages.topology.status).toBe("confirmed");
     expect(result.workflow.currentStep).toBe("time-sync");
     expect(result.workflow.stages["time-sync"].status).toBe("waiting_confirmation");
+    // 阶段处理没丢：进入 time-sync 自动生成默认摘要。
+    expect(result.workflow.stages["time-sync"].summary).toContain("时间同步");
     expect(result.events).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ kind: "confirmation-required", stage: "time-sync" }),
@@ -496,40 +500,44 @@ describe("runTsnAgent", () => {
     );
   });
 
-  it("advances time-sync defaults locally for free-form input in the time-sync stage", async () => {
+  it("shows the offline notice when the confirm button advances into a gray stage (U4 regression)", async () => {
     enableTauriRuntime();
     const workflow = createInitialWorkflowState();
     workflow.currentStep = "time-sync";
     workflow.stages.topology = { step: "topology", status: "confirmed" };
-    workflow.stages["time-sync"] = { step: "time-sync", status: "current" };
+    workflow.stages["time-sync"] = { step: "time-sync", status: "waiting_confirmation", summary: "时间同步默认值。" };
     const { runTsnAgent } = await import("./agent-adapter");
 
     const result = await runTsnAgent({
-      userIntent: "时间同步怎么配置？",
+      userIntent: "继续",
+      action: "confirm-stage",
       session: sessionWithWorkflow(workflow),
     });
 
     expect(result.mode).toBe("local");
     expect(invokeMock).not.toHaveBeenCalled();
-    expect(result.workflow.stages["time-sync"].status).toBe("waiting_confirmation");
+    expect(result.workflow.currentStep).toBe("flow-template");
+    expect(result.assistantText).toContain("暂时下线");
   });
 
-  it("rejects simulation execution requests locally", async () => {
+  it("sends a typed confirmation word to the model instead of regex-matching it (U4)", async () => {
     enableTauriRuntime();
+    mockTauriCommands({ claude: { assistantText: "好的。", sessionId: "claude-session-typed" } });
     const { runTsnAgent } = await import("./agent-adapter");
 
     const result = await runTsnAgent({
-      userIntent: "帮我启动仿真",
-      session: sessionWithWorkflow(createInitialWorkflowState()),
+      userIntent: "继续",
+      session: sessionWithWorkflow(topologyWaitingWorkflow()),
     });
 
-    expect(result.mode).toBe("local");
-    expect(invokeMock).not.toHaveBeenCalled();
-    expect(result.assistantText).toContain("不会在后台启动仿真");
+    // 没有 action：自由文本「继续」不再被正则确定性推进，而是走大模型。
+    expect(result.mode).toBe("claude");
+    expect(invokeMock).toHaveBeenCalledWith("run_claude_agent", expect.anything());
   });
 
-  it("answers offline-stage input locally when no topology intent is present", async () => {
+  it("sends offline-stage free-form input to the model without rewriting the stage (U4)", async () => {
     enableTauriRuntime();
+    mockTauriCommands({ claude: { assistantText: "流量规划暂时下线。", sessionId: "claude-session-offline" } });
     const workflow = createInitialWorkflowState();
     workflow.currentStep = "flow-template";
     workflow.stages.topology = { step: "topology", status: "confirmed" };
@@ -542,19 +550,22 @@ describe("runTsnAgent", () => {
       session: sessionWithWorkflow(workflow),
     });
 
-    expect(result.mode).toBe("local");
-    expect(invokeMock).not.toHaveBeenCalled();
-    expect(result.assistantText).toContain("暂时下线");
-    expect(result.workflow.currentStep).toBe("flow-template");
+    expect(result.mode).toBe("claude");
+    // 决议1：stage 不再被改写成 topology，发给 worker 的是真实当前阶段。
+    expect(invokeMock).toHaveBeenCalledWith("run_claude_agent", {
+      request: expect.objectContaining({
+        stageRunnerInput: expect.objectContaining({ stage: "flow-template" }),
+      }),
+    });
   });
 
-  it("falls back to the topology stage when offline-stage input asks for topology changes", async () => {
+  it("proposes a rollback to topology when the model requests it from an offline stage (U4)", async () => {
     enableTauriRuntime();
     mockTauriCommands({
       claude: {
-        assistantText: "已更新拓扑。",
+        assistantText: "要切回拓扑修改吗？",
         sessionId: "claude-session-edit",
-        stageResults: [validStageResult(9)],
+        stageResults: [{ kind: "stage-change-request", targetStage: "topology", reason: "用户要改交换机数量" }],
       },
     });
     const workflow = createInitialWorkflowState();
@@ -570,14 +581,16 @@ describe("runTsnAgent", () => {
     });
 
     expect(result.mode).toBe("claude");
+    // stage 不改写：worker 收到真实当前阶段 flow-template，切阶段由工具表达。
     expect(invokeMock).toHaveBeenCalledWith("run_claude_agent", {
       request: expect.objectContaining({
-        stageRunnerInput: expect.objectContaining({ stage: "topology" }),
+        stageRunnerInput: expect.objectContaining({ stage: "flow-template" }),
       }),
     });
-    expect(result.workflow.currentStep).toBe("topology");
-    expect(result.workflow.stages.topology.status).toBe("waiting_confirmation");
-    expect(result.topologyMutationId).toBe(9);
+    // 破坏性回退先记 pending、不立即执行（等用户点确认按钮）。
+    expect(result.workflow.pendingStageChange).toBe("topology");
+    expect(result.workflow.currentStep).toBe("flow-template");
+    expect(result.workflow.stages.topology.status).toBe("confirmed");
   });
 
   it("includes the current topology snapshot counts in the conversation context", async () => {
