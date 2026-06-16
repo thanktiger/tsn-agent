@@ -72,6 +72,19 @@ function topologyWaitingWorkflow(): WorkflowState {
   });
 }
 
+function timeSyncWaitingWorkflow(): WorkflowState {
+  const base = createInitialWorkflowState();
+  return {
+    ...base,
+    currentStep: "time-sync",
+    stages: {
+      ...base.stages,
+      topology: { step: "topology", status: "confirmed" },
+      "time-sync": { step: "time-sync", status: "waiting_confirmation", summary: "时间同步默认值。" },
+    },
+  };
+}
+
 function validStageResult(mutationId = 7) {
   return createTopologyWorkflowStageResult(
     { sessionId: "session-1", mutationId },
@@ -641,6 +654,120 @@ describe("runTsnAgent", () => {
 
     expect(result.assistantText).not.toContain("跑完会通知你");
     expect(result.assistantText).toContain("不会启动仿真");
+  });
+
+  it("U3: proposes a destructive rollback as pending confirmation without resetting stages", async () => {
+    enableTauriRuntime();
+    mockTauriCommands({
+      claude: {
+        assistantText: "要切回拓扑吗？",
+        sessionId: "claude-session-switch",
+        stageResults: [{ kind: "stage-change-request", targetStage: "topology", reason: "用户要加设备" }],
+      },
+    });
+    const { runTsnAgent } = await import("./agent-adapter");
+
+    const result = await runTsnAgent({
+      userIntent: "我想回到拓扑加两个端系统",
+      session: sessionWithWorkflow(timeSyncWaitingWorkflow()),
+    });
+
+    expect(result.mode).toBe("claude");
+    expect(result.workflow.pendingStageChange).toBe("topology");
+    // 仅记 pending，尚未执行回退：当前阶段不变、拓扑仍 confirmed（未重置）。
+    expect(result.workflow.currentStep).toBe("time-sync");
+    expect(result.workflow.stages.topology.status).toBe("confirmed");
+    expect(result.workflow.stages["time-sync"].status).toBe("waiting_confirmation");
+    expect(result.events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ kind: "confirmation-required", title: "确认切回阶段" }),
+      ]),
+    );
+  });
+
+  it("U3: confirm-stage action executes the pending rollback and resets later stages", async () => {
+    enableTauriRuntime();
+    const pending: WorkflowState = { ...timeSyncWaitingWorkflow(), pendingStageChange: "topology" };
+    const { runTsnAgent } = await import("./agent-adapter");
+
+    const result = await runTsnAgent({
+      userIntent: "继续",
+      action: "confirm-stage",
+      session: sessionWithWorkflow(pending),
+    });
+
+    expect(result.mode).toBe("local");
+    expect(invokeMock).not.toHaveBeenCalled();
+    expect(result.workflow.currentStep).toBe("topology");
+    expect(result.workflow.stages.topology.status).toBe("current");
+    expect(result.workflow.stages["time-sync"].status).toBe("locked");
+    expect(result.workflow.pendingStageChange).toBeUndefined();
+  });
+
+  it("U3: confirm-stage action advances a waiting stage when there is no pending rollback", async () => {
+    enableTauriRuntime();
+    const { runTsnAgent } = await import("./agent-adapter");
+
+    const result = await runTsnAgent({
+      userIntent: "继续",
+      action: "confirm-stage",
+      session: sessionWithWorkflow(topologyWaitingWorkflow()),
+    });
+
+    expect(result.mode).toBe("local");
+    expect(invokeMock).not.toHaveBeenCalled();
+    expect(result.workflow.stages.topology.status).toBe("confirmed");
+    expect(result.workflow.currentStep).toBe("time-sync");
+    expect(result.workflow.stages["time-sync"].status).toBe("waiting_confirmation");
+  });
+
+  it("U3: rejects an illegal (offline) stage-switch target", async () => {
+    enableTauriRuntime();
+    mockTauriCommands({
+      claude: {
+        assistantText: "...",
+        sessionId: "claude-session-illegal",
+        stageResults: [{ kind: "stage-change-request", targetStage: "planning-export" }],
+      },
+    });
+    const { runTsnAgent } = await import("./agent-adapter");
+
+    const result = await runTsnAgent({
+      userIntent: "切到配置生成阶段",
+      session: sessionWithWorkflow(timeSyncWaitingWorkflow()),
+    });
+
+    expect(result.workflow.currentStep).toBe("time-sync");
+    expect(result.workflow.pendingStageChange).toBeUndefined();
+    expect(result.events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ kind: "error", title: "无法切换阶段" }),
+      ]),
+    );
+  });
+
+  it("U3: rejects a forward stage switch proposed via the tool", async () => {
+    enableTauriRuntime();
+    mockTauriCommands({
+      claude: {
+        assistantText: "...",
+        sessionId: "claude-session-forward",
+        stageResults: [{ kind: "stage-change-request", targetStage: "time-sync" }],
+      },
+    });
+    const { runTsnAgent } = await import("./agent-adapter");
+
+    const result = await runTsnAgent({
+      userIntent: "直接进入时间同步",
+      session: sessionWithWorkflow(createInitialWorkflowState()),
+    });
+
+    expect(result.workflow.currentStep).toBe("topology");
+    expect(result.events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ kind: "error", title: "无法前进" }),
+      ]),
+    );
   });
 
   it("records diagnostics for the run lifecycle", async () => {

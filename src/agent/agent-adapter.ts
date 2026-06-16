@@ -9,7 +9,7 @@ import {
   countSwitches,
   type TopologyRowSnapshot,
 } from "../sessions/topology-snapshot";
-import { getScenarioConfig } from "../domain/scenario-config";
+import { getScenarioConfig, WORKFLOW_STEPS, type WorkflowStep } from "../domain/scenario-config";
 import { redactProviderNamesForDisplay } from "../ui/display-redaction";
 import {
   confirmCurrentStage,
@@ -59,7 +59,7 @@ interface ClaudeAgentEvent {
  */
 export async function runTsnAgent(requestOrIntent: TsnAgentRequest | string): Promise<TsnAgentResult> {
   const request = typeof requestOrIntent === "string" ? { userIntent: requestOrIntent } : requestOrIntent;
-  const { userIntent } = request;
+  const { userIntent, action } = request;
   const workflow = normalizeWorkflowState(request.session?.workflow);
   const runId = request.runId ?? createRunId();
   const sessionId = request.session?.id;
@@ -89,6 +89,23 @@ export async function runTsnAgent(requestOrIntent: TsnAgentRequest | string): Pr
       context: request.session ? buildSessionDiagnosticsContext(request.session) : undefined,
     },
   });
+
+  // 显式确认动作（确认按钮）：确定性，不走大模型。有待确认回退则执行回退，否则推进当前阶段。
+  if (action === "confirm-stage") {
+    const confirmResult = runConfirmAction(workflow);
+    logAgent(request.diagnostics, {
+      sessionId,
+      runId,
+      message: "Agent 使用确认动作推进",
+      durationMs: Date.now() - startedAt,
+      details: {
+        workflowStep: confirmResult.workflow.currentStep,
+        workflowStatus: confirmResult.workflow.stages[confirmResult.workflow.currentStep].status,
+      },
+    });
+
+    return confirmResult;
+  }
 
   const localResult = runLocalBoundaryProgression(userIntent, workflow);
   if (localResult) {
@@ -260,6 +277,43 @@ function runLocalBoundaryProgression(userIntent: string, workflow: WorkflowState
   return undefined;
 }
 
+// 确认按钮的确定性入口：先处理待确认的破坏性回退，否则普通推进。不调用大模型。
+function runConfirmAction(workflow: WorkflowState): TsnAgentResult {
+  if (workflow.pendingStageChange) {
+    const target = workflow.pendingStageChange;
+    const switched: WorkflowState = { ...requestStageChanges(workflow, target), pendingStageChange: undefined };
+    const scenarioConfig = getScenarioConfig(workflow.scenarioConfigId);
+    const events = [
+      createEvent({
+        id: "event-stage-rolled-back",
+        kind: "stage-result",
+        stage: target,
+        title: "已切回阶段",
+        content: `已切回${scenarioConfig.stageLabels[target]}阶段，其后的阶段已重置。请描述需要修改的内容。`,
+        status: "success",
+      }),
+    ];
+
+    return {
+      events,
+      workflow: switched,
+      assistantText: events.map((event) => event.content).join("\n"),
+      mode: "local",
+    };
+  }
+
+  if (workflow.stages[workflow.currentStep].status === "waiting_confirmation") {
+    return runAfterConfirmation(workflow);
+  }
+
+  return {
+    events: [],
+    workflow,
+    assistantText: "当前没有待确认的操作。",
+    mode: "local",
+  };
+}
+
 function runAfterConfirmation(workflow: WorkflowState): TsnAgentResult {
   const confirmed = confirmCurrentStage(workflow);
 
@@ -408,10 +462,96 @@ function createUnavailableResult(workflow: WorkflowState): TsnAgentResult {
 
 // ---------- stage result 应用 ----------
 
+interface StageChangeRequest {
+  targetStage: string;
+  reason?: string;
+}
+
+// 只允许切回有真实处理的阶段；flow-template / planning-export 暂下线，切过去是死胡同。
+const STAGE_SWITCH_TARGETS: readonly WorkflowStep[] = ["topology", "time-sync"];
+
+function asStageChangeRequest(value: unknown): StageChangeRequest | undefined {
+  if (!value || typeof value !== "object") {
+    return undefined;
+  }
+
+  const record = value as Record<string, unknown>;
+  if (record.kind !== "stage-change-request" || typeof record.targetStage !== "string" || record.targetStage.length === 0) {
+    return undefined;
+  }
+
+  return {
+    targetStage: record.targetStage,
+    reason: typeof record.reason === "string" && record.reason.length > 0 ? record.reason : undefined,
+  };
+}
+
+function isLegalStageSwitchTarget(target: string): target is WorkflowStep {
+  return (STAGE_SWITCH_TARGETS as readonly string[]).includes(target);
+}
+
+function clearPendingStageChange(workflow: WorkflowState): WorkflowState {
+  if (!workflow.pendingStageChange) {
+    return workflow;
+  }
+
+  const { pendingStageChange: _drop, ...rest } = workflow;
+  return rest;
+}
+
 function applyStageResults(input: {
   stageResults: unknown[];
   workflow: WorkflowState;
   sessionId?: string;
+}): {
+  events: AgentEvent[];
+  workflow: WorkflowState;
+  applied?: WorkflowStageSummary;
+  topologyMutationId?: number;
+  rejections: string[];
+} {
+  // 切阶段提议是独立形状（{kind:"stage-change-request"}），必须在拓扑 parse 之前拎出，
+  // 否则会被 parseWorkflowStageResult 当成非法拓扑结果直接拒掉。
+  const stageChangeRequests: StageChangeRequest[] = [];
+  const topologyResults: unknown[] = [];
+  for (const raw of input.stageResults) {
+    const request = asStageChangeRequest(raw);
+    if (request) {
+      stageChangeRequests.push(request);
+    } else {
+      topologyResults.push(raw);
+    }
+  }
+
+  // 顺序固定（拓扑落库在前、切阶段在后）：先处理拓扑结果。
+  const topology = applyTopologyStageResults({
+    stageResults: topologyResults,
+    workflow: input.workflow,
+    sessionId: input.sessionId,
+    suppressNoResult: stageChangeRequests.length > 0,
+  });
+
+  if (stageChangeRequests.length === 0) {
+    // 无切阶段提议：自由文本新一轮作废上一轮未确认的回退提议。
+    return { ...topology, workflow: clearPendingStageChange(topology.workflow) };
+  }
+
+  // 再处理切阶段提议（多个时取最后一个）。
+  const switchOutcome = applyStageChangeRequest(stageChangeRequests[stageChangeRequests.length - 1], topology.workflow);
+  return {
+    events: [...topology.events, ...switchOutcome.events],
+    workflow: switchOutcome.workflow,
+    applied: topology.applied,
+    topologyMutationId: topology.topologyMutationId,
+    rejections: topology.rejections,
+  };
+}
+
+function applyTopologyStageResults(input: {
+  stageResults: unknown[];
+  workflow: WorkflowState;
+  sessionId?: string;
+  suppressNoResult: boolean;
 }): {
   events: AgentEvent[];
   workflow: WorkflowState;
@@ -482,7 +622,7 @@ function applyStageResults(input: {
         status: "error",
       }),
     );
-  } else if (input.workflow.currentStep === "topology") {
+  } else if (!input.suppressNoResult && input.workflow.currentStep === "topology") {
     events.push(
       createEvent({
         id: "event-topology-no-result",
@@ -499,6 +639,86 @@ function applyStageResults(input: {
     events,
     workflow: input.workflow,
     rejections,
+  };
+}
+
+// 切阶段提议处理：合法性 + 方向校验，往后回退记 pending 待确认（不立即执行）。
+function applyStageChangeRequest(
+  request: StageChangeRequest,
+  workflow: WorkflowState,
+): { events: AgentEvent[]; workflow: WorkflowState } {
+  const target = request.targetStage;
+  const scenarioConfig = getScenarioConfig(workflow.scenarioConfigId);
+
+  if (!isLegalStageSwitchTarget(target)) {
+    return {
+      workflow: clearPendingStageChange(workflow),
+      events: [
+        createEvent({
+          id: "event-stage-change-rejected",
+          kind: "error",
+          stage: workflow.currentStep,
+          title: "无法切换阶段",
+          content: `无法切换到「${target}」：只能切回拓扑或时间同步阶段。`,
+          status: "error",
+        }),
+      ],
+    };
+  }
+
+  const currentIndex = WORKFLOW_STEPS.indexOf(workflow.currentStep);
+  const targetIndex = WORKFLOW_STEPS.indexOf(target);
+
+  if (targetIndex === currentIndex) {
+    return { workflow: clearPendingStageChange(workflow), events: [] };
+  }
+
+  // 方向约束：前进只走「确认并继续」按钮，工具只用于回退——同时消除大模型正向误判风险。
+  if (targetIndex > currentIndex) {
+    return {
+      workflow: clearPendingStageChange(workflow),
+      events: [
+        createEvent({
+          id: "event-stage-change-forward-rejected",
+          kind: "error",
+          stage: workflow.currentStep,
+          title: "无法前进",
+          content: `前进到${scenarioConfig.stageLabels[target]}请点「确认并继续」按钮，本工具只用于切回更早的阶段。`,
+          status: "error",
+        }),
+      ],
+    };
+  }
+
+  // 往后回退（破坏性）：记 pending + 当前阶段进入 waiting_confirmation（复用确认按钮），不立即执行。
+  const reasonSuffix = request.reason ? `（${request.reason}）` : "";
+  const summary = `切回${scenarioConfig.stageLabels[target]}会让其后已完成的阶段重新来过${reasonSuffix}。确认要切回吗？确认后点「确认并继续」。`;
+  const pendingWorkflow: WorkflowState = {
+    ...workflow,
+    pendingStageChange: target,
+    stages: {
+      ...workflow.stages,
+      [workflow.currentStep]: {
+        ...workflow.stages[workflow.currentStep],
+        status: "waiting_confirmation",
+        summary,
+      },
+    },
+    availableActions: ["confirm-stage", "request-changes"],
+  };
+
+  return {
+    workflow: pendingWorkflow,
+    events: [
+      createEvent({
+        id: "event-stage-change-pending",
+        kind: "confirmation-required",
+        stage: workflow.currentStep,
+        title: "确认切回阶段",
+        content: summary,
+        status: "warning",
+      }),
+    ],
   };
 }
 

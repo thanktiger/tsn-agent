@@ -49,6 +49,11 @@ export interface TsnAgentRequest {
   userIntent: string;
   session?: TsnSession;
   runId?: string;
+  /**
+   * 显式确认动作（来自「确认并继续」按钮）：确定性推进 / 执行待确认的回退，不走大模型。
+   * 自由文本输入不带此字段，一律走大模型判断意图。
+   */
+  action?: "confirm-stage";
   onChunk?: (chunk: string) => void;
   /** Plan 2026-06-10-001：流式工具事件（已脱敏+富化），run 期间按 id upsert 驱动卡片。 */
   onToolCall?: (record: ToolCallRecord) => void;

@@ -27,6 +27,11 @@ export interface WorkflowState {
   currentStep: WorkflowStep;
   stages: Record<WorkflowStep, WorkflowStageState>;
   availableActions: WorkflowAction[];
+  /**
+   * 大模型提议的「待确认回退目标阶段」。设置后当前阶段进入 waiting_confirmation，
+   * 用户点「确认并继续」时才真正执行 requestStageChanges(target)（破坏性回退）。
+   */
+  pendingStageChange?: WorkflowStep;
 }
 
 export type WorkflowAction =
@@ -91,6 +96,7 @@ export function normalizeWorkflowState(
     currentStep,
     stages,
     availableActions: state.availableActions?.length ? state.availableActions : actionsForStage(stages[currentStep]),
+    ...(isWorkflowStep(state.pendingStageChange) ? { pendingStageChange: state.pendingStageChange } : {}),
   };
 }
 
