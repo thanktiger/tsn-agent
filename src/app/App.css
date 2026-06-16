@@ -364,6 +364,12 @@ textarea:focus-visible {
   min-height: 0;
 }
 
+/* master-detail 面板（skill/settings）：grid 行按内容自然堆叠，不随 detail 高度拉伸
+   summary 与 master-list——否则切换 tab 时 detail 高度骤变会让上方元素上下跳。 */
+.split-panel {
+  align-content: start;
+}
+
 /* WebKit 滚动容器忽略 padding-bottom：占位元素把底部留白计入滚动高度。 */
 .workspace-tool-panel::after {
   content: "";
@@ -521,13 +527,20 @@ textarea:focus-visible {
 }
 
 .skill-detail-layout > .master-list {
-  /* 四个 skill 卡并成一行，压缩纵向占用。 */
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  /* 四个 skill 卡横向排布。WebKit（Tauri WKWebView）下 grid + overflow 的 auto 行
+     automatic min size = 0，整行被压塌成 0 高、4 个 skill 卡不可见（同 .skill-file-list
+     的 row collapse，见 a7f06ff）。改 flex-wrap + overflow:visible 规避。 */
+  display: flex;
+  flex-wrap: wrap;
+  align-self: start;
+  overflow: visible;
   gap: 6px;
   max-height: none;
 }
 
 .skill-detail-layout .master-list-item {
+  flex: 1 1 110px;
+  width: auto;
   gap: 2px;
   padding: 7px 9px;
 }
