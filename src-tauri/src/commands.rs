@@ -192,7 +192,9 @@ fn run_claude_agent_blocking(
     })
     .to_string();
 
-    let mut command = Command::new("node");
+    // GUI app（Finder/Dock 启动）不继承 shell PATH，须显式定位 node 绝对路径。
+    let node_cmd = resolve_node_command();
+    let mut command = Command::new(&node_cmd);
     command
         .arg(&worker_path)
         .arg(payload)
@@ -701,6 +703,54 @@ fn find_claude_binary(app: Option<&tauri::AppHandle>) -> Option<PathBuf> {
         .ok()?;
     let resource_path = strip_verbatim_prefix(resource_path);
     resource_path.exists().then_some(resource_path)
+}
+
+/// 定位 node 可执行的绝对路径。macOS/Linux 的 GUI app（从 Finder/Dock 启动）继承的
+/// PATH 不含用户 shell 里的 nvm/homebrew node 路径，裸 `Command::new("node")` 会 ENOENT
+/// （os error 2）。探测常见安装位置；都未命中再回退裸命令名（dev / 命令行启动时 PATH
+/// 可用）。可用 TSN_AGENT_NODE_PATH 显式覆盖。
+fn resolve_node_command() -> std::ffi::OsString {
+    use std::ffi::OsString;
+    if let Some(p) = std::env::var_os("TSN_AGENT_NODE_PATH") {
+        if !p.is_empty() && Path::new(&p).exists() {
+            return p;
+        }
+    }
+    #[cfg(unix)]
+    {
+        // homebrew（apple silicon / intel）/ 官方 pkg / system
+        for c in ["/opt/homebrew/bin/node", "/usr/local/bin/node", "/usr/bin/node"] {
+            if Path::new(c).exists() {
+                return OsString::from(c);
+            }
+        }
+        // nvm: ~/.nvm/versions/node/<ver>/bin/node —— 取存在的最新版本（字典序近似）。
+        if let Some(home) = std::env::var_os("HOME") {
+            let nvm = PathBuf::from(&home).join(".nvm/versions/node");
+            if let Ok(entries) = std::fs::read_dir(&nvm) {
+                let mut bins: Vec<PathBuf> = entries
+                    .filter_map(|e| e.ok().map(|e| e.path().join("bin/node")))
+                    .filter(|p| p.exists())
+                    .collect();
+                bins.sort();
+                if let Some(latest) = bins.pop() {
+                    return latest.into_os_string();
+                }
+            }
+        }
+    }
+    #[cfg(windows)]
+    {
+        for c in [
+            r"C:\Program Files\nodejs\node.exe",
+            r"C:\Program Files (x86)\nodejs\node.exe",
+        ] {
+            if Path::new(c).exists() {
+                return OsString::from(c);
+            }
+        }
+    }
+    OsString::from(if cfg!(windows) { "node.exe" } else { "node" })
 }
 
 fn repo_root_from_worker(worker_path: &Path) -> PathBuf {
