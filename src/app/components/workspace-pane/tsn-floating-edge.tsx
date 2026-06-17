@@ -151,27 +151,29 @@ export function straightFloatingEdgePath(anchors: Pick<FloatingAnchors, "sx" | "
 }
 
 /**
- * 端口标签锚点：吸附点沿出射方向外推（R4，随拖动跟随）。
- * 同节点同方位的多条边交点相邻，标签按序数 ord 分层外推防重叠。
+ * 端口标签锚点：从端点沿实际连线向内推进，保证标签中心落在连线上。
+ * ord 仅保留为兼容旧 Edge.data；端口与节点距离需要稳定一致，不再按层级推远。
  */
 export function portLabelPoint(
   x: number,
   y: number,
-  position: Position,
-  ord = 0,
+  otherX: number,
+  otherY: number,
+  _ord = 0,
 ): { x: number; y: number } {
-  const v = 14 + ord * 13;
-  const h = 16 + ord * 20;
-  switch (position) {
-    case Position.Top:
-      return { x, y: y - v };
-    case Position.Bottom:
-      return { x, y: y + v };
-    case Position.Left:
-      return { x: x - h, y };
-    default:
-      return { x: x + h, y };
+  const dx = otherX - x;
+  const dy = otherY - y;
+  const length = Math.hypot(dx, dy);
+  if (length === 0 || !Number.isFinite(length)) {
+    return { x, y };
   }
+
+  const distance = 16;
+  const t = Math.min(distance / length, 0.45);
+  return {
+    x: x + dx * t,
+    y: y + dy * t,
+  };
 }
 
 function PortLabel({ x, y, text, selected }: { x: number; y: number; text: string; selected: boolean }) {
@@ -211,10 +213,10 @@ export function TsnFloatingEdge(props: EdgeProps) {
   const anchors = floatingEdgeAnchors(sourceRect, targetRect);
   const path = straightFloatingEdgePath(anchors);
   const left = data.leftLabel
-    ? portLabelPoint(anchors.sx, anchors.sy, anchors.sourcePosition, data.leftOrd ?? 0)
+    ? portLabelPoint(anchors.sx, anchors.sy, anchors.tx, anchors.ty, data.leftOrd ?? 0)
     : undefined;
   const right = data.rightLabel
-    ? portLabelPoint(anchors.tx, anchors.ty, anchors.targetPosition, data.rightOrd ?? 0)
+    ? portLabelPoint(anchors.tx, anchors.ty, anchors.sx, anchors.sy, data.rightOrd ?? 0)
     : undefined;
 
   return (

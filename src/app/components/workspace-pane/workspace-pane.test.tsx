@@ -662,11 +662,16 @@ describe("floatingEdgeAnchors（U3 交点纯函数）", () => {
     flowMocks.internalNodes.clear();
   });
 
-  it("portLabelPoint 沿出射方向外推，序数 ord 分层推远", () => {
-    expect(portLabelPoint(100, 50, "top" as never)).toEqual({ x: 100, y: 36 });
-    expect(portLabelPoint(100, 50, "right" as never)).toEqual({ x: 116, y: 50 });
-    expect(portLabelPoint(100, 50, "top" as never, 1)).toEqual({ x: 100, y: 23 });
-    expect(portLabelPoint(100, 50, "bottom" as never, 2)).toEqual({ x: 100, y: 90 });
-    expect(portLabelPoint(100, 50, "right" as never, 1)).toEqual({ x: 136, y: 50 });
+  it("portLabelPoint 沿实际连线向内放置，标签中心保持在线上", () => {
+    expect(portLabelPoint(100, 50, 200, 50)).toEqual({ x: 116, y: 50 });
+    expect(portLabelPoint(100, 50, 100, 150, 1)).toEqual({ x: 100, y: 66 });
+    expect(portLabelPoint(100, 50, 100, 150, 3)).toEqual({ x: 100, y: 66 });
+
+    const diagonal = portLabelPoint(100, 50, 200, 150);
+    expect(diagonal.x).toBeCloseTo(111.3137, 4);
+    expect(diagonal.y).toBeCloseTo(61.3137, 4);
+    expect((diagonal.y - 50) / (diagonal.x - 100)).toBeCloseTo(1, 4);
+
+    expect(portLabelPoint(100, 50, 100, 50)).toEqual({ x: 100, y: 50 });
   });
 });
