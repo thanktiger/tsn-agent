@@ -126,16 +126,25 @@
 ## 发布与客户端构建流程
 
 - GitHub 桌面端生产构建只允许在 `release/**` 分支触发；不要通过推送 `main` 触发客户端打包。
-- 准备发布时，从已合入的 `main` 新建发布分支，例如 `release/2026-05-26` 或 `release/v0.2.0`，再 push 该分支触发 `.github/workflows/production-build.yml`。
+- 准备发布时，从已合入的 `main` 新建发布分支，例如 `release/v0.6.0`，再 push 该分支触发 `.github/workflows/production-build.yml`，全平台构建并由 tauri-action 建 GitHub release（tag `vX.Y.Z`）。
 - workflow 会在打包前运行 `npm run release:prepare`，根据最近的 `vX.Y.Z` tag 到当前提交之间的 commit 自动决定版本号：
   - commit 含 `!` 或正文含 `BREAKING CHANGE:` 时升 major。
   - 存在 `feat:` 时升 minor。
   - 其他代码变更默认升 patch。
   - 没有历史 tag 时以 `package.json` 当前版本为基准。
-- `npm run release:prepare` 会同步更新 `package.json`、`package-lock.json`、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml`、`src-tauri/Cargo.lock`，并生成 `CHANGELOG.md` 与 `release-metadata.json`。
-- `CHANGELOG.md` 默认为中文摘要，技术名词、文件名、commit hash 和产品名保留原文；如果自动摘要不够准确，允许在发布分支上人工润色后再重新 push。
-- 发布版本完成后，应创建对应 `vX.Y.Z` tag；后续版本号计算依赖这个 tag 作为比较基准。
-- 若只是本地检查版本计算和 changelog 预览，使用 `npm run release:prepare:check`，该命令不会写文件。
+- `npm run release:prepare` 同步更新 `package.json`、`package-lock.json`、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml`、`src-tauri/Cargo.lock`，并生成 `release-metadata.json` 与 `release-notes.md`（GitHub release 正文）。
+- **CHANGELOG 是「大模型/人工精修」的事实源，CI 只读取、不生成。** `prepare-release` 从 `CHANGELOG.md` 读取与本次版本号匹配的顶层条目当 release 正文；**缺该条目即报错中止发版**。发版前必须先把该版本的 `## vX.Y.Z - 日期` 精修条目写进 `CHANGELOG.md` 并提交进 `main`（条目写客户可见的人话，参照已有 v0.4.x 风格，不是 commit 标题）。app 内版本 banner 取 `CHANGELOG.md` 顶部条目的版本号。
+- 若只是本地检查版本计算，使用 `npm run release:prepare:check`（dry-run，不写文件、不校验 CHANGELOG 条目）。
+
+### 助手处理「发版」类请求的固定流程
+
+当用户说「发版」「发布」「出新版本」「release」等词时，自动按以下顺序执行（无需逐步追问）：
+
+1. 跑 `npm run release:prepare:check` 取下一个版本号（版本号自动 bump，不需用户手填）。
+2. 根据自上次 release tag 以来的 commit / 改动，**起草该版本的客户可见精修 CHANGELOG 条目**（人话、按 新功能 / 优化 / 修复 分类，参照已有 v0.4.x 风格）。
+3. **把草稿展示给用户扫一眼确认**——这是公开发布前的唯一确认点，未确认前不要 push 发布分支。
+4. 用户确认后：把条目写进 `CHANGELOG.md` 顶部、提交进 `main` → 从 `main` 建 `release/vX.Y.Z` 并 push 触发构建。
+5. 构建完成后，用同一条目更新该 `vX.Y.Z` GitHub release 的正文。
 
 ## 工作习惯
 
