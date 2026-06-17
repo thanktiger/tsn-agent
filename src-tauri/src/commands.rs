@@ -939,7 +939,13 @@ mod tests {
         assert!(repo_root
             .join(".claude/skills/tsn-topology/references/aerospace-onboard.md")
             .exists());
-        assert!(!tauri_config.to_string().contains("../src-node/dist/tsn-topology-server.mjs"));
+        // 拓扑 MCP server 随 app 打包（98fe8ab）：资源映射须包含它，打到 src-node/ 下。
+        assert_eq!(
+            resources
+                .get("../src-node/dist/tsn-topology-server.mjs")
+                .and_then(|v| v.as_str()),
+            Some("src-node/tsn-topology-server.mjs")
+        );
     }
 
     #[test]
