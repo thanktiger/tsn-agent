@@ -145,6 +145,67 @@ describe("useAgentRunController", () => {
     expect("current" in result.current.scrollContainerRef).toBe(true);
   });
 
+  it("auto-scrolls while stuck to bottom but yields to a user scroll-up, then re-sticks on submit", () => {
+    // 可控的假滚动容器：scrollHeight/clientHeight 固定，scrollTop 可读写，scrollTo 落点写回 scrollTop。
+    const el = document.createElement("div");
+    let scrollTopVal = 700; // 700 + 300(clientHeight) = 1000(scrollHeight) → 距底 0，粘底
+    Object.defineProperty(el, "scrollHeight", { get: () => 1000 });
+    Object.defineProperty(el, "clientHeight", { get: () => 300 });
+    Object.defineProperty(el, "scrollTop", { get: () => scrollTopVal, set: (v: number) => { scrollTopVal = v; } });
+    const scrollToSpy = vi.fn((opts: { top: number }) => { scrollTopVal = opts.top; });
+    (el as unknown as { scrollTo: typeof scrollToSpy }).scrollTo = scrollToSpy;
+
+    const { result, rerender } = renderHook(
+      ({ deps }: { deps: unknown[] }) => useAgentRunController({ scrollDeps: deps }),
+      { initialProps: { deps: ["s1", 0] as unknown[] } },
+    );
+    act(() => { result.current.scrollContainerRef.current = el; });
+
+    // 新消息到达且用户在底部 → 自动滚到底。
+    rerender({ deps: ["s1", 1] });
+    expect(scrollToSpy).toHaveBeenCalledWith({ top: 1000, behavior: "auto" });
+
+    // 用户上滚阅读 → 释放粘底。
+    scrollTopVal = 0;
+    act(() => { el.dispatchEvent(new Event("scroll")); });
+
+    // 流式继续来新内容 → 尊重用户位置，不再自动滚。
+    scrollToSpy.mockClear();
+    rerender({ deps: ["s1", 2] });
+    expect(scrollToSpy).not.toHaveBeenCalled();
+
+    // 用户提交新需求（startRun）→ 重新粘底，下一轮内容滚到底。
+    scrollToSpy.mockClear();
+    act(() => { result.current.actions.startRun(); });
+    rerender({ deps: ["s1", 3] });
+    expect(scrollToSpy).toHaveBeenCalledWith({ top: 1000, behavior: "auto" });
+  });
+
+  it("re-sticks to bottom when the session id changes", () => {
+    const el = document.createElement("div");
+    let scrollTopVal = 0; // 距底 700 → 释放粘底
+    Object.defineProperty(el, "scrollHeight", { get: () => 1000 });
+    Object.defineProperty(el, "clientHeight", { get: () => 300 });
+    Object.defineProperty(el, "scrollTop", { get: () => scrollTopVal, set: (v: number) => { scrollTopVal = v; } });
+    const scrollToSpy = vi.fn((opts: { top: number }) => { scrollTopVal = opts.top; });
+    (el as unknown as { scrollTo: typeof scrollToSpy }).scrollTo = scrollToSpy;
+
+    const { result, rerender } = renderHook(
+      ({ deps }: { deps: unknown[] }) => useAgentRunController({ scrollDeps: deps }),
+      { initialProps: { deps: ["s1", 0] as unknown[] } },
+    );
+    act(() => { result.current.scrollContainerRef.current = el; });
+
+    // 在 s1 里用户上滚释放粘底。
+    rerender({ deps: ["s1", 1] });
+    act(() => { el.dispatchEvent(new Event("scroll")); });
+    scrollToSpy.mockClear();
+
+    // 切换到 s2 → 会话 id 变化，强制回到底部。
+    rerender({ deps: ["s2", 0] });
+    expect(scrollToSpy).toHaveBeenCalledWith({ top: 1000, behavior: "auto" });
+  });
+
   it("does not run timers when isAgentRunning is false", () => {
     const { result } = renderHook(() => useAgentRunController());
 

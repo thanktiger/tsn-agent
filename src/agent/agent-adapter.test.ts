@@ -72,6 +72,19 @@ function topologyWaitingWorkflow(): WorkflowState {
   });
 }
 
+function timeSyncWaitingWorkflow(): WorkflowState {
+  const base = createInitialWorkflowState();
+  return {
+    ...base,
+    currentStep: "time-sync",
+    stages: {
+      ...base.stages,
+      topology: { step: "topology", status: "confirmed" },
+      "time-sync": { step: "time-sync", status: "waiting_confirmation", summary: "时间同步默认值。" },
+    },
+  };
+}
+
 function validStageResult(mutationId = 7) {
   return createTopologyWorkflowStageResult(
     { sessionId: "session-1", mutationId },
@@ -310,13 +323,14 @@ describe("runTsnAgent", () => {
     expect(context).not.toContain("[工具]");
   });
 
-  it("returns empty toolCalls on the local boundary path (U4)", async () => {
+  it("returns empty toolCalls on the deterministic confirm path (U4)", async () => {
     enableTauriRuntime();
     const { runTsnAgent } = await import("./agent-adapter");
 
     const result = await runTsnAgent({
-      userIntent: "启动仿真",
-      session: sessionWithWorkflow(createInitialWorkflowState()),
+      userIntent: "继续",
+      action: "confirm-stage",
+      session: sessionWithWorkflow(topologyWaitingWorkflow()),
     });
 
     expect(result.mode).toBe("local");
@@ -462,12 +476,13 @@ describe("runTsnAgent", () => {
     );
   });
 
-  it("confirms a waiting topology stage locally and advances into time-sync defaults", async () => {
+  it("confirms a waiting topology stage via the button and auto-generates time-sync defaults (U4 regression)", async () => {
     enableTauriRuntime();
     const { runTsnAgent } = await import("./agent-adapter");
 
     const result = await runTsnAgent({
       userIntent: "继续",
+      action: "confirm-stage",
       session: sessionWithWorkflow(topologyWaitingWorkflow()),
     });
 
@@ -476,6 +491,8 @@ describe("runTsnAgent", () => {
     expect(result.workflow.stages.topology.status).toBe("confirmed");
     expect(result.workflow.currentStep).toBe("time-sync");
     expect(result.workflow.stages["time-sync"].status).toBe("waiting_confirmation");
+    // 阶段处理没丢：进入 time-sync 自动生成默认摘要。
+    expect(result.workflow.stages["time-sync"].summary).toContain("时间同步");
     expect(result.events).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ kind: "confirmation-required", stage: "time-sync" }),
@@ -483,40 +500,44 @@ describe("runTsnAgent", () => {
     );
   });
 
-  it("advances time-sync defaults locally for free-form input in the time-sync stage", async () => {
+  it("shows the offline notice when the confirm button advances into a gray stage (U4 regression)", async () => {
     enableTauriRuntime();
     const workflow = createInitialWorkflowState();
     workflow.currentStep = "time-sync";
     workflow.stages.topology = { step: "topology", status: "confirmed" };
-    workflow.stages["time-sync"] = { step: "time-sync", status: "current" };
+    workflow.stages["time-sync"] = { step: "time-sync", status: "waiting_confirmation", summary: "时间同步默认值。" };
     const { runTsnAgent } = await import("./agent-adapter");
 
     const result = await runTsnAgent({
-      userIntent: "时间同步怎么配置？",
+      userIntent: "继续",
+      action: "confirm-stage",
       session: sessionWithWorkflow(workflow),
     });
 
     expect(result.mode).toBe("local");
     expect(invokeMock).not.toHaveBeenCalled();
-    expect(result.workflow.stages["time-sync"].status).toBe("waiting_confirmation");
+    expect(result.workflow.currentStep).toBe("flow-template");
+    expect(result.assistantText).toContain("暂时下线");
   });
 
-  it("rejects simulation execution requests locally", async () => {
+  it("sends a typed confirmation word to the model instead of regex-matching it (U4)", async () => {
     enableTauriRuntime();
+    mockTauriCommands({ claude: { assistantText: "好的。", sessionId: "claude-session-typed" } });
     const { runTsnAgent } = await import("./agent-adapter");
 
     const result = await runTsnAgent({
-      userIntent: "帮我启动仿真",
-      session: sessionWithWorkflow(createInitialWorkflowState()),
+      userIntent: "继续",
+      session: sessionWithWorkflow(topologyWaitingWorkflow()),
     });
 
-    expect(result.mode).toBe("local");
-    expect(invokeMock).not.toHaveBeenCalled();
-    expect(result.assistantText).toContain("不会在后台启动仿真");
+    // 没有 action：自由文本「继续」不再被正则确定性推进，而是走大模型。
+    expect(result.mode).toBe("claude");
+    expect(invokeMock).toHaveBeenCalledWith("run_claude_agent", expect.anything());
   });
 
-  it("answers offline-stage input locally when no topology intent is present", async () => {
+  it("sends offline-stage free-form input to the model without rewriting the stage (U4)", async () => {
     enableTauriRuntime();
+    mockTauriCommands({ claude: { assistantText: "流量规划暂时下线。", sessionId: "claude-session-offline" } });
     const workflow = createInitialWorkflowState();
     workflow.currentStep = "flow-template";
     workflow.stages.topology = { step: "topology", status: "confirmed" };
@@ -529,19 +550,22 @@ describe("runTsnAgent", () => {
       session: sessionWithWorkflow(workflow),
     });
 
-    expect(result.mode).toBe("local");
-    expect(invokeMock).not.toHaveBeenCalled();
-    expect(result.assistantText).toContain("暂时下线");
-    expect(result.workflow.currentStep).toBe("flow-template");
+    expect(result.mode).toBe("claude");
+    // 决议1：stage 不再被改写成 topology，发给 worker 的是真实当前阶段。
+    expect(invokeMock).toHaveBeenCalledWith("run_claude_agent", {
+      request: expect.objectContaining({
+        stageRunnerInput: expect.objectContaining({ stage: "flow-template" }),
+      }),
+    });
   });
 
-  it("falls back to the topology stage when offline-stage input asks for topology changes", async () => {
+  it("proposes a rollback to topology when the model requests it from an offline stage (U4)", async () => {
     enableTauriRuntime();
     mockTauriCommands({
       claude: {
-        assistantText: "已更新拓扑。",
+        assistantText: "要切回拓扑修改吗？",
         sessionId: "claude-session-edit",
-        stageResults: [validStageResult(9)],
+        stageResults: [{ kind: "stage-change-request", targetStage: "topology", reason: "用户要改交换机数量" }],
       },
     });
     const workflow = createInitialWorkflowState();
@@ -557,14 +581,159 @@ describe("runTsnAgent", () => {
     });
 
     expect(result.mode).toBe("claude");
+    // stage 不改写：worker 收到真实当前阶段 flow-template，切阶段由工具表达。
     expect(invokeMock).toHaveBeenCalledWith("run_claude_agent", {
       request: expect.objectContaining({
+        stageRunnerInput: expect.objectContaining({ stage: "flow-template" }),
+      }),
+    });
+    // 破坏性回退先记 pending、不立即执行（等用户点确认按钮）。
+    expect(result.workflow.pendingStageChange).toBe("topology");
+    expect(result.workflow.currentStep).toBe("flow-template");
+    expect(result.workflow.stages.topology.status).toBe("confirmed");
+    // fix A：提议不改写当前阶段状态（不留幽灵 waiting_confirmation）。
+    expect(result.workflow.stages["flow-template"].status).toBe("current");
+  });
+
+  it("U3-fix(carry): stores the triggering intent with the pending rollback proposal", async () => {
+    enableTauriRuntime();
+    mockTauriCommands({
+      claude: {
+        assistantText: "要切回拓扑吗？",
+        sessionId: "s-carry-store",
+        stageResults: [{ kind: "stage-change-request", targetStage: "topology", reason: "减设备" }],
+      },
+    });
+    const workflow = createInitialWorkflowState();
+    workflow.currentStep = "flow-template";
+    workflow.stages.topology = { step: "topology", status: "confirmed" };
+    workflow.stages["time-sync"] = { step: "time-sync", status: "confirmed" };
+    workflow.stages["flow-template"] = { step: "flow-template", status: "current" };
+    const { runTsnAgent } = await import("./agent-adapter");
+
+    const result = await runTsnAgent({
+      userIntent: "减少一个交换机",
+      session: sessionWithWorkflow(workflow),
+    });
+
+    expect(result.workflow.pendingStageChange).toBe("topology");
+    expect(result.workflow.pendingStageChangeIntent).toBe("减少一个交换机");
+  });
+
+  it("U3-fix(carry): confirming the rollback re-runs the original intent in topology without retyping", async () => {
+    enableTauriRuntime();
+    mockTauriCommands({
+      claude: {
+        assistantText: "已减少一个交换机。",
+        sessionId: "s-carry-run",
+        stageResults: [validStageResult(12)],
+      },
+    });
+    const workflow = createInitialWorkflowState();
+    workflow.currentStep = "flow-template";
+    workflow.stages.topology = { step: "topology", status: "confirmed" };
+    workflow.stages["time-sync"] = { step: "time-sync", status: "confirmed" };
+    workflow.stages["flow-template"] = { step: "flow-template", status: "current" };
+    const pending: WorkflowState = {
+      ...workflow,
+      pendingStageChange: "topology",
+      pendingStageChangeIntent: "减少一个交换机",
+    };
+    const { runTsnAgent } = await import("./agent-adapter");
+
+    const result = await runTsnAgent({
+      userIntent: "继续",
+      action: "confirm-stage",
+      session: sessionWithWorkflow(pending),
+    });
+
+    // 切阶段后自动用原话跑了大模型（不是停在 local 让用户重输）。
+    expect(result.mode).toBe("claude");
+    expect(invokeMock).toHaveBeenCalledWith("run_claude_agent", {
+      request: expect.objectContaining({
+        prompt: "减少一个交换机",
         stageRunnerInput: expect.objectContaining({ stage: "topology" }),
       }),
     });
+    expect(result.topologyMutationId).toBe(12);
     expect(result.workflow.currentStep).toBe("topology");
     expect(result.workflow.stages.topology.status).toBe("waiting_confirmation");
-    expect(result.topologyMutationId).toBe(9);
+    expect(result.workflow.pendingStageChange).toBeUndefined();
+    expect(result.workflow.pendingStageChangeIntent).toBeUndefined();
+  });
+
+  it("U3-fix(A): abandoning a pending rollback via free text clears it and leaves no phantom confirm", async () => {
+    enableTauriRuntime();
+    const base = createInitialWorkflowState();
+    base.currentStep = "flow-template";
+    base.stages.topology = { step: "topology", status: "confirmed" };
+    base.stages["time-sync"] = { step: "time-sync", status: "confirmed" };
+    base.stages["flow-template"] = { step: "flow-template", status: "current" };
+    const pending: WorkflowState = { ...base, pendingStageChange: "topology" };
+    mockTauriCommands({ claude: { assistantText: "好的，继续看流量。", sessionId: "s-abandon" } });
+    const { runTsnAgent } = await import("./agent-adapter");
+
+    const abandoned = await runTsnAgent({
+      userIntent: "先不切了，讲讲流量规划",
+      session: sessionWithWorkflow(pending),
+    });
+    expect(abandoned.workflow.pendingStageChange).toBeUndefined();
+    expect(abandoned.workflow.stages["flow-template"].status).toBe("current");
+
+    // 放弃后点确认按钮：既无 pending 又非 waiting_confirmation → 无操作，绝不静默前进。
+    invokeMock.mockClear();
+    const confirmed = await runTsnAgent({
+      userIntent: "继续",
+      action: "confirm-stage",
+      session: sessionWithWorkflow(abandoned.workflow),
+    });
+    expect(confirmed.mode).toBe("local");
+    expect(confirmed.workflow.currentStep).toBe("flow-template");
+    expect(confirmed.assistantText).toContain("没有待确认的操作");
+  });
+
+  it("U3-fix(E): confirming a rollback to time-sync re-arms it with auto-generated defaults", async () => {
+    enableTauriRuntime();
+    const base = createInitialWorkflowState();
+    base.currentStep = "flow-template";
+    base.stages.topology = { step: "topology", status: "confirmed" };
+    base.stages["time-sync"] = { step: "time-sync", status: "confirmed" };
+    base.stages["flow-template"] = { step: "flow-template", status: "current" };
+    const pending: WorkflowState = { ...base, pendingStageChange: "time-sync" };
+    const { runTsnAgent } = await import("./agent-adapter");
+
+    const result = await runTsnAgent({
+      userIntent: "继续",
+      action: "confirm-stage",
+      session: sessionWithWorkflow(pending),
+    });
+
+    expect(result.mode).toBe("local");
+    expect(result.workflow.currentStep).toBe("time-sync");
+    expect(result.workflow.stages["time-sync"].status).toBe("waiting_confirmation");
+    expect(result.workflow.stages["time-sync"].summary).toContain("时间同步");
+    expect(result.workflow.pendingStageChange).toBeUndefined();
+    expect(result.workflow.stages["flow-template"].status).toBe("locked");
+  });
+
+  it("U3-fix: suppresses the no-topology-result notice when a stage-change proposal is present", async () => {
+    enableTauriRuntime();
+    mockTauriCommands({
+      claude: {
+        assistantText: "...",
+        sessionId: "s-suppress",
+        stageResults: [{ kind: "stage-change-request", targetStage: "time-sync" }],
+      },
+    });
+    const { runTsnAgent } = await import("./agent-adapter");
+
+    const result = await runTsnAgent({
+      userIntent: "进入时间同步",
+      session: sessionWithWorkflow(createInitialWorkflowState()),
+    });
+
+    expect(result.events.find((event) => event.title === "拓扑未更新")).toBeUndefined();
+    expect(result.events.find((event) => event.title === "无法前进")).toBeDefined();
   });
 
   it("includes the current topology snapshot counts in the conversation context", async () => {
@@ -641,6 +810,120 @@ describe("runTsnAgent", () => {
 
     expect(result.assistantText).not.toContain("跑完会通知你");
     expect(result.assistantText).toContain("不会启动仿真");
+  });
+
+  it("U3: proposes a destructive rollback as pending confirmation without resetting stages", async () => {
+    enableTauriRuntime();
+    mockTauriCommands({
+      claude: {
+        assistantText: "要切回拓扑吗？",
+        sessionId: "claude-session-switch",
+        stageResults: [{ kind: "stage-change-request", targetStage: "topology", reason: "用户要加设备" }],
+      },
+    });
+    const { runTsnAgent } = await import("./agent-adapter");
+
+    const result = await runTsnAgent({
+      userIntent: "我想回到拓扑加两个端系统",
+      session: sessionWithWorkflow(timeSyncWaitingWorkflow()),
+    });
+
+    expect(result.mode).toBe("claude");
+    expect(result.workflow.pendingStageChange).toBe("topology");
+    // 仅记 pending，尚未执行回退：当前阶段不变、拓扑仍 confirmed（未重置）。
+    expect(result.workflow.currentStep).toBe("time-sync");
+    expect(result.workflow.stages.topology.status).toBe("confirmed");
+    expect(result.workflow.stages["time-sync"].status).toBe("waiting_confirmation");
+    expect(result.events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ kind: "confirmation-required", title: "确认切回阶段" }),
+      ]),
+    );
+  });
+
+  it("U3: confirm-stage action executes the pending rollback and resets later stages", async () => {
+    enableTauriRuntime();
+    const pending: WorkflowState = { ...timeSyncWaitingWorkflow(), pendingStageChange: "topology" };
+    const { runTsnAgent } = await import("./agent-adapter");
+
+    const result = await runTsnAgent({
+      userIntent: "继续",
+      action: "confirm-stage",
+      session: sessionWithWorkflow(pending),
+    });
+
+    expect(result.mode).toBe("local");
+    expect(invokeMock).not.toHaveBeenCalled();
+    expect(result.workflow.currentStep).toBe("topology");
+    expect(result.workflow.stages.topology.status).toBe("current");
+    expect(result.workflow.stages["time-sync"].status).toBe("locked");
+    expect(result.workflow.pendingStageChange).toBeUndefined();
+  });
+
+  it("U3: confirm-stage action advances a waiting stage when there is no pending rollback", async () => {
+    enableTauriRuntime();
+    const { runTsnAgent } = await import("./agent-adapter");
+
+    const result = await runTsnAgent({
+      userIntent: "继续",
+      action: "confirm-stage",
+      session: sessionWithWorkflow(topologyWaitingWorkflow()),
+    });
+
+    expect(result.mode).toBe("local");
+    expect(invokeMock).not.toHaveBeenCalled();
+    expect(result.workflow.stages.topology.status).toBe("confirmed");
+    expect(result.workflow.currentStep).toBe("time-sync");
+    expect(result.workflow.stages["time-sync"].status).toBe("waiting_confirmation");
+  });
+
+  it("U3: rejects an illegal (offline) stage-switch target", async () => {
+    enableTauriRuntime();
+    mockTauriCommands({
+      claude: {
+        assistantText: "...",
+        sessionId: "claude-session-illegal",
+        stageResults: [{ kind: "stage-change-request", targetStage: "planning-export" }],
+      },
+    });
+    const { runTsnAgent } = await import("./agent-adapter");
+
+    const result = await runTsnAgent({
+      userIntent: "切到配置生成阶段",
+      session: sessionWithWorkflow(timeSyncWaitingWorkflow()),
+    });
+
+    expect(result.workflow.currentStep).toBe("time-sync");
+    expect(result.workflow.pendingStageChange).toBeUndefined();
+    expect(result.events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ kind: "error", title: "无法切换阶段" }),
+      ]),
+    );
+  });
+
+  it("U3: rejects a forward stage switch proposed via the tool", async () => {
+    enableTauriRuntime();
+    mockTauriCommands({
+      claude: {
+        assistantText: "...",
+        sessionId: "claude-session-forward",
+        stageResults: [{ kind: "stage-change-request", targetStage: "time-sync" }],
+      },
+    });
+    const { runTsnAgent } = await import("./agent-adapter");
+
+    const result = await runTsnAgent({
+      userIntent: "直接进入时间同步",
+      session: sessionWithWorkflow(createInitialWorkflowState()),
+    });
+
+    expect(result.workflow.currentStep).toBe("topology");
+    expect(result.events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ kind: "error", title: "无法前进" }),
+      ]),
+    );
   });
 
   it("records diagnostics for the run lifecycle", async () => {

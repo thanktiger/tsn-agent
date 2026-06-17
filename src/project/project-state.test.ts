@@ -68,11 +68,32 @@ describe("workflow state machine", () => {
     expect(changed.stages["time-sync"].status).toBe("locked");
   });
 
+  it("clears a pending stage change on any stage transition", () => {
+    const waiting = recordStageResult(createInitialWorkflowState(), {
+      step: "topology",
+      summary: "拓扑已生成",
+    });
+    const withPending = { ...waiting, pendingStageChange: "topology" as const };
+
+    // 正常确认推进：pending 不得跨转移残留。
+    expect(confirmCurrentStage(withPending).pendingStageChange).toBeUndefined();
+    // 回退：requestStageChanges 也清空 pending。
+    expect(requestStageChanges(withPending, "topology").pendingStageChange).toBeUndefined();
+  });
+
   it("normalizes old workflow payloads without stage state", () => {
     expect(normalizeWorkflowState(undefined, "missing-config")).toMatchObject({
       scenarioConfigId: "generic-tsn",
       currentStep: "topology",
     });
+  });
+
+  it("round-trips a valid pendingStageChange and drops an invalid one", () => {
+    const base = createInitialWorkflowState();
+    expect(normalizeWorkflowState({ ...base, pendingStageChange: "topology" }).pendingStageChange).toBe("topology");
+    expect(
+      normalizeWorkflowState({ ...base, pendingStageChange: "bogus-stage" as never }).pendingStageChange,
+    ).toBeUndefined();
   });
 
   it("preserves existing stage summaries when normalizing", () => {

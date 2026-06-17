@@ -27,7 +27,8 @@ pub const SESSION_SCHEMA_SQL: &str = r#"
 "#;
 
 /// V1 历史 schema：fresh dev db 之前会含 `diagnostic_logs` 表 + 两个索引。
-/// 仅供 v1 → v3 升级路径上对老 db 的 `DROP TABLE` 兜底逻辑测试参考。
+/// 仅供 v1 → v3 升级路径上对老 db 的 `DROP TABLE` 兜底逻辑测试参考（仅测试构建编译）。
+#[cfg(test)]
 pub const LEGACY_DIAGNOSTIC_LOGS_DDL: &str = r#"
     CREATE TABLE IF NOT EXISTS diagnostic_logs (
         id TEXT PRIMARY KEY NOT NULL,

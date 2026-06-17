@@ -242,10 +242,11 @@ export function SkillFilePreview({
   return (
     <section className="skill-files-panel" aria-label="Skill 文件">
       <div className="skill-files-header">
-        <small>编辑会保存到当前选中的 skill 文件，下次 agent 运行生效。</small>
+        <p className="skill-section-kicker">Skill 文件</p>
         <div className="skill-files-header-actions">
+          {fileList?.status && <span className={`skill-file-status ${fileList.status}`}>{rootStatusLabel(fileList.status)}</span>}
           <button
-            className="btn"
+            className="skill-restore-btn"
             type="button"
             onClick={previewRestore}
             disabled={
@@ -255,12 +256,12 @@ export function SkillFilePreview({
               || restoreState.kind === "confirming"
             }
           >
-            <RotateCcw size={14} aria-hidden="true" />
+            <RotateCcw size={13} aria-hidden="true" />
             {restoreState.kind === "previewing" ? "正在比对..." : "恢复内置版本"}
           </button>
-          {fileList?.status && <span className={`skill-file-status ${fileList.status}`}>{rootStatusLabel(fileList.status)}</span>}
         </div>
       </div>
+      <small className="skill-files-note">编辑会保存到当前选中的 skill 文件，下次 agent 运行生效。</small>
 
       {error && <div className="skill-file-error">{error}</div>}
 
@@ -415,11 +416,15 @@ export function SkillFilePreview({
 /** .md 预览：frontmatter 折成顶部 meta 块，正文走 react-markdown（GFM）。 */
 function MarkdownFileView({ text }: { text: string }) {
   const { frontmatter, body } = splitFrontmatter(text);
+  // 剥掉 HTML/markdown 注释（<!-- ... -->）再渲染：它们是给维护者看的元注释，
+  // react-markdown 不识别注释、会把 <!-- --> 当普通文字露出来。编辑模式仍显示原文，
+  // 注释也仍保留在文件里、照常注入给 agent——这里只是预览视图的清理。
+  const renderedBody = body.replace(/<!--[\s\S]*?-->/g, "");
 
   return (
     <div className="skill-file-markdown">
       {frontmatter && <pre className="skill-file-frontmatter mono">{frontmatter}</pre>}
-      <ReactMarkdown remarkPlugins={[remarkGfm]}>{body}</ReactMarkdown>
+      <ReactMarkdown remarkPlugins={[remarkGfm]}>{renderedBody}</ReactMarkdown>
     </div>
   );
 }

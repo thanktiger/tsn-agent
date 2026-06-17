@@ -1,4 +1,5 @@
-import { query } from "@anthropic-ai/claude-agent-sdk";
+import { query, createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
+import { z } from "zod";
 import { mkdir, readFile, readdir, realpath, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
@@ -17,6 +18,40 @@ export const TOPOLOGY_MCP_ALLOWED_TOOLS = [
   "mcp__tsn_topology__topology_validate_artifacts",
   "mcp__tsn_topology__topology_apply_operations",
 ];
+
+// U1（独立编排能力）：切阶段工具独立于四个阶段，用 SDK in-process 自定义工具承载，
+// 不连 sidecar、不写状态、不做合法性判断（合法性在应用层 agent-adapter）。它只把
+// 大模型的「想回到哪个阶段」结构化返回；返回值经 stageResults 同款通道回传给应用层。
+const WORKFLOW_MCP_SERVER_NAME = "tsn_workflow";
+export const REQUEST_STAGE_CHANGE_TOOL_NAME = `mcp__${WORKFLOW_MCP_SERVER_NAME}__request_stage_change`;
+
+export const requestStageChangeTool = tool(
+  "request_stage_change",
+  "当用户想回到之前已完成的阶段（拓扑 topology 或时间同步 time-sync）做修改时调用本工具。targetStage 为目标阶段，reason 为一句话理由。前进到下一阶段由用户点「确认并继续」按钮完成，不要用本工具前进。",
+  // targetStage 在 schema 层即限定为合法回退目标——非法值由 SDK 拒绝、模型可自纠；
+  // 应用层（agent-adapter）仍独立校验合法性/方向，作纵深防御。
+  { targetStage: z.enum(["topology", "time-sync"]), reason: z.string().optional() },
+  async (args) => ({
+    content: [
+      {
+        type: "text",
+        text: JSON.stringify({
+          ok: true,
+          stageChangeRequest: {
+            targetStage: args.targetStage,
+            ...(typeof args.reason === "string" && args.reason.length > 0 ? { reason: args.reason } : {}),
+          },
+        }),
+      },
+    ],
+  }),
+);
+
+const workflowMcpServer = createSdkMcpServer({
+  name: WORKFLOW_MCP_SERVER_NAME,
+  version: "1.0.0",
+  tools: [requestStageChangeTool],
+});
 
 export const responseSchema = {
   type: "object",
@@ -124,7 +159,8 @@ export async function runClaude(userPrompt, options = {}, queryFn = query) {
     // 尝试浪费的 turn；prompt 交互规则 1 告知替代路径（中文数字编号选项）。
     disallowedTools: ["AskUserQuestion"],
     skills: ["tsn-topology", "tsn-flow-planning"],
-    ...(topologyMcpConfig ? { mcpServers: topologyMcpConfig } : {}),
+    // tsn_workflow（切阶段工具，in-process）始终注册；tsn_topology 仅在 server 路径存在时注册。
+    mcpServers: { ...(topologyMcpConfig ?? {}), [WORKFLOW_MCP_SERVER_NAME]: workflowMcpServer },
     env: {
       ...process.env,
       TSN_AGENT_STAGE_RESULT_PATH: stageResultPath,
@@ -179,6 +215,7 @@ export async function runClaude(userPrompt, options = {}, queryFn = query) {
       }
       collectToolCalls(message);
       captureTopologyStageResults(message);
+      captureStageChangeRequests(message);
 
       if (emittedText.length === 0) {
         for (const text of extractAssistantTextBlocks(message)) {
@@ -195,6 +232,7 @@ export async function runClaude(userPrompt, options = {}, queryFn = query) {
       }
       collectToolCalls(message);
       captureTopologyStageResults(message);
+      captureStageChangeRequests(message);
 
       for (const text of extractStreamEventText(message)) {
         emitAssistantChunk(text);
@@ -207,6 +245,7 @@ export async function runClaude(userPrompt, options = {}, queryFn = query) {
       }
       collectToolCalls(message);
       captureTopologyStageResults(message);
+      captureStageChangeRequests(message);
     }
 
     if (message.type === "result") {
@@ -238,6 +277,23 @@ export async function runClaude(userPrompt, options = {}, queryFn = query) {
       emitOperationTrace({
         key: `workflow-stage-result:${extracted.key}`,
         text: `[阶段结果] 拓扑工具结果已生成：${summarizeStageResultForTrace(extracted.result)}`,
+      });
+    }
+  };
+  // U2：切阶段提议与拓扑结果走同一回传通道，但不受拓扑提取的 stage 门槛限制——
+  // 任何阶段调 request_stage_change 都要能被捕获。提议只是「大模型可控的意图」，
+  // 合法性/方向/破坏性确认全在应用层校验（见 agent-adapter applyStageResults）。
+  const captureStageChangeRequests = (message) => {
+    for (const extracted of extractStageChangeRequests(message, toolUseNamesById)) {
+      if (capturedStageResultKeys.has(extracted.key)) {
+        continue;
+      }
+
+      capturedStageResultKeys.add(extracted.key);
+      capturedStageResults.push(extracted.result);
+      emitOperationTrace({
+        key: `stage-change-request:${extracted.key}`,
+        text: `[切阶段] 大模型请求切到阶段：${extracted.result.targetStage}`,
       });
     }
   };
@@ -372,11 +428,18 @@ export async function runClaude(userPrompt, options = {}, queryFn = query) {
 
 // Phase B-β2：adapter 端非拓扑阶段全部本地拦截，worker 只会收到 topology 阶段；
 // stage runner / flow-template retry 路径已删除。
-function buildAllowedToolsForStage(_stageRunnerInput, hasTopologyMcpConfig) {
+export function buildAllowedToolsForStage(stageRunnerInput, hasTopologyMcpConfig) {
+  const stage = isRecord(stageRunnerInput) && typeof stageRunnerInput.stage === "string"
+    ? stageRunnerInput.stage
+    : undefined;
   return [
     "Skill",
     "Read",
-    ...(hasTopologyMcpConfig ? TOPOLOGY_MCP_ALLOWED_TOOLS : []),
+    // 切阶段工具在所有阶段可用——非拓扑阶段也要能让大模型表达回退意图。
+    REQUEST_STAGE_CHANGE_TOOL_NAME,
+    // 拓扑写工具只在拓扑阶段开放：非拓扑阶段直接写库的结果不会被对账（提取按 stage 门槛），
+    // 会让右侧工程与 workflow 状态静默分叉。改拓扑须先经切阶段工具回到拓扑阶段。
+    ...(hasTopologyMcpConfig && stage === "topology" ? TOPOLOGY_MCP_ALLOWED_TOOLS : []),
   ];
 }
 
@@ -385,7 +448,7 @@ function buildAllowedToolsForStage(_stageRunnerInput, hasTopologyMcpConfig) {
 // R4/KTD8：协议不变量（用户改坏会破坏对账/产生数据损坏的规则）全部收口在此，
 // 不进可编辑 skill 文件。迁移自 SKILL.md：①initialize 后不复检 validate；
 // ②apply_operations 超时重试逐字节复用（重新分配 linkSeq 会产生重复平行链路）。
-const SYSTEM_PROMPT_SKELETON = "你是 TSN Agent 的规划助手。你面向懂一点 TSN 但不了解具体参数的新手用户。回复必须是简体中文，保持工程化、具体、可执行。工程状态只接受结构化校验结果。拓扑初始化、校验、artifact 构建、inspect 和 apply_operations 必须通过 tsn_topology MCP 工具调用 sidecar，所有工具结果都已是结构化领域响应。artifact、端口表、MAC 表和完整 changeSet 不得再在自然语言里复述。不要写 TSN_AGENT_STAGE_RESULT_PATH，不要用自然语言重新构建拓扑。固定阶段顺序是拓扑、时间同步、流量规划、模拟仿真；拓扑确认后必须进入时间同步。当前应用没有接入 OMNeT++/远程仿真 runner，不能声称已启动仿真、SSH 执行或稍后通知结果。已有拓扑用 tsn_topology inspect + apply_operations 增量编辑，initialize 仅用于从 0 生成或换模板（误用会整表重排已确认拓扑）。initialize 已内置结构校验并落库，之后不要再调用 topology_validate 复检（它只接受完整拓扑 JSON，不接受 mutationId）。apply_operations 超时重试时逐字节复用上一次的同一 operations（相同 imac/linkSeq），不要重新分配——重新分配 linkSeq 会产生重复的平行链路。最终工程状态只接受应用层合成的结构化结果，不要自行编写 stage result。";
+const SYSTEM_PROMPT_SKELETON = "你是 TSN Agent 的规划助手。你面向懂一点 TSN 但不了解具体参数的新手用户。回复必须是简体中文，保持工程化、具体、可执行。工程状态只接受结构化校验结果。拓扑初始化、校验、artifact 构建、inspect 和 apply_operations 必须通过 tsn_topology MCP 工具调用 sidecar，所有工具结果都已是结构化领域响应。artifact、端口表、MAC 表和完整 changeSet 不得再在自然语言里复述。不要写 TSN_AGENT_STAGE_RESULT_PATH，不要用自然语言重新构建拓扑。固定阶段顺序是拓扑、时间同步、流量规划、模拟仿真。前进到下一阶段由用户点「确认并继续」按钮完成，你不要自行宣称已进入下一阶段。用户想回到之前已完成的拓扑或时间同步阶段做修改时，调用 request_stage_change 工具（参数：目标阶段 targetStage、理由 reason），切回会让其后的阶段重做；不要用该工具前进。当前应用没有接入 OMNeT++/远程仿真 runner，不能声称已启动仿真、SSH 执行或稍后通知结果。已有拓扑用 tsn_topology inspect + apply_operations 增量编辑，initialize 仅用于从 0 生成或换模板（误用会整表重排已确认拓扑）。initialize 已内置结构校验并落库，之后不要再调用 topology_validate 复检（它只接受完整拓扑 JSON，不接受 mutationId）。apply_operations 超时重试时逐字节复用上一次的同一 operations（相同 imac/linkSeq），不要重新分配——重新分配 linkSeq 会产生重复的平行链路。最终工程状态只接受应用层合成的结构化结果，不要自行编写 stage result。";
 
 // SKILL.md 正文每次运行注入骨架之后，用固定 sentinel 分隔，便于切分骨架段与注入段。
 const SKILL_GUIDANCE_SENTINEL = "<<<SKILL_GUIDANCE>>>";
@@ -1197,6 +1260,59 @@ export function extractTopologyWorkflowStageResults(message, toolUseNamesById = 
   }
 
   return results;
+}
+
+// U2：从 request_stage_change 工具的 tool_result 提取切阶段提议。与拓扑提取的
+// 边界一致（只认来自该工具调用的结果——大模型在自然语言里写「切到拓扑」但没调
+// 工具则不产生提议），但不接 stageRunnerInput.stage 门槛：任何阶段都要能切。
+// 注意：targetStage 是大模型填的参数，这里不校验合法性（合法性在应用层）。
+export function extractStageChangeRequests(message, toolUseNamesById = new Map()) {
+  const results = [];
+  const contentBlocks = collectContentBlocks(message);
+
+  for (const block of contentBlocks) {
+    if (block?.type !== "tool_result") {
+      continue;
+    }
+
+    const toolUseId = typeof block.tool_use_id === "string" ? block.tool_use_id : undefined;
+    const toolName = toolUseId ? toolUseNamesById.get(toolUseId) : undefined;
+    if (toolName !== REQUEST_STAGE_CHANGE_TOOL_NAME) {
+      continue;
+    }
+
+    const request = extractStageChangeRequest(extractJsonFromToolResultBlock(block));
+    if (!request) {
+      continue;
+    }
+
+    results.push({
+      key: `${toolUseId ?? toolName}:${REQUEST_STAGE_CHANGE_TOOL_NAME}:${request.targetStage}`,
+      result: {
+        kind: "stage-change-request",
+        targetStage: request.targetStage,
+        ...(request.reason ? { reason: request.reason } : {}),
+      },
+    });
+  }
+
+  return results;
+}
+
+function extractStageChangeRequest(value) {
+  if (!isRecord(value) || value.ok !== true || !isRecord(value.stageChangeRequest)) {
+    return undefined;
+  }
+
+  const { targetStage, reason } = value.stageChangeRequest;
+  if (typeof targetStage !== "string" || targetStage.length === 0) {
+    return undefined;
+  }
+
+  return {
+    targetStage,
+    reason: typeof reason === "string" && reason.length > 0 ? reason : undefined,
+  };
 }
 
 function collectContentBlocks(message) {

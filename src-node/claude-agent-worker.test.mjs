@@ -4,8 +4,12 @@ import { tmpdir } from "node:os";
 import { describe, expect, it, vi } from "vitest";
 import {
   buildPrompt,
+  buildAllowedToolsForStage,
   TOPOLOGY_MCP_ALLOWED_TOOLS,
+  REQUEST_STAGE_CHANGE_TOOL_NAME,
+  requestStageChangeTool,
   extractTopologyWorkflowStageResults,
+  extractStageChangeRequests,
   extractOperationTraceEvents,
   extractToolCallEvents,
   extractStreamEventText,
@@ -84,6 +88,7 @@ describe("claude-agent-worker", () => {
       expect(input.options.allowedTools).toEqual([
         "Skill",
         "Read",
+        REQUEST_STAGE_CHANGE_TOOL_NAME,
         ...TOPOLOGY_MCP_ALLOWED_TOOLS,
       ]);
       expect(input.options.settingSources).toEqual(["user", "project"]);
@@ -92,6 +97,7 @@ describe("claude-agent-worker", () => {
       expect(input.options.allowedTools).toEqual([
         "Skill",
         "Read",
+        REQUEST_STAGE_CHANGE_TOOL_NAME,
         ...TOPOLOGY_MCP_ALLOWED_TOOLS,
       ]);
       expect(input.options.mcpServers.tsn_topology).toMatchObject({
@@ -100,6 +106,8 @@ describe("claude-agent-worker", () => {
         alwaysLoad: true,
       });
       expect(input.options.mcpServers.tsn_topology.args[0]).toContain("tsn-topology-server.mjs");
+      // tsn_workflow（切阶段，in-process SDK server）始终注册。
+      expect(input.options.mcpServers.tsn_workflow).toMatchObject({ type: "sdk", name: "tsn_workflow" });
       // AskUserQuestion 双层禁用（plan 2026-06-05-001 U5）：dontAsk 下必拒，硬禁省 turn。
       expect(input.options.disallowedTools).toEqual(["AskUserQuestion"]);
       expect(input.options.maxTurns).toBe(20);
@@ -160,6 +168,9 @@ describe("claude-agent-worker", () => {
     // KTD8 迁入骨架的协议不变量（骨架是唯一载体，回退即丢失）。
     expect(skeleton).toContain("不要再调用 topology_validate 复检");
     expect(skeleton).toContain("逐字节复用上一次的同一 operations");
+    // U5：切阶段工具规则在骨架里（前进=确认按钮、回退=工具）。
+    expect(skeleton).toContain("request_stage_change");
+    expect(skeleton).toContain("不要用该工具前进");
     expect(guidance).toContain("[SKILL-PROBE-v1] 注入指引正文");
   });
 
@@ -503,6 +514,81 @@ describe("claude-agent-worker", () => {
     expect(extracted[0].result.summary).toContain("mutation #5");
   });
 
+  it("U1: request_stage_change tool returns the structured stage-change proposal", async () => {
+    const result = await requestStageChangeTool.handler({ targetStage: "topology", reason: "用户要加两个设备" }, {});
+    const payload = JSON.parse(result.content[0].text);
+    expect(payload).toEqual({
+      ok: true,
+      stageChangeRequest: { targetStage: "topology", reason: "用户要加两个设备" },
+    });
+  });
+
+  it("U1: request_stage_change omits reason when not provided", async () => {
+    const result = await requestStageChangeTool.handler({ targetStage: "time-sync" }, {});
+    const payload = JSON.parse(result.content[0].text);
+    expect(payload.stageChangeRequest).toEqual({ targetStage: "time-sync" });
+  });
+
+  it("U2: stage-change tool is whitelisted in every stage; topology write tools only in the topology stage", () => {
+    const topologyStage = buildAllowedToolsForStage({ stage: "topology" }, true);
+    const timeSyncStage = buildAllowedToolsForStage({ stage: "time-sync" }, true);
+    expect(topologyStage).toContain(REQUEST_STAGE_CHANGE_TOOL_NAME);
+    expect(timeSyncStage).toContain(REQUEST_STAGE_CHANGE_TOOL_NAME);
+    // 拓扑写工具只在拓扑阶段开放——非拓扑阶段直写库的结果不会被对账，会让工程与 workflow 静默分叉。
+    expect(topologyStage).toContain("mcp__tsn_topology__topology_apply_operations");
+    expect(timeSyncStage).not.toContain("mcp__tsn_topology__topology_apply_operations");
+  });
+
+  it("U2: extracts a stage-change proposal in a non-topology stage (no stage gate)", () => {
+    const toolUseNamesById = new Map([["toolu-switch", REQUEST_STAGE_CHANGE_TOOL_NAME]]);
+    const toolResult = { ok: true, stageChangeRequest: { targetStage: "topology", reason: "加两个设备" } };
+
+    const extracted = extractStageChangeRequests({
+      type: "user",
+      message: {
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "toolu-switch",
+            content: [{ type: "text", text: JSON.stringify(toolResult) }],
+          },
+        ],
+      },
+    }, toolUseNamesById);
+
+    expect(extracted).toHaveLength(1);
+    expect(extracted[0].result).toEqual({
+      kind: "stage-change-request",
+      targetStage: "topology",
+      reason: "加两个设备",
+    });
+  });
+
+  it("U2: does not produce a proposal when the model only writes text without calling the tool", () => {
+    const extracted = extractStageChangeRequests({
+      type: "assistant",
+      message: { content: [{ type: "text", text: "我帮你切到拓扑阶段" }] },
+    }, new Map());
+    expect(extracted).toEqual([]);
+  });
+
+  it("U2: ignores tool_result blocks from other tools", () => {
+    const toolUseNamesById = new Map([["toolu-read", "Read"]]);
+    const extracted = extractStageChangeRequests({
+      type: "user",
+      message: {
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "toolu-read",
+            content: [{ type: "text", text: JSON.stringify({ ok: true, stageChangeRequest: { targetStage: "topology" } }) }],
+          },
+        ],
+      },
+    }, toolUseNamesById);
+    expect(extracted).toEqual([]);
+  });
+
   it("reads a topology stage result written to the run-scoped path", async () => {
     const events = [];
     const query = async function* (input) {
@@ -525,10 +611,12 @@ describe("claude-agent-worker", () => {
     expect(events.map((event) => event.text ?? "").join("")).not.toContain("[阶段结果]");
   });
 
-  it("fails closed by omitting MCP server config when topology host cannot be resolved", async () => {
+  it("fails closed by omitting topology MCP config when topology host cannot be resolved", async () => {
     const query = async function* (input) {
       expect(input.options.allowedTools).not.toContain("mcp__tsn_topology__topology_initialize");
-      expect(input.options.mcpServers).toBeUndefined();
+      // 拓扑 server fail-closed 省略；切阶段 in-process server 与其无关，始终注册。
+      expect(input.options.mcpServers.tsn_topology).toBeUndefined();
+      expect(input.options.mcpServers.tsn_workflow).toMatchObject({ type: "sdk", name: "tsn_workflow" });
       yield { type: "result", session_id: "session-no-mcp-host", result: "拓扑工具暂不可用，已回退本地 runner 路径" };
     };
 
@@ -936,6 +1024,7 @@ describe("claude-agent-worker", () => {
     expect(audit.sdkOptions.allowedTools).toEqual([
       "Skill",
       "Read",
+      REQUEST_STAGE_CHANGE_TOOL_NAME,
       ...TOPOLOGY_MCP_ALLOWED_TOOLS,
     ]);
     expect(audit.sdkOptions.skills).toEqual(["tsn-topology", "tsn-flow-planning"]);

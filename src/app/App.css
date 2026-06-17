@@ -527,40 +527,60 @@ textarea:focus-visible {
 }
 
 .skill-detail-layout > .master-list {
-  /* 四个 skill 卡横向排布。WebKit（Tauri WKWebView）下 grid + overflow 的 auto 行
+  /* 四个 skill 卡 2×2 排布。WebKit（Tauri WKWebView）下 grid + overflow 的 auto 行
      automatic min size = 0，整行被压塌成 0 高、4 个 skill 卡不可见（同 .skill-file-list
      的 row collapse，见 a7f06ff）。改 flex-wrap + overflow:visible 规避。 */
   display: flex;
   flex-wrap: wrap;
   align-self: start;
   overflow: visible;
-  gap: 6px;
+  gap: 8px;
   max-height: none;
 }
 
 .skill-detail-layout .master-list-item {
-  flex: 1 1 110px;
+  flex: 1 1 calc(50% - 4px);
   width: auto;
-  gap: 2px;
-  padding: 7px 9px;
+  gap: 3px;
+  padding: 10px 12px;
+  border-radius: 7px;
+}
+
+/* skill id 不再用响眼的橙色——选中态已由左侧 accent 边框 + 浅底承担，id 退为安静的灰色 kicker。 */
+.skill-detail-layout .master-list-item .tool-card-label {
+  color: var(--text-muted);
 }
 
 /* skill 详情不做内层滚动：嵌套滚动在 WKWebView 下把底部内容（参数合法域）
    裁在不可见的内层滚动区里——抽屉面板是唯一滚动上下文。 */
 .skill-detail-layout .detail-surface {
   overflow: visible;
+  padding: 15px 16px;
+  border-radius: 8px;
 }
 
-/* skill 详情顶部：描述 + 状态一行。 */
+/* skill 详情顶部：描述 + 状态一行，底部分隔线把「描述」与下方「文件区」分组。 */
 .skill-detail-meta {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 10px;
+  gap: 12px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--border);
 }
 
 .skill-detail-meta .detail-description {
   margin: 0;
+}
+
+/* 分区小标签：复用抽屉 kicker 的 mono 大写灰色语汇，给「文件区/合法域」等子区一致的标头。 */
+.skill-section-kicker {
+  margin: 0;
+  color: var(--text-muted);
+  font-family: "JetBrains Mono", monospace;
+  font-size: 10px;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
 }
 
 .release-note-detail {
@@ -595,12 +615,12 @@ textarea:focus-visible {
   color: var(--text-muted);
 }
 
+/* 文件区紧接「描述」分隔线之下，自身不再加边框/盒子——靠 meta 的分隔线与间距分组，避免盒中盒。 */
 .skill-files-panel {
   display: grid;
-  gap: 8px;
-  margin: 10px 0 0;
-  padding: 10px 0 0;
-  border-top: 1px solid var(--border);
+  gap: 9px;
+  margin: 14px 0 0;
+  padding: 0;
 }
 
 .skill-files-header,
@@ -611,9 +631,36 @@ textarea:focus-visible {
   gap: 10px;
 }
 
-.skill-files-header small {
+.skill-files-note {
+  margin: -3px 0 1px;
   color: var(--text-muted);
   font-size: 11px;
+  line-height: 1.55;
+}
+
+/* 恢复内置版本：低频动作，退为安静的 ghost 按钮，不与主操作争视觉权重。 */
+.skill-restore-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 26px;
+  padding: 3px 8px;
+  border: 0;
+  border-radius: 4px;
+  color: var(--text-secondary);
+  background: transparent;
+  font-size: 11.5px;
+  transition: background 0.15s, color 0.15s;
+}
+
+.skill-restore-btn:hover:not(:disabled) {
+  color: var(--text-primary);
+  background: var(--bg-tertiary);
+}
+
+.skill-restore-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
 }
 
 .skill-file-status {
@@ -645,12 +692,12 @@ textarea:focus-visible {
   min-height: 0;
 }
 
-/* 文件卡片自动换行而非横向滚动：overflow 滚动容器在 WebKit（Tauri WKWebView）
-   的 grid auto 行里 automatic min size = 0，行会被压塌只剩半截卡片。 */
+/* 文件改为全宽堆叠行（纵向 flex，无 grid auto-row 压塌风险）：每行完整显示路径，
+   解决多个 references/* 截断后无法区分的问题；默认无边框、靠浅底分隔，减少卡片噪音。 */
 .skill-file-list {
   display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
+  flex-direction: column;
+  gap: 4px;
   min-width: 0;
 }
 
@@ -658,17 +705,21 @@ textarea:focus-visible {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
-  gap: 4px 7px;
-  flex: 0 0 clamp(150px, 34%, 210px);
-  width: 34%;
+  gap: 8px;
+  width: 100%;
   min-width: 0;
-  max-width: 210px;
-  padding: 6px 8px;
-  border: 1px solid var(--border);
-  border-radius: 4px;
+  padding: 7px 10px;
+  border: 1px solid transparent;
+  border-radius: 5px;
   color: var(--text-secondary);
   text-align: left;
-  background: #ffffff;
+  background: var(--bg-secondary);
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.skill-file-item:hover {
+  color: var(--text-primary);
+  background: var(--bg-tertiary);
 }
 
 .skill-file-item.active,
@@ -680,15 +731,15 @@ textarea:focus-visible {
 
 .skill-file-item .mono {
   overflow: hidden;
+  font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .skill-file-item small {
-  overflow: hidden;
+  flex-shrink: 0;
   color: var(--text-muted);
   font-size: 11px;
-  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
@@ -759,9 +810,9 @@ textarea:focus-visible {
    编辑模式的 textarea 仍保持固定窗口大小。 */
 .skill-file-markdown {
   min-width: 0;
-  padding: 12px 14px;
+  padding: 13px 15px;
   border: 1px solid var(--border);
-  border-radius: 4px;
+  border-radius: 7px;
   color: var(--text-primary);
   background: var(--bg-secondary);
   font-size: 12.5px;

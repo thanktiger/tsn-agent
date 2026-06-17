@@ -9,9 +9,10 @@ import {
   countSwitches,
   type TopologyRowSnapshot,
 } from "../sessions/topology-snapshot";
-import { getScenarioConfig } from "../domain/scenario-config";
+import { getScenarioConfig, WORKFLOW_STEPS, type WorkflowStep } from "../domain/scenario-config";
 import { redactProviderNamesForDisplay } from "../ui/display-redaction";
 import {
+  clearPendingStageChange,
   confirmCurrentStage,
   normalizeWorkflowState,
   recordStageResult,
@@ -59,7 +60,7 @@ interface ClaudeAgentEvent {
  */
 export async function runTsnAgent(requestOrIntent: TsnAgentRequest | string): Promise<TsnAgentResult> {
   const request = typeof requestOrIntent === "string" ? { userIntent: requestOrIntent } : requestOrIntent;
-  const { userIntent } = request;
+  const { userIntent, action } = request;
   const workflow = normalizeWorkflowState(request.session?.workflow);
   const runId = request.runId ?? createRunId();
   const sessionId = request.session?.id;
@@ -90,28 +91,37 @@ export async function runTsnAgent(requestOrIntent: TsnAgentRequest | string): Pr
     },
   });
 
-  const localResult = runLocalBoundaryProgression(userIntent, workflow);
-  if (localResult) {
+  // 大模型路径实际使用的意图/工作流。正常等于用户输入；确认回退「带原话」时被替换为
+  // 切阶段后的工作流 + 触发回退的原话，从而切完自动执行原始编辑（不用用户重输）。
+  let effectiveIntent = userIntent;
+  let effectiveWorkflow = workflow;
+
+  // 显式确认动作（确认按钮）：切阶段本身确定性、不走大模型。
+  if (action === "confirm-stage") {
+    const confirmResult = runConfirmAction(workflow);
     logAgent(request.diagnostics, {
       sessionId,
       runId,
-      message: "Agent 使用本地确定性边界回复",
+      message: "Agent 使用确认动作推进",
       durationMs: Date.now() - startedAt,
       details: {
-        workflowStep: localResult.workflow.currentStep,
-        workflowStatus: localResult.workflow.stages[localResult.workflow.currentStep].status,
+        workflowStep: confirmResult.workflow.currentStep,
+        workflowStatus: confirmResult.workflow.stages[confirmResult.workflow.currentStep].status,
       },
     });
 
-    return localResult;
+    // 无「带原话」标记 → 纯确定性确认（推进 / time-sync 自动生成 / 无操作），直接返回。
+    if (!confirmResult.carryIntent) {
+      return confirmResult;
+    }
+
+    // 回退带着原话：切阶段已完成（确定性），下面用原话在切换后的阶段继续走大模型。
+    effectiveIntent = confirmResult.carryIntent;
+    effectiveWorkflow = confirmResult.workflow;
   }
 
-  // 灰阶段（flow-template / planning-export）收到拓扑修改意图：回退到拓扑阶段再走 Claude。
-  const effectiveWorkflow =
-    (workflow.currentStep === "flow-template" || workflow.currentStep === "planning-export")
-      && hasTopologyChangeIntent(userIntent)
-      ? requestStageChanges(workflow, "topology")
-      : workflow;
+  // 自由文本一律走大模型判断意图（不再有正则快速路径）。跨阶段意图由大模型调
+  // request_stage_change 工具表达，应用层在 applyStageResults 校验后执行。
   const snapshot = await fetchTopologySnapshot(sessionId);
   const streamStats = {
     chunkCount: 0,
@@ -149,13 +159,13 @@ export async function runTsnAgent(requestOrIntent: TsnAgentRequest | string): Pr
   try {
     const claude = await invoke<ClaudeAgentResponse>("run_claude_agent", {
       request: {
-        prompt: userIntent,
+        prompt: effectiveIntent,
         runId,
         appSessionId: sessionId,
         resumeSessionId: request.session?.claudeSessionId,
-        conversationContext: buildConversationContext(request.session, effectiveWorkflow, snapshot, userIntent),
+        conversationContext: buildConversationContext(request.session, effectiveWorkflow, snapshot, effectiveIntent),
         stageRunnerInput: {
-          userIntent,
+          userIntent: effectiveIntent,
           stage: effectiveWorkflow.currentStep,
           scenarioConfigId: effectiveWorkflow.scenarioConfigId,
         },
@@ -166,6 +176,7 @@ export async function runTsnAgent(requestOrIntent: TsnAgentRequest | string): Pr
       stageResults: claude.stageResults ?? [],
       workflow: effectiveWorkflow,
       sessionId,
+      userIntent: effectiveIntent,
     });
     logAgent(request.diagnostics, {
       sessionId,
@@ -216,14 +227,14 @@ export async function runTsnAgent(requestOrIntent: TsnAgentRequest | string): Pr
         createEvent({
           id: "event-agent-failed",
           kind: "error",
-          stage: workflow.currentStep,
+          stage: effectiveWorkflow.currentStep,
           title: "智能助手执行失败",
           content: `本轮请求失败：${normalizeError(error)}。右侧工程保持原状态。`,
           status: "error",
         }),
       ],
-      workflow,
-      assistantText: buildAgentFailureText(error, userIntent),
+      workflow: effectiveWorkflow,
+      assistantText: buildAgentFailureText(error, effectiveIntent),
       mode: "claude",
     };
   } finally {
@@ -231,33 +242,58 @@ export async function runTsnAgent(requestOrIntent: TsnAgentRequest | string): Pr
   }
 }
 
-// ---------- 本地边界推进 ----------
+// ---------- 阶段推进（确定性） ----------
 
-function runLocalBoundaryProgression(userIntent: string, workflow: WorkflowState): TsnAgentResult | undefined {
-  if (isSimulationExecutionIntent(userIntent)) {
-    return createSimulationUnsupportedResult(workflow);
+// 确认按钮的确定性入口：先处理待确认的破坏性回退，否则普通推进。切阶段本身不走大模型；
+// 但回退「带原话」时返回 carryIntent，由 runTsnAgent 在切换后的阶段用原话自动跑一轮大模型。
+function runConfirmAction(workflow: WorkflowState): TsnAgentResult & { carryIntent?: string } {
+  if (workflow.pendingStageChange) {
+    const target = workflow.pendingStageChange;
+    const carriedIntent = workflow.pendingStageChangeIntent;
+    // requestStageChanges 会清空 pendingStageChange/Intent 并把后续阶段重置为 locked。
+    const switched = requestStageChanges(workflow, target);
+
+    // 回退到拓扑且带着触发它的原话：切阶段后让调用方用原话在拓扑阶段自动执行真正的编辑，
+    // 免去用户重输（time-sync 无可编辑工具，不走此路）。
+    if (target === "topology" && carriedIntent) {
+      return { events: [], workflow: switched, assistantText: "", mode: "local", carryIntent: carriedIntent };
+    }
+
+    // 回退到 time-sync 需重新自动生成摘要并进入待确认——否则会停在 current 且无确认按钮（死胡同）。
+    if (target === "time-sync" && switched.stages["time-sync"].status === "current") {
+      return runTimeSyncStage(switched);
+    }
+
+    const scenarioConfig = getScenarioConfig(workflow.scenarioConfigId);
+    const events = [
+      createEvent({
+        id: "event-stage-rolled-back",
+        kind: "stage-result",
+        stage: target,
+        title: "已切回阶段",
+        content: `已切回${scenarioConfig.stageLabels[target]}阶段，其后的阶段已重置。请描述需要修改的内容。`,
+        status: "success",
+      }),
+    ];
+
+    return {
+      events,
+      workflow: switched,
+      assistantText: events.map((event) => event.content).join("\n"),
+      mode: "local",
+    };
   }
 
-  const currentStatus = workflow.stages[workflow.currentStep].status;
-
-  if (isBoundaryProgressionIntent(userIntent) && currentStatus === "waiting_confirmation") {
+  if (workflow.stages[workflow.currentStep].status === "waiting_confirmation") {
     return runAfterConfirmation(workflow);
   }
 
-  if (workflow.currentStep === "time-sync" && currentStatus === "current") {
-    return runTimeSyncStage(workflow);
-  }
-
-  if (workflow.currentStep === "flow-template" || workflow.currentStep === "planning-export") {
-    if (hasTopologyChangeIntent(userIntent)) {
-      // 用户在灰阶段想改拓扑：回退到拓扑阶段，由调用方下一轮走 Claude。
-      return undefined;
-    }
-
-    return createStageOfflineResult(workflow);
-  }
-
-  return undefined;
+  return {
+    events: [],
+    workflow,
+    assistantText: "当前没有待确认的操作。",
+    mode: "local",
+  };
 }
 
 function runAfterConfirmation(workflow: WorkflowState): TsnAgentResult {
@@ -341,46 +377,6 @@ function runTimeSyncStage(workflow: WorkflowState): TsnAgentResult {
   };
 }
 
-function createSimulationUnsupportedResult(workflow: WorkflowState): TsnAgentResult {
-  const events = [
-    createEvent({
-      id: "event-simulation-unsupported",
-      kind: "error",
-      title: "仿真未执行",
-      content: "当前版本还没有接入 OMNeT++/远程服务器仿真 runner。本次不会在后台启动仿真，也不会异步返回仿真结果。",
-      status: "warning",
-    }),
-  ];
-
-  return {
-    events,
-    workflow,
-    assistantText: events.map((event) => event.content).join("\n"),
-    mode: "local",
-  };
-}
-
-function createStageOfflineResult(workflow: WorkflowState): TsnAgentResult {
-  const scenarioConfig = getScenarioConfig(workflow.scenarioConfigId);
-  const events = [
-    createEvent({
-      id: "event-stage-offline",
-      kind: "stage-result",
-      stage: workflow.currentStep,
-      title: "阶段暂下线",
-      content: `${scenarioConfig.stageLabels[workflow.currentStep]}在当前版本暂时下线，预计 Phase B 回归。如需调整拓扑，请直接描述新的拓扑需求。`,
-      status: "info",
-    }),
-  ];
-
-  return {
-    events,
-    workflow,
-    assistantText: events.map((event) => event.content).join("\n"),
-    mode: "local",
-  };
-}
-
 function createUnavailableResult(workflow: WorkflowState): TsnAgentResult {
   const downloadUrl = import.meta.env.VITE_DESKTOP_DOWNLOAD_URL as string | undefined;
   const content = [
@@ -408,10 +404,92 @@ function createUnavailableResult(workflow: WorkflowState): TsnAgentResult {
 
 // ---------- stage result 应用 ----------
 
+interface StageChangeRequest {
+  targetStage: string;
+  reason?: string;
+}
+
+// 只允许切回有真实处理的阶段；flow-template / planning-export 暂下线，切过去是死胡同。
+const STAGE_SWITCH_TARGETS: readonly WorkflowStep[] = ["topology", "time-sync"];
+
+function asStageChangeRequest(value: unknown): StageChangeRequest | undefined {
+  if (!value || typeof value !== "object") {
+    return undefined;
+  }
+
+  const record = value as Record<string, unknown>;
+  if (record.kind !== "stage-change-request" || typeof record.targetStage !== "string" || record.targetStage.length === 0) {
+    return undefined;
+  }
+
+  return {
+    targetStage: record.targetStage,
+    reason: typeof record.reason === "string" && record.reason.length > 0 ? record.reason : undefined,
+  };
+}
+
+function isLegalStageSwitchTarget(target: string): target is WorkflowStep {
+  return (STAGE_SWITCH_TARGETS as readonly string[]).includes(target);
+}
+
 function applyStageResults(input: {
   stageResults: unknown[];
   workflow: WorkflowState;
   sessionId?: string;
+  userIntent: string;
+}): {
+  events: AgentEvent[];
+  workflow: WorkflowState;
+  applied?: WorkflowStageSummary;
+  topologyMutationId?: number;
+  rejections: string[];
+} {
+  // 切阶段提议是独立形状（{kind:"stage-change-request"}），必须在拓扑 parse 之前拎出，
+  // 否则会被 parseWorkflowStageResult 当成非法拓扑结果直接拒掉。
+  const stageChangeRequests: StageChangeRequest[] = [];
+  const topologyResults: unknown[] = [];
+  for (const raw of input.stageResults) {
+    const request = asStageChangeRequest(raw);
+    if (request) {
+      stageChangeRequests.push(request);
+    } else {
+      topologyResults.push(raw);
+    }
+  }
+
+  // 顺序固定（拓扑落库在前、切阶段在后）：先处理拓扑结果。
+  const topology = applyTopologyStageResults({
+    stageResults: topologyResults,
+    workflow: input.workflow,
+    sessionId: input.sessionId,
+    suppressNoResult: stageChangeRequests.length > 0,
+  });
+
+  if (stageChangeRequests.length === 0) {
+    // 无切阶段提议：自由文本新一轮作废上一轮未确认的回退提议。
+    return { ...topology, workflow: clearPendingStageChange(topology.workflow) };
+  }
+
+  // 再处理切阶段提议（多个时取最后一个）。
+  const switchOutcome = applyStageChangeRequest(
+    stageChangeRequests[stageChangeRequests.length - 1],
+    topology.workflow,
+    input.userIntent,
+  );
+  return {
+    events: [...topology.events, ...switchOutcome.events],
+    workflow: switchOutcome.workflow,
+    applied: topology.applied,
+    topologyMutationId: topology.topologyMutationId,
+    rejections: topology.rejections,
+  };
+}
+
+function applyTopologyStageResults(input: {
+  stageResults: unknown[];
+  workflow: WorkflowState;
+  sessionId?: string;
+  suppressNoResult: boolean;
 }): {
   events: AgentEvent[];
   workflow: WorkflowState;
@@ -482,7 +560,7 @@ function applyStageResults(input: {
         status: "error",
       }),
     );
-  } else if (input.workflow.currentStep === "topology") {
+  } else if (!input.suppressNoResult && input.workflow.currentStep === "topology") {
     events.push(
       createEvent({
         id: "event-topology-no-result",
@@ -499,6 +577,77 @@ function applyStageResults(input: {
     events,
     workflow: input.workflow,
     rejections,
+  };
+}
+
+// 切阶段提议处理：合法性 + 方向校验，往后回退记 pending 待确认（不立即执行）。
+function applyStageChangeRequest(
+  request: StageChangeRequest,
+  workflow: WorkflowState,
+  userIntent: string,
+): { events: AgentEvent[]; workflow: WorkflowState } {
+  const target = request.targetStage;
+  const scenarioConfig = getScenarioConfig(workflow.scenarioConfigId);
+
+  if (!isLegalStageSwitchTarget(target)) {
+    return {
+      workflow: clearPendingStageChange(workflow),
+      events: [
+        createEvent({
+          id: "event-stage-change-rejected",
+          kind: "error",
+          stage: workflow.currentStep,
+          title: "无法切换阶段",
+          content: `无法切换到「${target}」：只能切回拓扑或时间同步阶段。`,
+          status: "error",
+        }),
+      ],
+    };
+  }
+
+  const currentIndex = WORKFLOW_STEPS.indexOf(workflow.currentStep);
+  const targetIndex = WORKFLOW_STEPS.indexOf(target);
+
+  if (targetIndex === currentIndex) {
+    return { workflow: clearPendingStageChange(workflow), events: [] };
+  }
+
+  // 方向约束：前进只走「确认并继续」按钮，工具只用于回退——同时消除大模型正向误判风险。
+  if (targetIndex > currentIndex) {
+    return {
+      workflow: clearPendingStageChange(workflow),
+      events: [
+        createEvent({
+          id: "event-stage-change-forward-rejected",
+          kind: "error",
+          stage: workflow.currentStep,
+          title: "无法前进",
+          content: `前进到${scenarioConfig.stageLabels[target]}请点「确认并继续」按钮，本工具只用于切回更早的阶段。`,
+          status: "error",
+        }),
+      ],
+    };
+  }
+
+  // 往后回退（破坏性）：只记 pendingStageChange，不改任何阶段状态——确认按钮的显隐由
+  // pendingStageChange 决定（见 chat-pane）。若放弃提议（下一轮自由文本），clearPendingStageChange
+  // 直接抹掉它、按钮随之消失，不会留下指向过期目标的「幽灵」待确认状态。
+  const reasonSuffix = request.reason ? `（${request.reason}）` : "";
+  const summary = `切回${scenarioConfig.stageLabels[target]}会让其后已完成的阶段重新来过${reasonSuffix}。确认要切回吗？确认后点「确认并继续」。`;
+
+  return {
+    // 同时记下触发回退的原话：确认后由 runConfirmAction/runTsnAgent 用它在新阶段自动执行编辑。
+    workflow: { ...workflow, pendingStageChange: target, pendingStageChangeIntent: userIntent },
+    events: [
+      createEvent({
+        id: "event-stage-change-pending",
+        kind: "confirmation-required",
+        stage: workflow.currentStep,
+        title: "确认切回阶段",
+        content: summary,
+        status: "warning",
+      }),
+    ],
   };
 }
 
@@ -580,6 +729,9 @@ function buildConversationContext(
     "重要：固定阶段顺序是拓扑 -> 时间同步 -> 流量规划 -> 模拟仿真。拓扑确认后必须进入时间同步，不要说进入配置控制流或流量规划。",
     "重要：流量规划与规划导出在当前版本暂时下线，不要声称可以生成流量规划或导出文件。",
     "重要：当前应用还没有接入 OMNeT++/远程仿真 runner。不能声称已经启动仿真、正在 SSH 执行，或稍后通知仿真结果。",
+    workflow.pendingStageChange
+      ? `重要：已有一个待用户确认的回退提议（目标阶段：${scenarioConfig.stageLabels[workflow.pendingStageChange]}）。不要重复调用 request_stage_change；等待用户点确认按钮。`
+      : "",
     "",
     "最近对话：",
     recentMessages || "暂无历史对话。",
@@ -603,24 +755,7 @@ async function fetchTopologySnapshot(sessionId: string | undefined): Promise<Top
   }
 }
 
-// ---------- intent 判定 ----------
-
-function isBoundaryProgressionIntent(userIntent: string): boolean {
-  const trimmed = userIntent.trim();
-  const isShortConfirmation = /^(确认|可以|好的|没问题|对|正确|按这个|就这样|同意|通过|使用|采用|先给默认|默认|用默认|采用默认|使用默认|继续|下一步)\s*[。.!！]?$/i.test(trimmed);
-  const confirmsPreviousUnderstanding = /^理解的对(?:，|,|\s|。|！|!|$)/i.test(trimmed)
-    || /按照上面的理解/.test(trimmed);
-
-  return isShortConfirmation || confirmsPreviousUnderstanding;
-}
-
-function isSimulationExecutionIntent(text: string): boolean {
-  return /启动仿真|运行仿真|执行仿真|跑仿真|跑一下|跑起来|simulation|simulate|omnet|inet|devserver|ssh|服务器/i.test(text);
-}
-
-function hasTopologyChangeIntent(text: string): boolean {
-  return /交换机|端系统|终端|网卡|拓扑|switch|topology/i.test(text);
-}
+// ---------- 输出侧守卫（大模型回复的安全兜底） ----------
 
 function isUnsupportedSimulationClaim(text: string): boolean {
   return /启动仿真|正在.*仿真|后台.*仿真|远程.*仿真|SSH|ssh|devserver|稍后.*结果|完成后.*通知|跑完.*通知/i.test(text);

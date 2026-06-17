@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TSN Agent skill 管理架构 —— stage 验证 gate 与 root 编排 · Ideation</title>
+<style>
+  :root{--bg:#0f1115;--card:#181b22;--card2:#1f232c;--bd:#2a2f3a;--tx:#e6e9ef;--mut:#9aa3b2;--ac:#5b8cff;--ac2:#3ddc97;--warn:#ffb454;--dim:#6b7280;--hi:#3ddc97;--md:#ffb454;--lo:#9aa3b2}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--tx);font:15px/1.7 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
+  .wrap{max-width:920px;margin:0 auto;padding:40px 24px 80px}
+  h1{font-size:26px;line-height:1.3;margin:0 0 6px}
+  .meta{color:var(--mut);font-size:13px;margin-bottom:8px}
+  .meta b{color:var(--tx);font-weight:600}
+  .lead{background:var(--card2);border:1px solid var(--bd);border-radius:10px;padding:16px 18px;margin:18px 0 28px;font-size:14.5px}
+  .lead .tag{display:inline-block;background:rgba(255,180,84,.14);color:var(--warn);border-radius:5px;padding:1px 8px;font-size:12px;font-weight:600;margin-bottom:6px}
+  h2{font-size:19px;margin:34px 0 14px;padding-bottom:8px;border-bottom:1px solid var(--bd)}
+  .axes{display:grid;gap:8px}
+  .axis{background:var(--card);border:1px solid var(--bd);border-left:3px solid var(--ac);border-radius:7px;padding:10px 14px;font-size:14px}
+  .axis b{color:var(--ac)}
+  .ground p{margin:8px 0;color:var(--mut);font-size:14px}
+  .ground b{color:var(--tx)}
+  .jump{background:var(--card);border:1px solid var(--bd);border-radius:8px;padding:12px 16px;margin-bottom:20px;font-size:13.5px}
+  .jump a{color:var(--ac);text-decoration:none;display:block;padding:3px 0}
+  .jump a:hover{text-decoration:underline}
+  .jump .n{color:var(--dim);display:inline-block;width:22px}
+  .card{background:var(--card);border:1px solid var(--bd);border-radius:11px;padding:20px 22px;margin-bottom:18px}
+  .card.top{border-color:var(--ac2);box-shadow:0 0 0 1px rgba(61,220,151,.25)}
+  .card h3{font-size:17.5px;margin:0 0 4px}
+  .card h3 .num{color:var(--ac);margin-right:8px}
+  .badges{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0 14px}
+  .b{font-size:12px;border-radius:5px;padding:2px 9px;font-weight:600}
+  .b.axis{background:rgba(91,140,255,.14);color:var(--ac)}
+  .b.conf{background:rgba(61,220,151,.12);color:var(--hi)}
+  .b.cx{background:rgba(255,180,84,.12);color:var(--md)}
+  .b.tp{background:rgba(61,220,151,.18);color:var(--ac2)}
+  .row{margin:9px 0}
+  .row .k{color:var(--dim);font-size:12px;text-transform:uppercase;letter-spacing:.04em;font-weight:600;margin-bottom:2px}
+  .row .v{font-size:14px}
+  .basis{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px;background:var(--card2);border-radius:6px;padding:8px 11px;color:var(--mut)}
+  .basis .t{color:var(--ac2);font-weight:700}
+  .down{color:var(--warn)}
+  svg{display:block;margin:14px auto;max-width:100%}
+  .svg-cap{text-align:center;color:var(--dim);font-size:12px;margin-top:-6px;margin-bottom:8px}
+  table{width:100%;border-collapse:collapse;font-size:13.5px;margin-top:8px}
+  th,td{text-align:left;padding:9px 12px;border-bottom:1px solid var(--bd);vertical-align:top}
+  th{color:var(--dim);font-size:12px;text-transform:uppercase;letter-spacing:.04em}
+  td.r{color:var(--mut)}
+  .foot{margin-top:50px;padding-top:18px;border-top:1px solid var(--bd);color:var(--dim);font-size:12px;text-align:center}
+  code{font-family:ui-monospace,Menlo,monospace;background:var(--card2);padding:1px 5px;border-radius:4px;font-size:12.5px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>TSN Agent skill 管理架构 —— stage 验证 gate 与 root 编排</h1>
+<div class="meta"><b>2026-06-16</b> · focus: 4 stage 各 skill + 每 stage 可验证环节 + 是否需要 root skill 管状态流转 · mode: repo-grounded</div>
+
+<div class="lead">
+<span class="tag">贯穿全篇的核心张力</span>
+<p style="margin:0">boss 的设想（4 stage 各做独立 skill + root 编排）<b>几乎就是团队已推翻的 <code>05-21-001</code> 路线</b>——"4 stage 各一 skill + stage runner + 统一 StageSkillResult 协议 + INET smoke" 曾完整实现，2026-06-05 被 <code>06-03-001</code> 整体移除，因为它制造了<b>多层事实源</b>。</p>
+<p style="margin:8px 0 0">所有 survivor 的判别准绳是同一条：<b>收敛到单一 DB 源的「编排元数据 / 验证证据」会复利；离开 DB 源、由 agent 产出再回传的「运行时数据协议」会重蹈覆辙</b>。前者是这次该做的，后者正是上次翻车的。</p>
+</div>
+
+<h2>Codebase Context（grounding）</h2>
+<div class="ground">
+<p><b>当前架构</b>：4 stage <code>["topology","time-sync","flow-template","planning-export"]</code>（<code>scenario-config.ts</code>）。状态机 <code>project-state.ts</code>（locked→current→waiting_confirmation→confirmed）；编排器 <code>agent-adapter.ts runTsnAgent()</code>，stage 流转/确认全在<b>代码骨架</b>。skill 仅 2 个（tsn-topology / tsn-flow-planning），<b>拆分轴是「场景」而非「stage」</b>（主索引 SKILL.md + references/&lt;场景&gt;.md）。MCP 8 个 topology 工具，<b>无任何 INET/语义验证工具</b>（validate 只校验 JSON schema）。time-sync 阶段是 adapter 本地直接写死默认摘要；flow/export 应用层拦截不走 Claude；<code>tsn-inet-export</code> 在 catalog 标 enabled 但磁盘无 SKILL.md（catalog/磁盘 drift）。</p>
+<p><b>既定边界（06-09-002 三层职责）</b>：状态流转 / 阶段顺序 / "必走 MCP 落地" 归 worker 代码骨架（<b>不可交给 skill 文字层</b>——写坏 SKILL.md 只让 agent 空转）；SKILL.md 只承载可调领域指引；落地正确性靠工具白名单（agent 无 Write）+ trusted-signal（只认 MCP 的 <code>summary.mutationId</code>）。<b>06-12-001</b>：按 stage 拆 skill 要新建 3+ SKILL.md，撞上文件粒度播种、Tauri 目录映射、verify-skills 三方对账三条工程链路。</p>
+<p><b>外部生态</b>：INET/OMNeT++（gPTP/TAS/GCL 仿真，但仿真是统计下界、非可调度性证明）· Network Calculus（形式化 WCD 上界证明）· TSNsched（拓扑+流→SMT 合成 GCL→YANG→NETCONF 下发真机）· Siemens PRONETA（verify：compare actual-vs-expected）· CI Quality Gate（verifier 与 generator 解耦防 drift）· LangGraph supervisor（不持业务工具只路由，4-7 specialist 上限）· DO-178C 分级验证（按失效后果分验证证据强度）。</p>
+</div>
+
+<h2>Topic Axes</h2>
+<div class="axes">
+<div class="axis"><b>轴1 编排归属</b>：stage 状态流转/顺序由谁管——代码 orchestrator vs root skill；skill 文字层 vs 代码骨架。</div>
+<div class="axis"><b>轴2 验证 gate</b>：每 stage 怎么验证、验证强度分级、gate 阻断语义、验证者与生成者解耦。</div>
+<div class="axis"><b>轴3 skill 边界与拆分轴</b>：stage 拆 vs 场景拆；skill 承载领域指引 vs 代码守约束；避免重蹈 05-21-001。</div>
+<div class="axis"><b>轴4 验证基础设施</b>：MCP 验证工具 / 外部 INET-NC-NETCONF / 真机集成 / 验证结果落单一 DB 源 / 跨机 transport。</div>
+</div>
+
+<h2>Ranked Ideas</h2>
+<div class="jump">
+<a href="#i1"><span class="n">1.</span>root 不是 skill，而是状态机的「只读投影」（直接回答 boss 的核心问题）</a>
+<a href="#i2"><span class="n">2.</span>验证 gate 统一为 sidecar <code>/db/&lt;stage&gt;/verify</code> route 族</a>
+<a href="#i3"><span class="n">3.</span>trusted-signal 升为状态机硬约束：stage 完成必须带 DB-backed signalId</a>
+<a href="#i4"><span class="n">4.</span>验证强度分级（DO-178C 式）挂在「场景轴」，证据跨 stage 复用</a>
+<a href="#i5"><span class="n">5.</span>INET 作 stage 无关的验证后端 + 口径硬隔离（loadability ≠ TSN 验证）</a>
+<a href="#i6"><span class="n">6.</span>skill 拆分轴正式钉死为「场景」，stage 差异下沉代码/MCP</a>
+<a href="#i7"><span class="n">7.</span>time-sync 从「假摘要」变可验证 gate（纯拓扑推导，不需 INET）</a>
+</div>
+
+<div class="card top" id="i1">
+<h3><span class="num">1</span>root 不是 skill，而是状态机的「只读投影」</h3>
+<div class="badges"><span class="b tp">TOP PICK</span><span class="b axis">轴1 编排归属 + 轴3</span><span class="b conf">Conf 88%</span><span class="b cx">Cx S（决策）/ M（投影实现）</span></div>
+<div class="row"><div class="k">Description</div><div class="v">直接回答主题的核心提问"是否需要 root skill 管状态流转"——<b>不需要、也不该是 skill</b>。stage 顺序/状态/可用动作已经是 <code>project-state.ts</code> 的确定性纯函数（createInitial/confirm/requestChanges）。要给 agent 看全局，正确形态是把 WorkflowState <b>只读投影</b>进 conversationContext（<code>agent-adapter.ts</code> 已有雏形），而非引入一个可写的 root skill。关键区分：<b>编排元数据</b>（编译/注入期消费的静态声明，收敛事实源）vs <b>运行时数据协议</b>（agent 产出回传，制造事实源）——前者安全，后者正是 05-21-001 翻车点。若团队坚持要"root"，把它严格限制为 LangGraph 式 supervisor：<b>不持任何工具、不写 DB、无持久状态，只读 signal 做路由</b>。</div></div>
+<svg width="760" height="200" viewBox="0 0 760 200" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,Segoe UI,sans-serif" font-size="12">
+  <rect x="0" y="0" width="760" height="200" fill="none"/>
+  <!-- left: root skill (rejected) -->
+  <text x="180" y="20" fill="#ffb454" font-size="13" font-weight="700" text-anchor="middle">✗ 可写 root skill（重蹈 05-21-001）</text>
+  <rect x="70" y="34" width="220" height="34" rx="6" fill="#1f232c" stroke="#ffb454"/>
+  <text x="180" y="55" fill="#e6e9ef" text-anchor="middle">root skill（持状态/可写）</text>
+  <rect x="70" y="96" width="100" height="30" rx="5" fill="#181b22" stroke="#2a2f3a"/>
+  <text x="120" y="116" fill="#9aa3b2" text-anchor="middle">stage skill</text>
+  <rect x="190" y="96" width="100" height="30" rx="5" fill="#181b22" stroke="#2a2f3a"/>
+  <text x="240" y="116" fill="#9aa3b2" text-anchor="middle">DB 源</text>
+  <line x1="150" y1="68" x2="120" y2="96" stroke="#ffb454" stroke-width="1.5"/>
+  <line x1="210" y1="68" x2="240" y2="96" stroke="#ffb454" stroke-width="1.5"/>
+  <line x1="120" y1="126" x2="240" y2="126" stroke="#ffb454" stroke-width="1.5" stroke-dasharray="4"/>
+  <text x="180" y="150" fill="#ffb454" text-anchor="middle" font-size="11">两个事实源描述同一状态 → drift</text>
+  <!-- divider -->
+  <line x1="380" y1="20" x2="380" y2="180" stroke="#2a2f3a" stroke-dasharray="3"/>
+  <!-- right: read-only projection -->
+  <text x="570" y="20" fill="#3ddc97" font-size="13" font-weight="700" text-anchor="middle">✓ 只读投影（单一事实源）</text>
+  <rect x="460" y="96" width="100" height="30" rx="5" fill="#181b22" stroke="#2a2f3a"/>
+  <text x="510" y="116" fill="#9aa3b2" text-anchor="middle">代码状态机</text>
+  <rect x="580" y="96" width="100" height="30" rx="5" fill="#181b22" stroke="#3ddc97"/>
+  <text x="630" y="116" fill="#e6e9ef" text-anchor="middle">DB 源（唯一）</text>
+  <rect x="490" y="40" width="160" height="30" rx="6" fill="#1f232c" stroke="#3ddc97"/>
+  <text x="570" y="60" fill="#e6e9ef" text-anchor="middle">只读投影 → context</text>
+  <line x1="510" y1="96" x2="540" y2="70" stroke="#3ddc97" stroke-width="1.5"/>
+  <line x1="630" y1="96" x2="600" y2="70" stroke="#3ddc97" stroke-width="1.5"/>
+  <text x="570" y="150" fill="#3ddc97" text-anchor="middle" font-size="11">投影是派生视图，不是新事实源</text>
+</svg>
+<div class="svg-cap">可写 root skill 制造第二事实源（左）vs 只读投影从单一 DB 源派生（右）</div>
+<div class="row"><div class="k">Basis</div><div class="v basis"><span class="t">direct:</span> 状态流转已是无副作用纯函数（project-state.ts confirm/requestChanges/recordStageResult）；agent-adapter.ts 已把阶段顺序作为只读上下文注入。<span class="t">reasoned:</span> 再加 root skill 描述同一套顺序 = 两个事实源描述同一状态机，违反 06-09-002「阶段顺序归代码骨架」。<span class="t">external:</span> LangGraph supervisor（不持工具只路由）。</div></div>
+<div class="row"><div class="k">Rationale</div><div class="v">这是主题问的那个问题本身。若不把"不该是可写 skill"论证扎实，讨论会默认偏向"加一层"，而那一层正是 06-03-001 刚刻意拆掉的多层结构。</div></div>
+<div class="row"><div class="k">Downsides</div><div class="v down">"投影"对 agent 是只读，意味着 agent 无法主动改 stage 顺序——若未来真需要 agent 驱动的非线性流转，要另设机制；也需要厘清 boss 说的"root skill"到底指代码层编排器（契合）还是 skill 文字层（冲突）。</div></div>
+</div>
+
+<div class="card" id="i2">
+<h3><span class="num">2</span>验证 gate 统一为 sidecar <code>/db/&lt;stage&gt;/verify</code> route 族</h3>
+<div class="badges"><span class="b axis">轴2 + 轴4</span><span class="b conf">Conf 85%</span><span class="b cx">Cx M</span></div>
+<div class="row"><div class="k">Description</div><div class="v">不新建协议层。把每个 stage 的 gate 收敛成 sidecar 的一条 HTTP 路由 <code>/db/&lt;stage&gt;/verify</code>：输入读 DB 当前状态、输出结构化 <code>{ok, errors[], signalId}</code>。新增一个 stage 的 gate = sidecar 加一条路由 + worker allowedTools 加一个工具名，零新抽象。验证结果天然走已有的流式 tool_call 卡片管线（redact + done 对账），用户在聊天里直接看到"time-sync gate：通过 / 3 处冲突"。<b>与被推翻的 StageSkillResult 的本质区别</b>：那个是 agent 产出再回传的"第二事实源"，这个是 sidecar 直接读 DB 算出来的、不离开单一 DB 源。</div></div>
+<svg width="700" height="120" viewBox="0 0 700 120" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,Segoe UI,sans-serif" font-size="12">
+  <rect x="20" y="30" width="120" height="34" rx="6" fill="#181b22" stroke="#2a2f3a"/><text x="80" y="51" fill="#9aa3b2" text-anchor="middle">worker（agent）</text>
+  <line x1="140" y1="47" x2="190" y2="47" stroke="#5b8cff" stroke-width="1.5" marker-end="url(#a)"/>
+  <text x="165" y="40" fill="#6b7280" text-anchor="middle" font-size="10">MCP 工具</text>
+  <rect x="190" y="20" width="180" height="54" rx="6" fill="#1f232c" stroke="#5b8cff"/>
+  <text x="280" y="40" fill="#e6e9ef" text-anchor="middle">sidecar</text>
+  <text x="280" y="58" fill="#5b8cff" text-anchor="middle" font-size="11">/db/&lt;stage&gt;/verify</text>
+  <line x1="370" y1="47" x2="420" y2="47" stroke="#3ddc97" stroke-width="1.5" marker-end="url(#a)"/>
+  <rect x="420" y="30" width="110" height="34" rx="6" fill="#181b22" stroke="#3ddc97"/><text x="475" y="51" fill="#e6e9ef" text-anchor="middle">DB（单一源）</text>
+  <line x1="370" y1="60" x2="80" y2="64" stroke="#3ddc97" stroke-width="1.2" stroke-dasharray="4"/>
+  <text x="300" y="100" fill="#3ddc97" text-anchor="middle" font-size="11">{ok, errors, signalId} ←读DB算，不经 agent 回传</text>
+  <defs><marker id="a" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6" fill="#5b8cff"/></marker></defs>
+</svg>
+<div class="row"><div class="k">Basis</div><div class="v basis"><span class="t">direct:</span> topology-tools.ts 的 callSidecarTool 已是 route 化统一形态（8 工具全走 /db/topology/*）；trusted signal = worker 读 value.summary.mutationId。把 verify 做成 route 是同构扩展。<span class="t">external:</span> CI Quality Gate（gate=制品上的幂等读+校验）。</div></div>
+<div class="row"><div class="k">Rationale</div><div class="v">"加 time-sync gate 要改几处？"——若答案是"sidecar 一条路由 + worker 一个工具名 + 一行 allowedTools"，复利成立；若要碰协议 type/parse/summarize/apply 四处，就是重蹈 StageSkillResult。这条 route 形状是 4 stage 验证的统一骨架。</div></div>
+<div class="row"><div class="k">Downsides</div><div class="v down">真正重的 gate（INET 仿真、NC 求解）不是纯 DB 读能算的，需要 sidecar 内接外部进程（见 #5）；route 抽象对"纯结构校验"够，对"跑仿真"是另一类成本。</div></div>
+</div>
+
+<div class="card" id="i3">
+<h3><span class="num">3</span>trusted-signal 升为状态机硬约束：stage 完成必须带 DB-backed signalId</h3>
+<div class="badges"><span class="b axis">轴1 + 轴2</span><span class="b conf">Conf 84%</span><span class="b cx">Cx S-M</span></div>
+<div class="row"><div class="k">Description</div><div class="v">当前 <code>confirmCurrentStage</code> 只检查 stage 状态是不是 waiting_confirmation，不检查"这一步到底产出了可信结果没有"。把验证 gate 的<b>阻断语义放进状态机代码骨架</b>：confirm 前先核对该 stage 有没有 trusted-signal（topology 是 mutationId，未来 stage 是各自 gate 的 signalId），没有就拒绝推进，而不是靠 SKILL.md 文字劝 agent。一旦"完成=有 signalId"成为状态机不变量，<b>time-sync 这种现在纯本地写死默认摘要的阶段被迫长出真 gate</b>，验证强度从单个 stage 的特性升级为整个状态机的结构性属性。</div></div>
+<div class="row"><div class="k">Basis</div><div class="v basis"><span class="t">direct:</span> project-state.ts confirm 仅校验 stage.status；topology 路径产 mutationId（agent-adapter.ts topologyMutationId），但 time-sync 路径本地直接 recordStageResult 写死摘要、无任何 DB 背书——两条路径"完成"证据强度不对称。06-09-002「落地靠 trusted-signal」原则正是此意。</div></div>
+<div class="row"><div class="k">Rationale</div><div class="v">"time-sync 阶段确认后，DB 里有没有一行能证明它发生过？"——现在没有。把它升为硬约束，约束本身比任何单个 gate 实现都更耐久，且天然抗 SKILL.md 被写坏。</div></div>
+<div class="row"><div class="k">Downsides</div><div class="v down">没有现成 gate 的 stage（如真机配置）在过渡期会卡住——需要为"外部验证证据到达"设计一个注入 signalId 的人工路径（不是"确认按钮"，而是"证据到位"）。</div></div>
+</div>
+
+<div class="card" id="i4">
+<h3><span class="num">4</span>验证强度分级（DO-178C 式）挂在「场景轴」，证据跨 stage 复用</h3>
+<div class="badges"><span class="b axis">轴2 验证 gate</span><span class="b conf">Conf 80%</span><span class="b cx">Cx M</span></div>
+<div class="row"><div class="k">Description</div><div class="v">不追求单一 gate，也不为分级引入 root skill。给已有的 <code>ScenarioConfig</code> 加一个 <code>verificationTier</code> 字段：generic-tsn=smoke（结构校验即可）、aerospace-onboard=strict（额外要求 NC 证明 + 真机人工确认）。同一 stage 的 gate 在不同档位跑不同强度。更进一步：低档证据（topology gate 算出的可达性/端口占用矩阵）作为高档验证（flow 调度可行性）的<b>输入被复用</b>，而非每 stage 重算。<b>验证强度随场景走，复用现有场景轴，不新增 stage 轴或 root 编排层。</b></div></div>
+<div class="row"><div class="k">Basis</div><div class="v basis"><span class="t">external:</span> DO-178C 按失效后果（DAL A-E）分验证证据强度；TSN 流的 criticality（PCP=7 箭载时序 vs PCP=0 尽力而为）就是天然 DAL 等级。<span class="t">direct:</span> ScenarioConfig 已是场景轴单一事实源，加字段零新增文件，避开 06-12-001 拆 skill 撞三链路；dual-plane 场景已对验证有更高隐含要求。</div></div>
+<div class="row"><div class="k">Rationale</div><div class="v">箭载场景的确定性时延要求远高于通用场景，一刀切验证强度要么对通用过严、要么对箭载不足。挂在已有场景配置上是改动最小的分级落点；证据复用让验证投资可增量——先给关键 stage 上强档，非关键的保持轻档，不必等 4 stage 全接满仿真才有价值。</div></div>
+<div class="row"><div class="k">Downsides</div><div class="v down">证据跨 stage 复用要求 gate 输出可被下游消费的结构化中间产物（不只是 pass/fail），增加 gate 返回契约的设计成本；分级策略表本身需要一个权威定义位置（建议挂 ScenarioConfig，不要散落）。</div></div>
+</div>
+
+<div class="card" id="i5">
+<h3><span class="num">5</span>INET 作 stage 无关的验证后端 + 口径硬隔离</h3>
+<div class="badges"><span class="b axis">轴4 + 轴2</span><span class="b conf">Conf 78%</span><span class="b cx">Cx L</span></div>
+<div class="row"><div class="k">Description</div><div class="v">建一个 sidecar <code>/verify/inet</code> 通道：把当前 DB 拓扑导成 INET 配置、跑一次轻量仿真、回收 <code>{reachable, gclValid, ...}</code>。通道本身设计成 <b>stage 无关</b>——topology 验结构、time-sync 验同步域可达、flow 验调度可行都复用同一"导出+仿真+回收"管线。<b>但口径必须从数据结构层面严格隔离</b>：把这个 gate 命名为 <code>simulation_loadability_check</code> 而非含糊的 <code>tsn_verify</code>，返回结构强制带 <code>coverage: "loadability_only"</code> 字段——INET smoke 只验 NED/INI 能加载运行，<b>不等于</b> TSN 可调度性验证（gPTP/TAS/确定性时延都不在内），从源头防止"绿勾=时延有保证"的误导传播到 UI。</div></div>
+<div class="row"><div class="k">Basis</div><div class="v basis"><span class="t">direct:</span> 05-21-001 计划名即 "real-stage-skills-inet-smoke"，e2e/smoke.spec.ts 存在；planning-export 未实现，adapter createSimulationUnsupportedResult 明说没接 runner。<span class="t">external:</span> INET/OMNeT 仿真是统计下界、Network Calculus 才给形式化上界（两者口径差异）；TSNsched 三步 pipeline。</div></div>
+<div class="row"><div class="k">Rationale</div><div class="v">最贵的一次性投资（INET 环境、导出器、仿真回收）建好后，每个 stage 的深度 gate 只是换一组断言。而趁 planning-export 还没实现就把命名和返回契约钉死，是最便宜的防误导时机——等接了 INET 再纠名成本高。</div></div>
+<div class="row"><div class="k">Downsides</div><div class="v down">复杂度最高的一条（需要可运行的 INET/OMNeT 环境 + 跨机 transport，05-21-001 的 SSH/SCP 纪律可复用）；仿真不可复现、是统计下界，"smoke 通过算不算 gate 过"需要配合 #4 的强度分级明确定义。</div></div>
+</div>
+
+<div class="card" id="i6">
+<h3><span class="num">6</span>skill 拆分轴正式钉死为「场景」，stage 差异下沉代码/MCP</h3>
+<div class="badges"><span class="b axis">轴3 skill 边界</span><span class="b conf">Conf 82%</span><span class="b cx">Cx S-M</span></div>
+<div class="row"><div class="k">Description</div><div class="v">把"skill 拆分轴"正式结论化并写进 <code>CONCEPTS.md</code>：<b>stage 是代码概念，场景是 skill 概念</b>。stage 维度的差异全部下沉到 MCP 工具和代码骨架，skill 只按场景拆。需要给某 stage 加领域指引时，注入器升级为按 <code>(stage, scenarioConfigId)</code> 坐标选 reference 片段（<code>buildSystemPromptForStage</code> 已是确定性按场景选 reference 的雏形）——加一个 stage 的指引 = 放一个 <code>references/&lt;stage&gt;/&lt;场景&gt;.md</code>，注入器零改动，且自动继承 verify-skills 白名单 + 三方对账保护。<b>不新建独立 SKILL.md，避开播种/打包/对账三税</b>。</div></div>
+<div class="row"><div class="k">Basis</div><div class="v basis"><span class="t">direct:</span> 06-12-001 现状是按场景拆（generic/aerospace）；buildSystemPromptForStage 已按 scenarioConfigId 选 reference 且 fail-open 回退；注入是单字符串拼接（string[] 会崩 redactSecrets）。05-21-001 按 stage 拆已被推翻。</div></div>
+<div class="row"><div class="k">Rationale</div><div class="v">"要不要按 stage 拆 skill"是反复出现的张力，一次性关掉省掉下一轮重新论证。skill 只承载"可调指引"（06-09-002 结论），不承载状态/协议，所以这条注入矩阵不会再变成事实源——这正是它区别于 05-21-001 的地方。</div></div>
+<div class="row"><div class="k">Downsides</div><div class="v down">(stage × 场景) 矩阵在场景增多时 reference 文件数量增长（需约定缺省回退避免矩阵爆炸）；要求团队接受"stage 永不成为 skill"作为一条硬约定，写进 CONCEPTS.md 后改动成本变高。</div></div>
+</div>
+
+<div class="card" id="i7">
+<h3><span class="num">7</span>time-sync 从「假摘要」变可验证 gate（纯拓扑推导，不需 INET）</h3>
+<div class="badges"><span class="b axis">轴2 验证 gate</span><span class="b conf">Conf 76%</span><span class="b cx">Cx S</span></div>
+<div class="row"><div class="k">Description</div><div class="v">time-sync 现在是 4 stage 里"最假"的一环——<code>runTimeSyncStage</code> 直接吐 <code>scenarioConfig.defaults.timeSyncSummary</code> 一句静态文案就等确认，没有任何基于拓扑的验证。最小可验证 gate：用已落库的拓扑算<b>同步域可达性</b>（每个端系统到 GM 候选有路径、同步树无断点）——这是<b>纯拓扑可推导</b>的，不需要先接 INET。让 time-sync 从"假阶段"变成"有真实 pass/fail 的轻 gate"。</div></div>
+<div class="row"><div class="k">Basis</div><div class="v basis"><span class="t">direct:</span> agent-adapter.ts time-sync 产出就是一句静态 timeSyncSummary，无任何拓扑输入；scenario-config.ts 该 summary 是写死的"默认全网已完成时间同步"文案。<span class="t">reasoned:</span> 同步树可达性只依赖已落库的 nodes/links（拓扑阶段已产出），是 4 stage 里除拓扑外唯一无需外部仿真器就能做真实验证的 stage。</div></div>
+<div class="row"><div class="k">Rationale</div><div class="v">time-sync 最假，但它的可验证内容恰恰最廉价（纯拓扑推导）。先啃这个，用最低成本证明"每 stage 有可验证 gate"的模式可推广——它是 #2/#3 的最便宜验证落点。</div></div>
+<div class="row"><div class="k">Downsides</div><div class="v down">可达性只是时间同步的必要非充分条件（真正的 gPTP 收敛/GM 选举/时钟精度要靠 INET 仿真，属 #5 强档）；要避免让这个轻 gate 被误读为"时间同步已验证通过"。</div></div>
+</div>
+
+<h2>Rejection Summary</h2>
+<table>
+<tr><th>#</th><th>Idea</th><th>Reason</th></tr>
+<tr><td>R1</td><td>移除 waiting_confirmation / 全自动 gate 流转</td><td class="r">confirm vs gate 职责重叠值得探讨，但移除人工确认对 TSN 真机配置风险高——更适合作为 #3 的 brainstorm variant，而非独立方向</td></tr>
+<tr><td>R2</td><td>stage 改造成 100 节点依赖图 / 用户自定义 stage</td><td class="r">4 stage 规模下属过度工程，正是 05-21-001"统一 stage runner"被推翻的过度抽象类型（YAGNI）</td></tr>
+<tr><td>R3</td><td>Network Calculus 纯 Rust 内嵌自证</td><td class="r">方向对但工程量巨大——折叠进 #4 分级的"强档"，作为 aerospace tier 的实现选项而非独立 idea</td></tr>
+<tr><td>R4</td><td>gate 失败反向传播 / 根因回退到上游 stage</td><td class="r">有趣，但 4 stage 规模下现有 requestStageChanges 已够；反向传播是 N 层网络的解法，这里过度</td></tr>
+<tr><td>R5</td><td>stage 建模成鉴别诊断决策树（非线性）</td><td class="r">挑战"线性"假设有价值，但 TSN 的 拓扑→同步→流量→配置 有真实数据依赖、本质线性——澄清后 reject</td></tr>
+<tr><td>R6</td><td>proof certificate / 对抗式证伪搜索</td><td class="r">优雅但超前（planner-gcl-notes 是起点）；"反例搜索跑多久算够"的充分性问题无法当前定义——defer</td></tr>
+<tr><td>R7</td><td>ATC 式去中心化 stage 移交（无中央状态机）</td><td class="r">与 06-03-001"收敛单一 DB 源"方向相悖，去中心化让"整体进度"难回答——reject</td></tr>
+<tr><td>R8</td><td>编译器 pass + IR / 游戏存档vs凭证 / 物理隔离 verified 列 / catalog 单一状态源 / gate 卡片复用 / 零成本内联验证</td><td class="r">均为更强 survivor 的子集或实现细节——分别折叠进 #1（IR↔投影）、#3（凭证/隔离↔signalId）、#6（catalog drift↔收敛）、#2（卡片/内联↔route）</td></tr>
+<tr><td>R9</td><td>skill 全冻结 / 全用户自定义（约束反转极端）</td><td class="r">反转测试，其结论支撑现状（按场景拆、可编辑指引合理）——作为 #6 的论证支撑而非独立方向</td></tr>
+</table>
+
+<div class="foot">Generated by compound-engineering · ce-ideate · 2026-06-16</div>
+
+</div>
+</body>
+</html>

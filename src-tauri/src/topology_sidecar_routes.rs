@@ -92,12 +92,6 @@ pub async fn healthz() -> Response {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct SessionOnlyRequest {
-    session_id: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct DescribeTemplatesRequest {
     session_id: String,
     /// R7：可选场景过滤——只返回该场景适用模板；省略返回全量。

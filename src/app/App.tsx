@@ -105,7 +105,7 @@ export function App() {
     await submitIntent(input);
   }
 
-  async function submitIntent(rawInput: string) {
+  async function submitIntent(rawInput: string, options: { action?: "confirm-stage" } = {}) {
     const trimmedInput = rawInput.trim();
 
     if (!trimmedInput || isAgentRunning) {
@@ -161,6 +161,7 @@ export function App() {
 
       const result = await runTsnAgent({
         userIntent: trimmedInput,
+        action: options.action,
         session: contextSession,
         diagnostics: diagnosticsRepository,
         onChunk: (chunk) => {
@@ -415,7 +416,7 @@ export function App() {
           isAgentRunning={isAgentRunning}
           onInputChange={setInput}
           onSubmit={handleSubmit}
-          onConfirm={() => submitIntent("继续")}
+          onConfirm={() => submitIntent("继续", { action: "confirm-stage" })}
         />
         <WorkspacePane
           topologySnapshot={topologySnapshot}

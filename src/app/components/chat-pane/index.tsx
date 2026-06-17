@@ -108,11 +108,20 @@ export function ChatPane({
 
       <div className="composer">
         <label htmlFor="intent">描述你的 TSN 需求</label>
-        {currentStage.status === "waiting_confirmation" && (
+        {(currentStage.status === "waiting_confirmation" || workflow.pendingStageChange) && (
           <div className="stage-confirmation" role="status">
             <div>
-              <strong>{scenarioConfig.stageLabels[workflow.currentStep]}等待确认</strong>
-              <p>{currentStage.summary}</p>
+              {workflow.pendingStageChange ? (
+                <>
+                  <strong>确认切回{scenarioConfig.stageLabels[workflow.pendingStageChange]}</strong>
+                  <p>切回会让其后已完成的阶段重新来过。确认后点下方按钮。</p>
+                </>
+              ) : (
+                <>
+                  <strong>{scenarioConfig.stageLabels[workflow.currentStep]}等待确认</strong>
+                  <p>{currentStage.summary}</p>
+                </>
+              )}
             </div>
             <button className="btn-primary" type="button" onClick={onConfirm} disabled={isAgentRunning}>
               确认并继续

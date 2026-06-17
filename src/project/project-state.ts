@@ -27,6 +27,16 @@ export interface WorkflowState {
   currentStep: WorkflowStep;
   stages: Record<WorkflowStep, WorkflowStageState>;
   availableActions: WorkflowAction[];
+  /**
+   * 大模型提议的「待确认回退目标阶段」。设置后当前阶段进入 waiting_confirmation，
+   * 用户点「确认并继续」时才真正执行 requestStageChanges(target)（破坏性回退）。
+   */
+  pendingStageChange?: WorkflowStep;
+  /**
+   * 触发本次回退提议的原始用户意图（如「减少一个交换机」）。用户确认回退后，
+   * 切阶段是确定性的，但随即用这句原话在新阶段自动跑一轮大模型——免去用户重输。
+   */
+  pendingStageChangeIntent?: string;
 }
 
 export type WorkflowAction =
@@ -91,6 +101,15 @@ export function normalizeWorkflowState(
     currentStep,
     stages,
     availableActions: state.availableActions?.length ? state.availableActions : actionsForStage(stages[currentStep]),
+    // 回退目标与触发原话绑定持久化：目标无效则原话也一并丢弃。
+    ...(isWorkflowStep(state.pendingStageChange)
+      ? {
+          pendingStageChange: state.pendingStageChange,
+          ...(typeof state.pendingStageChangeIntent === "string" && state.pendingStageChangeIntent.length > 0
+            ? { pendingStageChangeIntent: state.pendingStageChangeIntent }
+            : {}),
+        }
+      : {}),
   };
 }
 
@@ -132,6 +151,17 @@ export function recordStageResult(
   };
 }
 
+// 任一阶段转移都作废上一轮未确认的回退提议——pendingStageChange 不得跨转移残留，
+// 否则确认按钮会指向一个已经过期的回退目标（确定性状态归状态机骨架）。
+export function clearPendingStageChange(workflow: WorkflowState): WorkflowState {
+  if (!workflow.pendingStageChange && !workflow.pendingStageChangeIntent) {
+    return workflow;
+  }
+
+  const { pendingStageChange: _drop, pendingStageChangeIntent: _dropIntent, ...rest } = workflow;
+  return rest;
+}
+
 export function confirmCurrentStage(workflow: WorkflowState, createdAt = new Date().toISOString()): WorkflowState {
   const currentStep = workflow.currentStep;
   const stage = workflow.stages[currentStep];
@@ -152,14 +182,14 @@ export function confirmCurrentStage(workflow: WorkflowState, createdAt = new Dat
   };
 
   if (!nextStep) {
-    return {
+    return clearPendingStageChange({
       ...workflow,
       stages: confirmedStages,
       availableActions: [],
-    };
+    });
   }
 
-  return {
+  return clearPendingStageChange({
     ...workflow,
     currentStep: nextStep,
     stages: {
@@ -173,7 +203,7 @@ export function confirmCurrentStage(workflow: WorkflowState, createdAt = new Dat
       },
     },
     availableActions: actionsForStage({ step: nextStep, status: "current" }),
-  };
+  });
 }
 
 export function requestStageChanges(
@@ -214,12 +244,12 @@ export function requestStageChanges(
     }),
   ) as Record<WorkflowStep, WorkflowStageState>;
 
-  return {
+  return clearPendingStageChange({
     ...workflow,
     currentStep: step,
     stages,
     availableActions: actionsForStage(stages[step]),
-  };
+  });
 }
 
 export function getNextWorkflowStep(step: WorkflowStep): WorkflowStep | undefined {

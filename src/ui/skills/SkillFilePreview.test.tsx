@@ -68,6 +68,28 @@ describe("SkillFilePreview", () => {
     expect(screen.queryByText(/当前为只读指引/)).not.toBeInTheDocument();
   });
 
+  it("hides HTML/markdown comments in the rendered SKILL.md preview", async () => {
+    const service = createService({
+      readFile: vi.fn().mockResolvedValue({
+        skillId: "tsn-topology",
+        path: "SKILL.md",
+        content: "<!-- 消费方式：维护者元注释 -->\n\n# 主索引标题\n\n正文可见内容",
+        editable: true,
+      }),
+    });
+
+    render(<SkillFilePreview skillId="tsn-topology" service={service} />);
+
+    // 正文与标题正常渲染。
+    expect(await screen.findByText("正文可见内容")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "主索引标题" })).toBeInTheDocument();
+    // 注释及其 <!-- --> 标记不在渲染视图里露出。
+    expect(screen.queryByText(/维护者元注释/)).not.toBeInTheDocument();
+    const rendered = document.querySelector(".skill-file-markdown")?.textContent ?? "";
+    expect(rendered).not.toContain("<!--");
+    expect(rendered).not.toContain("-->");
+  });
+
   it("edits and saves small text files", async () => {
     const user = userEvent.setup();
     const service = createService();
