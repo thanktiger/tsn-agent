@@ -11,6 +11,7 @@ import {
   type Node,
   type NodeChange,
   type NodeProps,
+  type ReactFlowInstance,
 } from "@xyflow/react";
 import {
   countEndSystems,
@@ -80,6 +81,43 @@ interface PendingPosition {
   committedMutationId?: number;
 }
 
+const VIEWPORT_NODE_WIDTH = 126;
+const VIEWPORT_NODE_HEIGHT = 56;
+
+function topologyViewportCenter(snapshot: TopologyRowSnapshot | undefined): { x: number; y: number } | undefined {
+  if (!snapshot || snapshot.nodes.length === 0) {
+    return undefined;
+  }
+
+  let minX = Number.POSITIVE_INFINITY;
+  let minY = Number.POSITIVE_INFINITY;
+  let maxX = Number.NEGATIVE_INFINITY;
+  let maxY = Number.NEGATIVE_INFINITY;
+  for (const node of snapshot.nodes) {
+    minX = Math.min(minX, node.x);
+    minY = Math.min(minY, node.y);
+    maxX = Math.max(maxX, node.x + VIEWPORT_NODE_WIDTH);
+    maxY = Math.max(maxY, node.y + VIEWPORT_NODE_HEIGHT);
+  }
+  return {
+    x: (minX + maxX) / 2,
+    y: (minY + maxY) / 2,
+  };
+}
+
+function topologyViewportResetKey(snapshot: TopologyRowSnapshot | undefined, lastMutationId: number): string | undefined {
+  if (!snapshot || snapshot.nodes.length === 0) {
+    return undefined;
+  }
+  const nodeKey = snapshot.nodes
+    .map((node) => `${node.imac}:${node.x}:${node.y}:${node.nodeType ?? ""}:${node.insertOrder}`)
+    .join(",");
+  const linkKey = snapshot.links
+    .map((link) => `${link.linkSeq}:${link.srcImac}:${link.dstImac}`)
+    .join(",");
+  return `${snapshot.sessionId}:${lastMutationId}:${nodeKey}:${linkKey}`;
+}
+
 export interface WorkspacePaneProps {
   topologySnapshot: TopologyRowSnapshot | undefined;
   selectedTopologyItem: SelectedTopologyItem | undefined;
@@ -136,7 +174,10 @@ export function WorkspacePane({
   const resetSessionRef = useRef<string | undefined>(undefined);
   const [saveFailed, setSaveFailed] = useState(false);
   const saveFailedTimerRef = useRef<number | undefined>(undefined);
-  const fittedSessionRef = useRef<string | undefined>(undefined);
+  const flowInstanceRef = useRef<ReactFlowInstance<Node, Edge> | undefined>(undefined);
+  const [flowInstanceVersion, setFlowInstanceVersion] = useState(0);
+  const lastViewportResetKeyRef = useRef<string | undefined>(undefined);
+  const localPositionMutationIdsRef = useRef<Set<number>>(new Set());
 
   // 拖动回调身份须稳定（拖动中回调换引用可能丢 dragStop）→ 经 ref 读最新值。
   useEffect(() => {
@@ -167,6 +208,8 @@ export function WorkspacePane({
     draggingRef.current = false;
     bufferedNodesRef.current = undefined;
     lastMutationIdRef.current = lastMutationId;
+    localPositionMutationIdsRef.current.clear();
+    lastViewportResetKeyRef.current = undefined;
   }, [topologySnapshot?.sessionId, lastMutationId]);
 
   const applySnapshotNodes = useCallback(
@@ -246,6 +289,41 @@ export function WorkspacePane({
     setFlowNodes((nodes) => applyNodeChanges(changes, nodes));
   }, []);
 
+  const viewportResetKey = useMemo(
+    () => topologyViewportResetKey(topologySnapshot, lastMutationId),
+    [topologySnapshot, lastMutationId],
+  );
+
+  useEffect(() => {
+    if (!viewportResetKey) {
+      lastViewportResetKeyRef.current = undefined;
+      flowInstanceRef.current = undefined;
+    }
+  }, [viewportResetKey]);
+
+  const centerTopologyViewport = useCallback(
+    (instance = flowInstanceRef.current) => {
+      if (!instance || !viewportResetKey || lastViewportResetKeyRef.current === viewportResetKey) {
+        return;
+      }
+      if (lastMutationId > 0 && localPositionMutationIdsRef.current.has(lastMutationId)) {
+        lastViewportResetKeyRef.current = viewportResetKey;
+        return;
+      }
+      const center = topologyViewportCenter(topologySnapshot);
+      if (!center) {
+        return;
+      }
+      lastViewportResetKeyRef.current = viewportResetKey;
+      void instance.setCenter(center.x, center.y, { zoom: 1, duration: 0 });
+    },
+    [lastMutationId, topologySnapshot, viewportResetKey],
+  );
+
+  useEffect(() => {
+    centerTopologyViewport();
+  }, [centerTopologyViewport, flowInstanceVersion]);
+
   const handleNodeDragStart = useCallback(() => {
     draggingRef.current = true;
     dragStartMutationIdRef.current = lastMutationIdRef.current;
@@ -286,6 +364,7 @@ export function WorkspacePane({
             return; // 迟到响应：session 已切换，状态已重置。
           }
           lastMutationIdRef.current = Math.max(lastMutationIdRef.current, result.mutationId);
+          localPositionMutationIdsRef.current.add(result.mutationId);
           const entry = pendingRef.current.get(node.id);
           if (entry && entry.x === x && entry.y === y) {
             mutatePending((next) => next.set(node.id, { x, y, committedMutationId: result.mutationId }));
@@ -353,13 +432,12 @@ export function WorkspacePane({
               multiSelectionKeyCode={null}
               proOptions={{ hideAttribution: true }}
               onInit={(instance) => {
-                // R12：每 session 首次挂载 fitView 一次。session 切换时快照必经
-                // undefined 过渡（hook 同步清空）→ ReactFlow 重挂载 → onInit 重触发，
-                // 单路径即可覆盖；fittedSessionRef 兜 StrictMode 双触发。
-                const sessionId = topologySnapshot?.sessionId;
-                if (sessionId && fittedSessionRef.current !== sessionId) {
-                  fittedSessionRef.current = sessionId;
-                  void instance.fitView();
+                // R12：拓扑展示/生成刷新时保持 100% 比例并居中；不使用常驻
+                // fitView prop，避免用户交互过程中被 React Flow 自动缩放。
+                const isFirstKnownInstance = !flowInstanceRef.current;
+                flowInstanceRef.current = instance;
+                if (isFirstKnownInstance) {
+                  setFlowInstanceVersion((version) => version + 1);
                 }
               }}
               onNodesChange={handleNodesChange}

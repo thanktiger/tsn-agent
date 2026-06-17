@@ -517,37 +517,105 @@ fn normalize_data_rate(value: Option<&Value>) -> Result<i64, Vec<TopologyErrorOu
     Ok(n)
 }
 
+const LINE_ROW_Y: f64 = 220.0;
+const LINE_ROW_PITCH: f64 = 200.0;
+const LINE_X_BASE: f64 = 80.0;
+const LINE_X_PITCH: f64 = 300.0;
+const LINE_ES_X_PITCH: f64 = 180.0;
+const LINE_ES_GROUP_GAP: f64 = 180.0;
+const LINE_ES_GAP: f64 = 220.0;
+const LINE_FOLD_THRESHOLD: usize = 5;
+
+struct LineEndsOnlyLayout {
+    switch_positions: Vec<IntermediatePosition>,
+    first_end_system: IntermediatePosition,
+    last_end_system: IntermediatePosition,
+    folded: bool,
+}
+
+fn generic_line_column_pitch(end_systems_per_switch: usize) -> f64 {
+    let row_len = end_systems_per_switch.div_ceil(2).max(1);
+    let group_width = (row_len.saturating_sub(1)) as f64 * LINE_ES_X_PITCH;
+    LINE_X_PITCH.max(group_width + LINE_ES_GROUP_GAP)
+}
+
+fn layout_generic_line_switch(switch_index: usize, end_systems_per_switch: usize) -> IntermediatePosition {
+    let column_pitch = generic_line_column_pitch(end_systems_per_switch);
+    IntermediatePosition {
+        x: LINE_X_BASE + column_pitch * (switch_index as f64 - 1.0),
+        y: LINE_ROW_Y,
+    }
+}
+
+fn layout_generic_line_end_system(
+    switch_index: usize,
+    host_index: usize,
+    end_systems_per_switch: usize,
+) -> IntermediatePosition {
+    let switch_pos = layout_generic_line_switch(switch_index, end_systems_per_switch);
+    let y_offset = if host_index % 2 == 0 { 390.0 } else { 70.0 };
+    let row_index = (host_index - 1) / 2;
+    let row_len = if host_index % 2 == 1 {
+        end_systems_per_switch.div_ceil(2)
+    } else {
+        end_systems_per_switch / 2
+    };
+    let row_start = -((row_len.saturating_sub(1)) as f64 * LINE_ES_X_PITCH) / 2.0;
+    let x_jitter = row_start + row_index as f64 * LINE_ES_X_PITCH;
+
+    IntermediatePosition {
+        x: switch_pos.x + x_jitter,
+        y: y_offset,
+    }
+}
+
 /// R10/R11：generic-line ends-only（规范图 5-1 五跳线性）。端系统仅挂链两端
 /// 各 1 台；switchCount ≥ 5 时蛇形折叠（boustrophedon：行容量 ceil(N/2)、
-/// 行向交替、折返处上下对齐），<5 单行直线。端口用 per-node first-free 游标
-/// （ends-only 打破均匀挂载的定偏移前提）。布局常量沿用 generic 行 y=220、
-/// x 步距 300、ES 外伸 220、折叠行距 200（对图校准：图 5-1 转 png）。
-fn create_generic_line_ends_only_topology(
-    switch_count: usize,
-    data_rate: i64,
-) -> IntermediateTopology {
-    const ROW_Y: f64 = 220.0;
-    const ROW_PITCH: f64 = 200.0;
-    const X_BASE: f64 = 80.0;
-    const X_PITCH: f64 = 300.0;
-    const ES_GAP: f64 = 220.0;
-    const FOLD_THRESHOLD: usize = 5;
-
-    let folded = switch_count >= FOLD_THRESHOLD;
+/// 行向交替、折返处上下对齐），<5 单行直线。
+fn layout_line_ends_only(switch_count: usize) -> LineEndsOnlyLayout {
+    let folded = switch_count >= LINE_FOLD_THRESHOLD;
     let row_capacity = if folded { switch_count.div_ceil(2) } else { switch_count };
 
-    // 蛇形坐标：行 0 自左向右；行 1 自右向左（首元素与行 0 末元素同 x 对齐折返）。
     let switch_position = |index: usize| -> IntermediatePosition {
         let row = index / row_capacity;
         let col = index % row_capacity;
         let x = if row % 2 == 0 {
-            X_BASE + X_PITCH * col as f64
+            LINE_X_BASE + LINE_X_PITCH * col as f64
         } else {
-            let row0_last_x = X_BASE + X_PITCH * (row_capacity as f64 - 1.0);
-            row0_last_x - X_PITCH * col as f64
+            let row0_last_x = LINE_X_BASE + LINE_X_PITCH * (row_capacity as f64 - 1.0);
+            row0_last_x - LINE_X_PITCH * col as f64
         };
-        IntermediatePosition { x, y: ROW_Y + ROW_PITCH * row as f64 }
+        IntermediatePosition { x, y: LINE_ROW_Y + LINE_ROW_PITCH * row as f64 }
     };
+
+    let switch_positions: Vec<IntermediatePosition> =
+        (0..switch_count).map(switch_position).collect();
+    let first_pos = switch_positions[0].clone();
+    let last_pos = switch_positions[switch_count - 1].clone();
+    let last_row = (switch_count - 1) / row_capacity;
+    let first_end_system = IntermediatePosition { x: first_pos.x - LINE_ES_GAP, y: first_pos.y };
+    // 末行行向：偶数行向右伸，奇数行（反向行）向左伸。
+    let last_end_system = if last_row % 2 == 0 {
+        IntermediatePosition { x: last_pos.x + LINE_ES_GAP, y: last_pos.y }
+    } else {
+        IntermediatePosition { x: last_pos.x - LINE_ES_GAP, y: last_pos.y }
+    };
+
+    LineEndsOnlyLayout {
+        switch_positions,
+        first_end_system,
+        last_end_system,
+        folded,
+    }
+}
+
+/// R10/R11：generic-line ends-only（规范图 5-1 五跳线性）。端系统仅挂链两端
+/// 各 1 台。端口用 per-node first-free 游标（ends-only 打破均匀挂载的定偏移前提）。
+fn create_generic_line_ends_only_topology(
+    switch_count: usize,
+    data_rate: i64,
+) -> IntermediateTopology {
+    let layout = layout_line_ends_only(switch_count);
 
     let mut nodes: Vec<IntermediateNode> = Vec::new();
     let mut links: Vec<IntermediateLink> = Vec::new();
@@ -561,7 +629,7 @@ fn create_generic_line_ends_only_topology(
             name: format!("SW-{}", switch_index),
             node_type: IntermediateNodeType::Switch,
             ports: create_ports(2),
-            position: switch_position(switch_index - 1),
+            position: layout.switch_positions[switch_index - 1].clone(),
             mac_address: None,
             ip_address: None,
         });
@@ -569,20 +637,10 @@ fn create_generic_line_ends_only_topology(
     }
 
     // 两端端系统：e1 挂 sw1、e2 挂 swN（N=1 时同挂 sw1）。ES 沿行向外伸。
-    let first_pos = switch_position(0);
-    let last_pos = switch_position(switch_count - 1);
-    let last_row = (switch_count - 1) / row_capacity;
-    let e1_pos = IntermediatePosition { x: first_pos.x - ES_GAP, y: first_pos.y };
-    // 末行行向：偶数行向右伸，奇数行（反向行）向左伸。
-    let e2_pos = if last_row % 2 == 0 {
-        IntermediatePosition { x: last_pos.x + ES_GAP, y: last_pos.y }
-    } else {
-        IntermediatePosition { x: last_pos.x - ES_GAP, y: last_pos.y }
-    };
     // es2 的 ip_octet 取 max(2) 防 switchCount=1 时与 es1（octet=1）撞出重复 IP。
     for (ordinal, (id, name, pos, ip_octet)) in [
-        ("es1", "ES-1", e1_pos, 1usize),
-        ("es2", "ES-2", e2_pos, switch_count.max(2)),
+        ("es1", "ES-1", layout.first_end_system, 1usize),
+        ("es2", "ES-2", layout.last_end_system, switch_count.max(2)),
     ]
     .into_iter()
     .enumerate()
@@ -642,7 +700,7 @@ fn create_generic_line_ends_only_topology(
                 "endSystemPlacement": "ends-only",
                 "dataRateMbps": data_rate,
             })),
-            layout: Some(if folded { "line-serpentine".into() } else { "line".into() }),
+            layout: Some(if layout.folded { "line-serpentine".into() } else { "line".into() }),
             source: Some("template".into()),
         },
         nodes,
@@ -665,7 +723,6 @@ fn create_generic_distributed_topology(
 
     for switch_index in 1..=switch_count {
         let switch_id = format!("sw{}", switch_index);
-        let switch_x = 80.0 + 300.0 * (switch_index as f64 - 1.0);
         switch_ids.push(switch_id.clone());
         nodes.push(IntermediateNode {
             id: switch_id,
@@ -673,7 +730,7 @@ fn create_generic_distributed_topology(
             name: format!("SW-{}", switch_index),
             node_type: IntermediateNodeType::Switch,
             ports: create_ports(end_systems_per_switch + 2),
-            position: IntermediatePosition { x: switch_x, y: 220.0 },
+            position: layout_generic_line_switch(switch_index, end_systems_per_switch),
             mac_address: None,
             ip_address: None,
         });
@@ -685,10 +742,6 @@ fn create_generic_distributed_topology(
         for host_index in 1..=end_systems_per_switch {
             let host_id = format!("es{}-{}", switch_index, host_index);
             let host_ordinal = ((switch_index - 1) * end_systems_per_switch + host_index) as i64;
-            let switch_x = 80.0 + 300.0 * (switch_index as f64 - 1.0);
-            let y_offset = if host_index % 2 == 0 { 390.0 } else { 70.0 };
-            let mid = ((end_systems_per_switch as f64) / 2.0).ceil();
-            let x_jitter = (host_index as f64 - mid) * 62.0;
 
             nodes.push(IntermediateNode {
                 id: host_id.clone(),
@@ -696,10 +749,11 @@ fn create_generic_distributed_topology(
                 name: format!("ES-{}-{}", switch_index, host_index),
                 node_type: IntermediateNodeType::EndSystem,
                 ports: create_ports(1),
-                position: IntermediatePosition {
-                    x: switch_x + x_jitter,
-                    y: y_offset,
-                },
+                position: layout_generic_line_end_system(
+                    switch_index,
+                    host_index,
+                    end_systems_per_switch,
+                ),
                 mac_address: Some(derive_mac_address(host_ordinal)),
                 ip_address: Some(format!("10.0.{}.{}", switch_index, host_index)),
             });
@@ -1179,6 +1233,141 @@ fn plane_switch_chain(params: &DualPlaneParams, plane: &str) -> Vec<String> {
         .filter(|id| known.contains(id.as_str()))
         .collect()
 }
+// —— 双平面布局常量：只服务 x/y 坐标，不参与链路或端口生成。 ——
+const DP_ES_PITCH: f64 = 180.0;
+const DP_GROUP_PITCH: f64 = 300.0;
+const DP_BASE_X: f64 = 120.0;
+const DP_SIDE_GAP: f64 = 220.0;
+// 单跳三明治行。
+const DP_ES_TOP_Y: f64 = 60.0;
+const DP_SW_ROW_Y: f64 = 300.0;
+const DP_ES_BOTTOM_Y: f64 = 540.0;
+// 多组双平面行：规范图二 B 行在上、A 行在下。
+const DP_PLANE_B_Y: f64 = 160.0;
+const DP_PLANE_A_Y: f64 = 360.0;
+const DP_COLUMN_EXTEND_PITCH: f64 = DP_PLANE_A_Y - DP_PLANE_B_Y;
+// 空/未知 group 的退化输入：独立溢出行，保确定性与坐标唯一。
+const DP_OVERFLOW_Y: f64 = 780.0;
+
+/// 双平面布局只计算节点坐标：单跳用上下 ES 夹住 SW 的“三明治”，多组用 A/B
+/// 平面 lane 展开，表达主/备路径物理隔离。链路、端口和角色由调用方独立生成。
+fn layout_dual_plane_redundant(
+    params: &DualPlaneParams,
+    ordered_switches: &[&DualPlaneSwitch],
+    ordered_es: &[&DualPlaneEndSystem],
+    switch_by_id: &HashMap<String, &DualPlaneSwitch>,
+    group_index: &HashMap<String, usize>,
+) -> HashMap<String, IntermediatePosition> {
+    let group_count = params.switch_groups.len();
+    let single_hop = group_count <= 1;
+    let left_group_count = (group_count + 1) / 2; // 前半挂左，奇数中位组归左。
+
+    // 列归属以 group 的 planeSwitches 引用为准（switch 自带 groupId 可能指向
+    // 未引用它的 group——按 groupId 取列会与该 group 的真实交换机重叠）。
+    let mut col_by_switch: HashMap<String, usize> = HashMap::new();
+    for (i, g) in params.switch_groups.iter().enumerate() {
+        col_by_switch.insert(g.plane_switches.a.clone(), i);
+        col_by_switch.insert(g.plane_switches.b.clone(), i);
+    }
+    // 未被任何 group 引用的悬挂交换机占 group 列之后的扩展列。
+    let mut extra_col: HashMap<String, usize> = HashMap::new();
+    for sw in ordered_switches {
+        if !col_by_switch.contains_key(&sw.id) && !extra_col.contains_key(&sw.id) {
+            let next = extra_col.len();
+            extra_col.insert(sw.id.clone(), next);
+        }
+    }
+    let total_cols = group_count + extra_col.len();
+    let single_hop_sw_center =
+        DP_BASE_X + (DP_GROUP_PITCH / 2.0) * (ordered_switches.len().saturating_sub(1)) as f64;
+    let right_edge_x = DP_BASE_X + DP_GROUP_PITCH * (total_cols.saturating_sub(1)) as f64 + DP_SIDE_GAP;
+    let left_edge_x = DP_BASE_X - DP_SIDE_GAP;
+
+    let mut positions: HashMap<String, IntermediatePosition> = HashMap::new();
+    for (sw_seq, sw) in ordered_switches.iter().enumerate() {
+        let position = if single_hop {
+            // 规范图一：SW 同行居中、按节点序横排。
+            IntermediatePosition { x: DP_BASE_X + DP_GROUP_PITCH * sw_seq as f64, y: DP_SW_ROW_Y }
+        } else {
+            let col = match col_by_switch.get(&sw.id) {
+                Some(c) => *c,
+                None => group_count + extra_col[&sw.id],
+            };
+            let y = if sw.plane == "B" { DP_PLANE_B_Y } else { DP_PLANE_A_Y };
+            IntermediatePosition { x: DP_BASE_X + DP_GROUP_PITCH * col as f64, y }
+        };
+        positions.insert(sw.id.clone(), position);
+    }
+
+    // ES 按 group 预计数（单跳 ceil(n/2) 上行需要 n）。
+    let mut group_es_count: HashMap<String, usize> = HashMap::new();
+    for es in ordered_es {
+        *group_es_count.entry(es.group_id.clone()).or_default() += 1;
+    }
+
+    let mut within_group: HashMap<String, usize> = HashMap::new();
+    // 多组外端槽位占用：挂侧 → 已占 (ring, 平面 B 行)。规范图 4-5：同侧 ES
+    // 先纵向占满两平面行（同 x 成列），占满后沿列背离走廊延伸（ring）。
+    let mut side_slots: HashMap<bool, HashSet<(usize, bool)>> = HashMap::new();
+    let mut overflow_cursor: usize = 0;
+    for es in ordered_es {
+        let gidx = *group_index.get(&es.group_id).unwrap_or(&0);
+        let wi = {
+            let counter = within_group.entry(es.group_id.clone()).or_insert(0);
+            let value = *counter;
+            *counter += 1;
+            value
+        };
+        let position = if !group_index.contains_key(&es.group_id) {
+            let x = DP_BASE_X + DP_ES_PITCH * overflow_cursor as f64;
+            overflow_cursor += 1;
+            IntermediatePosition { x, y: DP_OVERFLOW_Y }
+        } else if single_hop {
+            // 规范图一：组内声明序前 ceil(n/2) 上行、其余下行，行内对 SW 居中。
+            let n = *group_es_count.get(&es.group_id).unwrap_or(&1);
+            let n_up = (n + 1) / 2;
+            let (row_y, idx, row_len) =
+                if wi < n_up { (DP_ES_TOP_Y, wi, n_up) } else { (DP_ES_BOTTOM_Y, wi - n_up, n - n_up) };
+            let row_start =
+                single_hop_sw_center - (DP_ES_PITCH / 2.0) * (row_len.saturating_sub(1)) as f64;
+            IntermediatePosition { x: row_start + DP_ES_PITCH * idx as f64, y: row_y }
+        } else {
+            // 规范图 4-5：优先对齐 primary 平面行；该行被占则让位到另一行
+            // （同 x 纵向成列），两行占满后沿列背离走廊延伸。
+            let side_left = gidx < left_group_count;
+            let primary_plane_b = switch_by_id
+                .get(&es.attachment.primary.switch_id)
+                .map(|s| s.plane == "B")
+                .unwrap_or(false);
+            let slots = side_slots.entry(side_left).or_default();
+            let (ring, row_b) = {
+                let mut r = 0usize;
+                loop {
+                    if !slots.contains(&(r, primary_plane_b)) {
+                        break (r, primary_plane_b);
+                    }
+                    if !slots.contains(&(r, !primary_plane_b)) {
+                        break (r, !primary_plane_b);
+                    }
+                    r += 1;
+                }
+            };
+            slots.insert((ring, row_b));
+            let x = if side_left { left_edge_x } else { right_edge_x };
+            // ring=0 严格对齐平面行；ring>0 沿列背离走廊延伸。
+            let y = if row_b {
+                DP_PLANE_B_Y - DP_COLUMN_EXTEND_PITCH * ring as f64
+            } else {
+                DP_PLANE_A_Y + DP_COLUMN_EXTEND_PITCH * ring as f64
+            };
+            IntermediatePosition { x, y }
+        };
+        positions.insert(es.id.clone(), position);
+    }
+
+    positions
+}
+
 
 /// 确定性生成（R2/R5）。节点序 = switches（按 group、A 先 B）→ end systems（按
 /// group、声明序）；链路序 = 接入（每 ES 先 primary 后 backup)→ 平面内 backbone。
@@ -1274,88 +1463,31 @@ fn create_dual_plane_redundant_topology(params: &DualPlaneParams, data_rate: i64
     }
     let port_count_for = |id: &str| -> usize { (*demand.get(id).unwrap_or(&0)).max(1) };
 
-    // —— 布局常量（R3）：整数算术，ES 间距 ≥ 节点最大渲染宽 126px + 留白。 ——
-    const ES_PITCH: f64 = 180.0;
-    const GROUP_PITCH: f64 = 300.0;
-    const BASE_X: f64 = 120.0;
-    const SIDE_GAP: f64 = 220.0;
-    // 单跳三明治行（R1）。
-    const ES_TOP_Y: f64 = 60.0;
-    const SW_ROW_Y: f64 = 300.0;
-    const ES_BOTTOM_Y: f64 = 540.0;
-    // 多组双平面行（R2）：规范图二 B 行在上、A 行在下。
-    const PLANE_B_Y: f64 = 160.0;
-    const PLANE_A_Y: f64 = 360.0;
-    // R8：ring≥1 溢出 ES 沿列纵向延伸（背离行间走廊：A 行向下、B 行向上），
-    // 间距取平面行距（200）——对角连线足够陡才不穿内列节点盒（几何间隙
-    // 测试驱动：背离方向 ≥149 才可行，朝走廊方向窗口仅 [97,103] 过脆）。
-    const COLUMN_EXTEND_PITCH: f64 = PLANE_A_Y - PLANE_B_Y;
-    // 空/未知 group 的退化输入：独立溢出行，保确定性与坐标唯一。
-    const OVERFLOW_Y: f64 = 780.0;
-
-    let group_count = params.switch_groups.len();
-    let single_hop = group_count <= 1;
-    let left_group_count = (group_count + 1) / 2; // 前半挂左，奇数中位组归左。
-
-    // 列归属以 group 的 planeSwitches 引用为准（switch 自带 groupId 可能指向
-    // 未引用它的 group——按 groupId 取列会与该 group 的真实交换机重叠）。
-    let mut col_by_switch: HashMap<String, usize> = HashMap::new();
-    for (i, g) in params.switch_groups.iter().enumerate() {
-        col_by_switch.insert(g.plane_switches.a.clone(), i);
-        col_by_switch.insert(g.plane_switches.b.clone(), i);
-    }
-    // 未被任何 group 引用的悬挂交换机占 group 列之后的扩展列。
-    let mut extra_col: HashMap<String, usize> = HashMap::new();
-    for sw in &ordered_switches {
-        if !col_by_switch.contains_key(&sw.id) && !extra_col.contains_key(&sw.id) {
-            let next = extra_col.len();
-            extra_col.insert(sw.id.clone(), next);
-        }
-    }
-    let total_cols = group_count + extra_col.len();
-    let single_hop_sw_center =
-        BASE_X + (GROUP_PITCH / 2.0) * (ordered_switches.len().saturating_sub(1)) as f64;
-    let right_edge_x = BASE_X + GROUP_PITCH * (total_cols.saturating_sub(1)) as f64 + SIDE_GAP;
-    let left_edge_x = BASE_X - SIDE_GAP;
-
-    // ES 按 group 预计数（单跳 ceil(n/2) 上行需要 n）。
-    let mut group_es_count: HashMap<String, usize> = HashMap::new();
-    for es in &ordered_es {
-        *group_es_count.entry(es.group_id.clone()).or_default() += 1;
-    }
+    let positions = layout_dual_plane_redundant(
+        params,
+        &ordered_switches,
+        &ordered_es,
+        &switch_by_id,
+        &group_index,
+    );
 
     // 构建节点（只改 position 赋值；节点生成/排序顺序 = imac 身份源，不动）。
     let mut nodes: Vec<IntermediateNode> = Vec::new();
     let mut numeric_node_id: i64 = 0;
-    for (sw_seq, sw) in ordered_switches.iter().enumerate() {
-        let position = if single_hop {
-            // 规范图一：SW 同行居中、按节点序横排。
-            IntermediatePosition { x: BASE_X + GROUP_PITCH * sw_seq as f64, y: SW_ROW_Y }
-        } else {
-            let col = match col_by_switch.get(&sw.id) {
-                Some(c) => *c,
-                None => group_count + extra_col[&sw.id],
-            };
-            let y = if sw.plane == "B" { PLANE_B_Y } else { PLANE_A_Y };
-            IntermediatePosition { x: BASE_X + GROUP_PITCH * col as f64, y }
-        };
+    for sw in &ordered_switches {
         nodes.push(IntermediateNode {
             id: sw.id.clone(),
             numeric_id: numeric_node_id,
             name: sw.name.clone().unwrap_or_else(|| sw.id.clone()),
             node_type: IntermediateNodeType::Switch,
             ports: create_ports(port_count_for(&sw.id)),
-            position,
+            position: positions[&sw.id].clone(),
             mac_address: None,
             ip_address: None,
         });
         numeric_node_id += 1;
     }
     let mut within_group: HashMap<String, usize> = HashMap::new();
-    // 多组外端槽位占用：挂侧 → 已占 (ring, 平面 B 行)。规范图 4-5：同侧 ES
-    // 先纵向占满两平面行（同 x 成列），占满后沿列背离走廊延伸（ring）。
-    let mut side_slots: HashMap<bool, HashSet<(usize, bool)>> = HashMap::new();
-    let mut overflow_cursor: usize = 0;
     let mut es_ordinal: i64 = 1;
     for es in &ordered_es {
         let gidx = *group_index.get(&es.group_id).unwrap_or(&0);
@@ -1365,58 +1497,13 @@ fn create_dual_plane_redundant_topology(params: &DualPlaneParams, data_rate: i64
             *counter += 1;
             value
         };
-        let position = if !group_index.contains_key(&es.group_id) {
-            let x = BASE_X + ES_PITCH * overflow_cursor as f64;
-            overflow_cursor += 1;
-            IntermediatePosition { x, y: OVERFLOW_Y }
-        } else if single_hop {
-            // 规范图一：组内声明序前 ceil(n/2) 上行、其余下行，行内对 SW 居中。
-            let n = *group_es_count.get(&es.group_id).unwrap_or(&1);
-            let n_up = (n + 1) / 2;
-            let (row_y, idx, row_len) =
-                if wi < n_up { (ES_TOP_Y, wi, n_up) } else { (ES_BOTTOM_Y, wi - n_up, n - n_up) };
-            let row_start =
-                single_hop_sw_center - (ES_PITCH / 2.0) * (row_len.saturating_sub(1)) as f64;
-            IntermediatePosition { x: row_start + ES_PITCH * idx as f64, y: row_y }
-        } else {
-            // 规范图 4-5：优先对齐 primary 平面行；该行被占则让位到另一行
-            // （同 x 纵向成列），两行占满后沿列背离走廊延伸。R2 的「y 对齐
-            // primary 行」仅在行空闲时成立——双 ES 同主接时成列形态优先。
-            let side_left = gidx < left_group_count;
-            let primary_plane_b = switch_by_id
-                .get(&es.attachment.primary.switch_id)
-                .map(|s| s.plane == "B")
-                .unwrap_or(false);
-            let slots = side_slots.entry(side_left).or_default();
-            let (ring, row_b) = {
-                let mut r = 0usize;
-                loop {
-                    if !slots.contains(&(r, primary_plane_b)) {
-                        break (r, primary_plane_b);
-                    }
-                    if !slots.contains(&(r, !primary_plane_b)) {
-                        break (r, !primary_plane_b);
-                    }
-                    r += 1;
-                }
-            };
-            slots.insert((ring, row_b));
-            let x = if side_left { left_edge_x } else { right_edge_x };
-            // ring=0 严格对齐平面行；ring>0 沿列背离走廊延伸（R8）。
-            let y = if row_b {
-                PLANE_B_Y - COLUMN_EXTEND_PITCH * ring as f64
-            } else {
-                PLANE_A_Y + COLUMN_EXTEND_PITCH * ring as f64
-            };
-            IntermediatePosition { x, y }
-        };
         nodes.push(IntermediateNode {
             id: es.id.clone(),
             numeric_id: numeric_node_id,
             name: es.name.clone().unwrap_or_else(|| es.id.clone()),
             node_type: IntermediateNodeType::EndSystem,
             ports: create_ports(port_count_for(&es.id)),
-            position,
+            position: positions[&es.id].clone(),
             mac_address: Some(derive_mac_address(es_ordinal)),
             ip_address: Some(format!("10.0.{}.{}", gidx + 1, wi + 1)),
         });
@@ -3120,6 +3207,75 @@ mod tests {
     }
 
     #[test]
+    fn line_layout_helpers_only_compute_positions() {
+        let sw3 = layout_generic_line_switch(3, 2);
+        assert_eq!((sw3.x, sw3.y), (680.0, 220.0));
+
+        let es = layout_generic_line_end_system(2, 2, 3);
+        assert_eq!((es.x, es.y), (440.0, 390.0));
+
+        let dense_sw3 = layout_generic_line_switch(3, 5);
+        assert_eq!((dense_sw3.x, dense_sw3.y), (1160.0, 220.0));
+        let dense_es = layout_generic_line_end_system(2, 5, 5);
+        assert_eq!((dense_es.x, dense_es.y), (800.0, 70.0));
+
+        let ends = layout_line_ends_only(5);
+        assert!(ends.folded, "5-hop spec layout folds into a serpentine line");
+        assert_eq!(
+            (ends.switch_positions[0].x, ends.switch_positions[0].y),
+            (80.0, 220.0)
+        );
+        assert_eq!(
+            (ends.switch_positions[4].x, ends.switch_positions[4].y),
+            (380.0, 420.0)
+        );
+        assert_eq!((ends.first_end_system.x, ends.first_end_system.y), (-140.0, 220.0));
+        assert_eq!((ends.last_end_system.x, ends.last_end_system.y), (160.0, 420.0));
+    }
+
+    #[test]
+    fn generic_line_dense_per_switch_layout_keeps_node_boxes_apart() {
+        let (topo, summary) = initialize_topology(&InitializeIntent {
+            template_id: "generic-line".into(),
+            params: json!({ "switchCount": 4, "endSystemsPerSwitch": 5, "dataRateMbps": 1000 }),
+        })
+        .unwrap();
+        assert_eq!(summary.switch_count, 4);
+        assert_eq!(summary.end_system_count, 20);
+        assert_eq!(dp_pos(&topo, "sw2").0 - dp_pos(&topo, "sw1").0, 540.0);
+
+        let boxes_overlap = |a: &IntermediateNode, b: &IntermediateNode| -> bool {
+            let margin = 8.0;
+            let width = 126.0;
+            let height = 56.0;
+            let ax0 = a.position.x - margin;
+            let ax1 = a.position.x + width + margin;
+            let ay0 = a.position.y - margin;
+            let ay1 = a.position.y + height + margin;
+            let bx0 = b.position.x - margin;
+            let bx1 = b.position.x + width + margin;
+            let by0 = b.position.y - margin;
+            let by1 = b.position.y + height + margin;
+            ax0 < bx1 && bx0 < ax1 && ay0 < by1 && by0 < ay1
+        };
+
+        for (i, a) in topo.nodes.iter().enumerate() {
+            for b in topo.nodes.iter().skip(i + 1) {
+                assert!(
+                    !boxes_overlap(a, b),
+                    "{} at ({}, {}) overlaps {} at ({}, {})",
+                    a.id,
+                    a.position.x,
+                    a.position.y,
+                    b.id,
+                    b.position.x,
+                    b.position.y
+                );
+            }
+        }
+    }
+
+    #[test]
     fn dual_plane_single_hop_layout_is_sandwich() {
         // AE1（R1/R3）：SW 同行居中，ES 前半上行/后半下行夹住，行内间距 ≥ 180。
         let (topo, _) = initialize_topology(&InitializeIntent {
@@ -3147,6 +3303,57 @@ mod tests {
         let sw_mean = (sw1x + sw2x) / 2.0;
         let top_mean = (1..=3).map(|i| dp_pos(&topo, &format!("es{}", i)).0).sum::<f64>() / 3.0;
         assert!((top_mean - sw_mean).abs() <= 1.0, "top row not centered: {} vs {}", top_mean, sw_mean);
+    }
+
+    #[test]
+    fn dual_plane_layout_helper_projects_single_and_multi_hop_positions() {
+        let single_params = parse_dual_plane_params(&dual_plane_single_hop_params()).unwrap();
+        let single_switch_by_id: HashMap<String, &DualPlaneSwitch> =
+            single_params.switches.iter().map(|s| (s.id.clone(), s)).collect();
+        let single_group_index: HashMap<String, usize> =
+            single_params.switch_groups.iter().enumerate().map(|(i, g)| (g.id.clone(), i)).collect();
+        let single_switches = vec![
+            single_switch_by_id["sw1"],
+            single_switch_by_id["sw2"],
+        ];
+        let single_es: Vec<&DualPlaneEndSystem> = single_params.end_systems.iter().collect();
+        let single = layout_dual_plane_redundant(
+            &single_params,
+            &single_switches,
+            &single_es,
+            &single_switch_by_id,
+            &single_group_index,
+        );
+        assert_eq!((single["sw1"].x, single["sw1"].y), (120.0, 300.0));
+        assert_eq!((single["sw2"].x, single["sw2"].y), (420.0, 300.0));
+        assert_eq!(single["es1"].y, 60.0);
+        assert_eq!(single["es4"].y, 540.0);
+
+        let multi_params = parse_dual_plane_params(&dual_plane_two_hop_params()).unwrap();
+        let multi_switch_by_id: HashMap<String, &DualPlaneSwitch> =
+            multi_params.switches.iter().map(|s| (s.id.clone(), s)).collect();
+        let multi_group_index: HashMap<String, usize> =
+            multi_params.switch_groups.iter().enumerate().map(|(i, g)| (g.id.clone(), i)).collect();
+        let multi_switches = vec![
+            multi_switch_by_id["sw1"],
+            multi_switch_by_id["sw2"],
+            multi_switch_by_id["sw3"],
+            multi_switch_by_id["sw4"],
+        ];
+        let multi_es: Vec<&DualPlaneEndSystem> = multi_params.end_systems.iter().collect();
+        let multi = layout_dual_plane_redundant(
+            &multi_params,
+            &multi_switches,
+            &multi_es,
+            &multi_switch_by_id,
+            &multi_group_index,
+        );
+        assert_eq!(multi["sw2"].y, 160.0, "plane B lane is above");
+        assert_eq!(multi["sw1"].y, 360.0, "plane A lane is below");
+        assert_eq!(multi["sw1"].x, multi["sw2"].x, "group g1 switches stack vertically");
+        assert_eq!(multi["sw3"].x, multi["sw4"].x, "group g2 switches stack vertically");
+        assert!(multi["e1"].x < multi["sw1"].x, "g1 ES is placed on left edge");
+        assert!(multi["e3"].x > multi["sw3"].x, "g2 ES is placed on right edge");
     }
 
     #[test]

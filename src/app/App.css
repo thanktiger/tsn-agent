@@ -1744,6 +1744,11 @@ textarea:focus-visible {
   stroke: #a8b0c0;
 }
 
+.topology-canvas .react-flow__edge-interaction {
+  stroke: transparent;
+  pointer-events: stroke;
+}
+
 /* 平面配色按 className 着色，规则置于 .selected 之前——级联顺序保证选中态回到 --accent。 */
 .topology-canvas .react-flow__edge.plane-a .react-flow__edge-path {
   stroke: var(--plane-a);

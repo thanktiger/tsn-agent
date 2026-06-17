@@ -6,16 +6,26 @@ vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(async () => undefined),
 }));
 
-const flowMocks = vi.hoisted(() => ({ fitView: vi.fn() }));
+const flowMocks = vi.hoisted(() => ({
+  fitView: vi.fn(),
+  setCenter: vi.fn(async () => true),
+  internalNodes: new Map<string, unknown>(),
+}));
 
 vi.mock("@xyflow/react", () => ({
   Background: () => null,
   Controls: () => null,
   Handle: () => null,
-  BaseEdge: () => null,
+  BaseEdge: ({ id, path, interactionWidth }: { id?: string; path: string; interactionWidth?: number }) => (
+    <span
+      data-testid={`base-edge-${id ?? "edge"}`}
+      data-path={path}
+      data-interaction-width={String(interactionWidth)}
+    />
+  ),
   EdgeLabelRenderer: ({ children }: { children?: unknown }) => children ?? null,
   getBezierPath: () => ["M0 0", 0, 0],
-  useInternalNode: () => undefined,
+  useInternalNode: (id: string) => flowMocks.internalNodes.get(id),
   applyNodeChanges: (_changes: unknown[], nodes: Array<{ id: string }>) => nodes,
   Position: { Left: "left", Right: "right", Top: "top", Bottom: "bottom" },
   ReactFlow: (props: {
@@ -25,7 +35,7 @@ vi.mock("@xyflow/react", () => ({
     selectionOnDrag?: boolean;
     multiSelectionKeyCode?: string | null;
     fitView?: boolean;
-    onInit?: (instance: { fitView: () => void }) => void;
+    onInit?: (instance: { fitView: () => void; setCenter: (x: number, y: number, options?: unknown) => Promise<boolean> }) => void;
     onNodeClick?: (event: unknown, node: { id: string }) => void;
     onEdgeClick?: (event: unknown, edge: { id: string }) => void;
     onNodeDragStart?: (event: unknown, node: unknown) => void;
@@ -34,8 +44,8 @@ vi.mock("@xyflow/react", () => ({
   }) => {
     const { nodes, edges, onNodeClick, onEdgeClick, onNodeDragStart, onNodeDragStop } = props;
     // 真实 ReactFlow 仅在挂载后调 onInit 一次；mock 每次渲染都调——
-    // 让「每 session 仅 fit 一次」的守卫断言更严格。
-    props.onInit?.({ fitView: flowMocks.fitView });
+    // 让「每个拓扑版本只重置一次视口」的守卫断言更严格。
+    props.onInit?.({ fitView: flowMocks.fitView, setCenter: flowMocks.setCenter });
     return (
       <div
         data-testid="rf-mock"
@@ -104,7 +114,7 @@ import {
   type TsnEdgeData,
   type WorkspacePaneProps,
 } from "./index";
-import { floatingEdgeAnchors, portLabelPoint } from "./tsn-floating-edge";
+import { floatingEdgeAnchors, portLabelPoint, straightFloatingEdgePath, TsnFloatingEdge } from "./tsn-floating-edge";
 import type { TopologyNodeRow, TopologyRowSnapshot } from "../../../sessions/topology-snapshot";
 
 function sampleSnapshot(): TopologyRowSnapshot {
@@ -339,6 +349,30 @@ describe("WorkspacePane 拖动持久化（U4）", () => {
     await waitFor(() => expect(screen.getByTestId("node-pos-2")).toHaveTextContent("300,200"));
   });
 
+  it("本地拖动位置写入返回的 mutation 刷新快照时，不重置画布视口", async () => {
+    flowMocks.setCenter.mockClear();
+    const user = userEvent.setup();
+    const commitNodePosition = vi.fn(async () => ({ mutationId: 5 }));
+    const { rerender } = render(
+      <WorkspacePane
+        {...baseProps({ topologySnapshot: sampleSnapshot(), lastMutationId: 4, commitNodePosition })}
+      />,
+    );
+    expect(flowMocks.setCenter).toHaveBeenCalledTimes(1);
+
+    await user.click(screen.getByRole("button", { name: "拖毕节点 2" }));
+    await waitFor(() => expect(commitNodePosition).toHaveBeenCalled());
+
+    const confirmed = sampleSnapshot();
+    confirmed.nodes = [confirmed.nodes[0], { ...confirmed.nodes[1], x: 480, y: 96 }];
+    rerender(
+      <WorkspacePane
+        {...baseProps({ topologySnapshot: confirmed, lastMutationId: 5, commitNodePosition })}
+      />,
+    );
+    expect(flowMocks.setCenter).toHaveBeenCalledTimes(1);
+  });
+
   it("session 切换：overlay/拖动状态全部重置，不污染新 session 同 imac 节点", async () => {
     const user = userEvent.setup();
     // commit 永不 resolve：overlay 停留在未确认状态
@@ -384,26 +418,35 @@ describe("WorkspacePane 画布配置与视口（R9/R12）", () => {
     expect(canvas).toHaveAttribute("data-multi-selection-key", "null");
   });
 
-  it("R12：fitView 每 session 仅一次（onInit 单路径，无常驻 fitView prop）", () => {
+  it("R12：拓扑展示时以 100% 比例居中（onInit 单路径，无常驻 fitView prop）", () => {
     flowMocks.fitView.mockClear();
+    flowMocks.setCenter.mockClear();
     const { rerender } = render(
       <WorkspacePane {...baseProps({ topologySnapshot: sampleSnapshot() })} />,
     );
     expect(screen.getByTestId("rf-mock")).toHaveAttribute("data-has-fitview-prop", "false");
-    expect(flowMocks.fitView).toHaveBeenCalledTimes(1);
+    expect(flowMocks.fitView).not.toHaveBeenCalled();
+    expect(flowMocks.setCenter).toHaveBeenCalledTimes(1);
+    expect(flowMocks.setCenter).toHaveBeenLastCalledWith(143, 28, { zoom: 1, duration: 0 });
 
-    // 同 session 快照刷新（mock 每次渲染都触发 onInit）：不再 fit
+    // 完全相同的拓扑版本刷新（mock 每次渲染都触发 onInit）：不重复重置视口。
+    rerender(<WorkspacePane {...baseProps({ topologySnapshot: sampleSnapshot() })} />);
+    expect(flowMocks.setCenter).toHaveBeenCalledTimes(1);
+
+    // 同 session 新拓扑/Agent 重建：重新以 100% 居中。
     const refreshed = sampleSnapshot();
     refreshed.nodes = [refreshed.nodes[0], { ...refreshed.nodes[1], x: 300, y: 300 }];
     rerender(<WorkspacePane {...baseProps({ topologySnapshot: refreshed })} />);
-    expect(flowMocks.fitView).toHaveBeenCalledTimes(1);
+    expect(flowMocks.setCenter).toHaveBeenCalledTimes(2);
+    expect(flowMocks.setCenter).toHaveBeenLastCalledWith(213, 178, { zoom: 1, duration: 0 });
 
-    // session 切换（经 undefined 过渡 → 重挂载）：再 fit 一次
+    // session 切换（经 undefined 过渡 → 重挂载）：再居中一次。
     rerender(<WorkspacePane {...baseProps()} />);
     const s2 = sampleSnapshot();
     s2.sessionId = "s2";
     rerender(<WorkspacePane {...baseProps({ topologySnapshot: s2 })} />);
-    expect(flowMocks.fitView).toHaveBeenCalledTimes(2);
+    expect(flowMocks.setCenter).toHaveBeenCalledTimes(3);
+    expect(flowMocks.setCenter).toHaveBeenLastCalledWith(143, 28, { zoom: 1, duration: 0 });
   });
 });
 
@@ -543,16 +586,30 @@ describe("floatingEdgeAnchors（U3 交点纯函数）", () => {
     const source = rect(0, 0);
     const target = rect(0, 300);
     const anchors = floatingEdgeAnchors(source, target);
+    expect(anchors.sx).toBeCloseTo(63);
+    expect(anchors.tx).toBeCloseTo(63);
     expect(anchors.sy).toBeCloseTo(56);
     expect(anchors.sourcePosition).toBe("bottom");
     expect(anchors.ty).toBeCloseTo(300);
     expect(anchors.targetPosition).toBe("top");
   });
 
+  it("上下节点宽度不同且近似对齐时，端点吸到同一条垂直线", () => {
+    const source = rect(100, 0, 100, 56);
+    const target = rect(80, 180, 140, 56);
+    const anchors = floatingEdgeAnchors(source, target);
+    expect(anchors.sx).toBeCloseTo(150);
+    expect(anchors.tx).toBeCloseTo(150);
+    expect(anchors.sy).toBeCloseTo(56);
+    expect(anchors.ty).toBeCloseTo(180);
+    expect(straightFloatingEdgePath(anchors)).toBe("M 150,56 L 150,180");
+  });
+
   it("对角节点：交点仍在节点边框范围内", () => {
     const source = rect(0, 0);
     const target = rect(400, 300);
     const anchors = floatingEdgeAnchors(source, target);
+    expect(anchors.sx).not.toBeCloseTo(anchors.tx);
     expect(anchors.sx).toBeGreaterThanOrEqual(0);
     expect(anchors.sx).toBeLessThanOrEqual(126);
     expect(anchors.sy).toBeGreaterThanOrEqual(0);
@@ -566,6 +623,43 @@ describe("floatingEdgeAnchors（U3 交点纯函数）", () => {
     for (const value of [anchors.sx, anchors.sy, anchors.tx, anchors.ty]) {
       expect(Number.isFinite(value)).toBe(true);
     }
+  });
+
+  it("floating edge 使用两端吸附点之间的直线路径", () => {
+    const path = straightFloatingEdgePath({ sx: 126, sy: 28, tx: 400, ty: 28 });
+    expect(path).toBe("M 126,28 L 400,28");
+  });
+
+  it("自定义连线扩大透明点击区域，但保持视觉路径独立", () => {
+    flowMocks.internalNodes.set("1", {
+      internals: { positionAbsolute: { x: 0, y: 0 } },
+      measured: { width: 126, height: 56 },
+    });
+    flowMocks.internalNodes.set("2", {
+      internals: { positionAbsolute: { x: 400, y: 0 } },
+      measured: { width: 126, height: 56 },
+    });
+
+    render(
+      <TsnFloatingEdge
+        id="e1"
+        source="1"
+        target="2"
+        sourceX={0}
+        sourceY={0}
+        targetX={0}
+        targetY={0}
+        sourcePosition={"right" as never}
+        targetPosition={"left" as never}
+        data={{}}
+        selected={false}
+      />,
+    );
+
+    const baseEdge = screen.getByTestId("base-edge-e1");
+    expect(baseEdge).toHaveAttribute("data-path", "M 126,28 L 400,28");
+    expect(baseEdge).toHaveAttribute("data-interaction-width", "48");
+    flowMocks.internalNodes.clear();
   });
 
   it("portLabelPoint 沿出射方向外推，序数 ord 分层推远", () => {

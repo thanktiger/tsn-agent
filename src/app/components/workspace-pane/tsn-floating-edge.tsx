@@ -1,7 +1,6 @@
 import {
   BaseEdge,
   EdgeLabelRenderer,
-  getBezierPath,
   Position,
   useInternalNode,
   type EdgeProps,
@@ -9,7 +8,7 @@ import {
 import type { TsnEdgeData } from "./topology-flow";
 
 /**
- * Plan 2026-06-11-001 U3：floating 贝塞尔边（R1/R4）。
+ * Plan 2026-06-11-001 U3：floating 直线边（R1/R4）。
  * 边端点动态吸附两端节点边框上朝向对端的交点（官方 Floating Edges 算法移植），
  * 不锚定固定 handle；拖动节点时连线贴边跟随。两节点中心重合/包含时交点数学
  * 分母为零产 NaN——退化兜底为中心直连，任意坐标下路径有限可渲染。
@@ -30,6 +29,9 @@ export interface FloatingAnchors {
   ty: number;
   targetPosition: Position;
 }
+
+const VERTICAL_EDGE_SNAP_THRESHOLD = 32;
+const TSN_EDGE_INTERACTION_WIDTH = 48;
 
 /** 节点边框上朝向 target 中心的交点；退化（NaN/Infinity）时回退本节点中心。 */
 function rectIntersection(node: NodeRect, target: NodeRect): { x: number; y: number } {
@@ -54,7 +56,7 @@ function rectIntersection(node: NodeRect, target: NodeRect): { x: number; y: num
   return { x, y };
 }
 
-/** 交点落在节点哪条边 → 对应 Position（贝塞尔出射方向）。 */
+/** 交点落在节点哪条边 → 对应 Position（端口标签外推方向）。 */
 function edgePosition(node: NodeRect, point: { x: number; y: number }): Position {
   const nx = Math.round(node.x);
   const ny = Math.round(node.y);
@@ -76,8 +78,61 @@ function edgePosition(node: NodeRect, point: { x: number; y: number }): Position
   return Position.Top;
 }
 
+function rectCenter(node: NodeRect): { x: number; y: number } {
+  return {
+    x: node.x + node.width / 2,
+    y: node.y + node.height / 2,
+  };
+}
+
+function verticalSnapAnchors(source: NodeRect, target: NodeRect): FloatingAnchors | undefined {
+  if (source.width <= 0 || source.height <= 0 || target.width <= 0 || target.height <= 0) {
+    return undefined;
+  }
+
+  const sourceCenter = rectCenter(source);
+  const targetCenter = rectCenter(target);
+  const dx = Math.abs(sourceCenter.x - targetCenter.x);
+  const dy = Math.abs(sourceCenter.y - targetCenter.y);
+  if (dy <= dx || dx > VERTICAL_EDGE_SNAP_THRESHOLD) {
+    return undefined;
+  }
+
+  const overlapLeft = Math.max(source.x, target.x);
+  const overlapRight = Math.min(source.x + source.width, target.x + target.width);
+  if (overlapLeft > overlapRight) {
+    return undefined;
+  }
+
+  const x = (overlapLeft + overlapRight) / 2;
+  if (targetCenter.y >= sourceCenter.y) {
+    return {
+      sx: x,
+      sy: source.y + source.height,
+      sourcePosition: Position.Bottom,
+      tx: x,
+      ty: target.y,
+      targetPosition: Position.Top,
+    };
+  }
+
+  return {
+    sx: x,
+    sy: source.y,
+    sourcePosition: Position.Top,
+    tx: x,
+    ty: target.y + target.height,
+    targetPosition: Position.Bottom,
+  };
+}
+
 /** 两节点 rect → floating 边两端吸附点与方向（纯函数，可直测）。 */
 export function floatingEdgeAnchors(source: NodeRect, target: NodeRect): FloatingAnchors {
+  const snapped = verticalSnapAnchors(source, target);
+  if (snapped) {
+    return snapped;
+  }
+
   const sourcePoint = rectIntersection(source, target);
   const targetPoint = rectIntersection(target, source);
   return {
@@ -88,6 +143,11 @@ export function floatingEdgeAnchors(source: NodeRect, target: NodeRect): Floatin
     ty: targetPoint.y,
     targetPosition: edgePosition(target, targetPoint),
   };
+}
+
+/** 两端吸附点之间使用直线路径。 */
+export function straightFloatingEdgePath(anchors: Pick<FloatingAnchors, "sx" | "sy" | "tx" | "ty">): string {
+  return `M ${anchors.sx},${anchors.sy} L ${anchors.tx},${anchors.ty}`;
 }
 
 /**
@@ -149,14 +209,7 @@ export function TsnFloatingEdge(props: EdgeProps) {
     height: targetNode.measured.height ?? 0,
   };
   const anchors = floatingEdgeAnchors(sourceRect, targetRect);
-  const [path] = getBezierPath({
-    sourceX: anchors.sx,
-    sourceY: anchors.sy,
-    sourcePosition: anchors.sourcePosition,
-    targetX: anchors.tx,
-    targetY: anchors.ty,
-    targetPosition: anchors.targetPosition,
-  });
+  const path = straightFloatingEdgePath(anchors);
   const left = data.leftLabel
     ? portLabelPoint(anchors.sx, anchors.sy, anchors.sourcePosition, data.leftOrd ?? 0)
     : undefined;
@@ -166,7 +219,13 @@ export function TsnFloatingEdge(props: EdgeProps) {
 
   return (
     <>
-      <BaseEdge id={id} path={path} markerEnd={markerEnd} style={style} />
+      <BaseEdge
+        id={id}
+        path={path}
+        markerEnd={markerEnd}
+        style={style}
+        interactionWidth={TSN_EDGE_INTERACTION_WIDTH}
+      />
       {left && data.leftLabel && (
         <PortLabel x={left.x} y={left.y} text={data.leftLabel} selected={Boolean(selected)} />
       )}
