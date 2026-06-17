@@ -211,17 +211,6 @@ export function createIdlePlannerRunState(baseUrl?: string): PlannerRunState {
   };
 }
 
-export function createStalePlannerRunState(value?: Partial<PlannerRunState> | null): PlannerRunState {
-  const run = normalizePlannerRunState(value);
-
-  return {
-    status: "stale",
-    baseUrl: run.baseUrl,
-    updatedAt: new Date().toISOString(),
-    errorMessage: "工程输入已更新，原规划结果已失效，请重新启动规划任务。",
-  };
-}
-
 export function normalizePlannerRunState(value?: Partial<PlannerRunState> | null): PlannerRunState {
   if (!value) {
     return createIdlePlannerRunState();
@@ -251,18 +240,6 @@ export function normalizePlannerRunState(value?: Partial<PlannerRunState> | null
 
 export function isTerminalPlannerState(state: PlannerTaskState): boolean {
   return ["succeeded", "failed", "cancelled", "no_running_plan", "not_found", "stale"].includes(state);
-}
-
-export function createPlannerRequestFingerprint(request: PlannerStartRequest): string {
-  const json = JSON.stringify(request);
-  let hash = 0x811c9dc5;
-
-  for (let index = 0; index < json.length; index += 1) {
-    hash ^= json.charCodeAt(index);
-    hash = Math.imul(hash, 0x01000193);
-  }
-
-  return `planner-request-v1:${(hash >>> 0).toString(16).padStart(8, "0")}:${json.length}`;
 }
 
 export function summarizePlannerRequest(request: PlannerStartRequest): PlannerRequestSummary {

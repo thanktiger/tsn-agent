@@ -2,12 +2,6 @@ mod commands;
 mod db;
 mod diagnostic_store;
 mod log_file_writer;
-// Phase A 灰态：以下两模块的 command 已从 invoke_handler 摘除（前端零调用，
-// 暴露在 IPC 边界无 UI 守门）。保留模块待 Phase B 回归时重新注册。
-#[allow(dead_code)]
-mod planner_client;
-#[allow(dead_code)]
-mod project_writer;
 mod redaction;
 mod session_export;
 mod session_import;

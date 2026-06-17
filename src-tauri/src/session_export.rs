@@ -10,8 +10,7 @@
 //!     导出完整会话切片含对话/workflow 进度/拓扑，让导入方从原进度续走
 //!     （boss 拍板推翻 plan v3 U8 '{}' 决策，入库 redaction 已是脱敏闸）；
 //!   - 覆盖语义：OS save 对话框已是用户确认点，Rust 端经 tmp+rename 接受覆盖，
-//!     失败只删 `.tmp`，用户既有备份文件全程不动；target 为 symlink 时拒绝
-//!     （镜像 project_writer 的 guard）。
+//!     失败只删 `.tmp`，用户既有备份文件全程不动；target 为 symlink 时拒绝。
 //!
 //! 文件 mode：Unix 0600；Windows 留待 ACL helper（暂跳过，加 TODO）。
 
@@ -84,7 +83,7 @@ pub(crate) async fn perform_single_session_export(
     target_path: &str,
 ) -> Result<(), String> {
     // symlink guard：rename 会替换 symlink 本身，但 guard 防御「目标被换成
-    // 指向他处的链接」的混淆场景（镜像 project_writer 既有模式）。
+    // 指向他处的链接」的混淆场景。
     let target = Path::new(target_path);
     if let Ok(meta) = std::fs::symlink_metadata(target) {
         if meta.file_type().is_symlink() {
