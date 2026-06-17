@@ -150,4 +150,3 @@
 
 - 修改前优先读相关文件和测试，保持改动聚焦。
 - 提交前至少跑与改动相关的测试；触及 workflow、导出、会话或 UI 主流程时，优先跑 `npm run build`、`npm test`、`npm run e2e`。
-- `tsn-topology/` 是已有独立 skill 仓库/参考目录，不要默认把它纳入根项目修改范围。

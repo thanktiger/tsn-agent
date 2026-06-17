@@ -8,8 +8,6 @@ export const TOPOLOGY_LIMITS = {
   maxIngressPayloadBytes: 1_000_000,
 } as const;
 
-export type TopologyLimitName = keyof typeof TOPOLOGY_LIMITS;
-
 export function measureJsonDepth(value: unknown): number {
   if (value === null || typeof value !== "object") {
     return 0;

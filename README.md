@@ -106,7 +106,6 @@ src-node/        Node worker（claude-agent-sdk）与 tsn_topology MCP server
 .claude/skills/  出厂 Skill 指引（tsn-topology、tsn-flow-planning）
 docs/            文档（brainstorms / plans / solutions / adr）
 scripts/         构建与发布脚本
-tsn-topology/    独立 skill 仓库的只读迁移参考，不纳入根 Git 管理
 ```
 
 ## 路线图

@@ -1,9 +1,7 @@
 import {
   DEFAULT_SCENARIO_CONFIG_ID,
   WORKFLOW_STEPS,
-  getScenarioConfig,
   resolveScenarioConfig,
-  type ScenarioConfig,
   type WorkflowStep,
 } from "../domain/scenario-config";
 import type { WorkflowStageSummary } from "../agent/workflow-stage-result";
@@ -111,10 +109,6 @@ export function normalizeWorkflowState(
         }
       : {}),
   };
-}
-
-export function getWorkflowScenarioConfig(workflow: WorkflowState): ScenarioConfig {
-  return getScenarioConfig(workflow.scenarioConfigId);
 }
 
 export function recordStageResult(
