@@ -1,4 +1,4 @@
-import type { AgentEvent } from "../agent/agent-types";
+import type { AgentEvent, TopologyVerifyResult } from "../agent/agent-types";
 import { truncateResultForStorage, type ToolCallRecord } from "../agent/tool-call-record";
 import { normalizePlannerRunState, type PlannerRunState } from "../planner/planner-contract";
 import { normalizeWorkflowState, type WorkflowState } from "../project/project-state";
@@ -15,6 +15,8 @@ export interface ChatMessage {
   createdAt: string;
   /** Plan 2026-06-09-003：本条 assistant 消息的工具调用记录，渲染成卡片。老消息无此字段。 */
   toolCalls?: ToolCallRecord[];
+  /** 拓扑阶段确认过关闸的结构验证结论；未通过时本条消息区分渲染（拦截卡 + 口径标签）。 */
+  verification?: TopologyVerifyResult;
 }
 
 /**

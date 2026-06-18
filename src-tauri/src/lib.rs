@@ -8,6 +8,9 @@ mod session_import;
 mod session_store;
 mod skill_factory_hashes;
 mod skill_files;
+mod inet_bundle;
+mod inet_remote;
+mod inet_verify_command;
 mod topology_backfill;
 mod topology_compute;
 mod topology_intermediate;
@@ -18,6 +21,7 @@ mod topology_position_command;
 mod topology_query_command;
 mod topology_sidecar;
 mod topology_sidecar_routes;
+mod topology_verify;
 
 #[tauri::command]
 fn app_health() -> &'static str {
@@ -91,6 +95,9 @@ pub fn run() {
             topology_mutations_command::get_topology_mutations_since,
             topology_position_command::update_node_position,
             topology_query_command::query_topology,
+            topology_query_command::verify_topology,
+            inet_verify_command::verify_inet, // 暂未接前端：INET 验证挪到后续流量规划阶段，保留作其基础，勿当死代码删
+
             session_store::get_current_session,
             session_store::list_sessions,
             session_store::remove_session,

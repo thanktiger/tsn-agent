@@ -39,10 +39,25 @@ function mockTauriCommands(options: {
   claude?: Record<string, unknown>;
   claudeError?: unknown;
   topology?: Record<string, unknown>;
-}) {
+  verify?: Record<string, unknown>;
+  verifyError?: unknown;
+} = {}) {
   invokeMock.mockImplementation(async (command: string) => {
     if (command === "query_topology") {
       return options.topology ?? { sessionId: "session-1", nodes: [], links: [] };
+    }
+
+    if (command === "verify_topology") {
+      if (options.verifyError !== undefined) {
+        throw options.verifyError;
+      }
+      // 默认通过：确认过关闸放行，既有 confirm 测试不被新闸拦。
+      return options.verify ?? { ok: true, caliber: "structural_only", errors: [] };
+    }
+
+    if (command === "verify_inet") {
+      // verify_inet 已不在拓扑确认链路触发（INET 挪到流量规划）；保留 mock 默认仅为「未被调用」断言兜底。
+      return { ok: true, caliber: "loadability_only", errors: [] };
     }
 
     if (command === "run_claude_agent") {
@@ -325,6 +340,7 @@ describe("runTsnAgent", () => {
 
   it("returns empty toolCalls on the deterministic confirm path (U4)", async () => {
     enableTauriRuntime();
+    mockTauriCommands();
     const { runTsnAgent } = await import("./agent-adapter");
 
     const result = await runTsnAgent({
@@ -335,6 +351,99 @@ describe("runTsnAgent", () => {
 
     expect(result.mode).toBe("local");
     expect(result.toolCalls ?? []).toEqual([]);
+  });
+
+  it("blocks topology advance-confirm when structural verification fails (gate)", async () => {
+    enableTauriRuntime();
+    mockTauriCommands({
+      verify: {
+        ok: false,
+        caliber: "structural_only",
+        errors: [{ code: "ISOLATED_NODE", messageZh: "ES-2 没连任何线，是个孤立节点。", nodeRef: "2" }],
+      },
+    });
+    const { runTsnAgent } = await import("./agent-adapter");
+
+    const result = await runTsnAgent({
+      userIntent: "继续",
+      action: "confirm-stage",
+      session: sessionWithWorkflow(topologyWaitingWorkflow()),
+    });
+
+    // 不推进：仍停在 topology、waiting_confirmation。
+    expect(result.workflow.currentStep).toBe("topology");
+    expect(result.workflow.stages.topology.status).toBe("waiting_confirmation");
+    expect(result.verification?.ok).toBe(false);
+    expect(result.assistantText).toContain("孤立节点");
+    expect(result.assistantText).toContain("确认并继续");
+    // 结构失败 → 短路、不进 INET 闸。
+    const inetCalls = invokeMock.mock.calls.filter(([command]) => command === "verify_inet");
+    expect(inetCalls).toHaveLength(0);
+  });
+
+  it("advances topology confirm silently when the structural gate passes (no extra prompt; INET moved to flow-planning)", async () => {
+    enableTauriRuntime();
+    mockTauriCommands(); // 结构闸默认通过
+    const { runTsnAgent } = await import("./agent-adapter");
+
+    const result = await runTsnAgent({
+      userIntent: "继续",
+      action: "confirm-stage",
+      session: sessionWithWorkflow(topologyWaitingWorkflow()),
+    });
+
+    expect(result.workflow.currentStep).toBe("time-sync"); // 已推进
+    // 通过即静默推进：不再单独弹「结构没问题」（结构反馈由 agent 操作拓扑时经 MCP validate 给出）。
+    expect(result.assistantText).not.toContain("结构没问题");
+    expect(result.verification).toBeUndefined();
+    // 仍走结构校验兜底硬拦，但不再调 verify_inet（INET 已挪到流量规划阶段）。
+    const verifyCalls = invokeMock.mock.calls.filter(([command]) => command === "verify_topology");
+    expect(verifyCalls.length).toBeGreaterThanOrEqual(1);
+    const inetCalls = invokeMock.mock.calls.filter(([command]) => command === "verify_inet");
+    expect(inetCalls).toHaveLength(0);
+  });
+
+  it("does NOT verify a rollback-confirm (pendingStageChange present)", async () => {
+    enableTauriRuntime();
+    mockTauriCommands();
+    const { runTsnAgent } = await import("./agent-adapter");
+
+    // 在 topology 阶段、带 pendingStageChange（回退确认场景的近似）：闸不应触发。
+    const base = topologyWaitingWorkflow();
+    const rollbackWorkflow: WorkflowState = {
+      ...base,
+      pendingStageChange: "topology",
+      pendingStageChangeIntent: "减少一个交换机",
+    };
+
+    await runTsnAgent({
+      userIntent: "继续",
+      action: "confirm-stage",
+      session: sessionWithWorkflow(rollbackWorkflow),
+    });
+
+    // 回退确认不调任何过关闸（结构 + INET 都不触发）。
+    const verifyCalls = invokeMock.mock.calls.filter(
+      ([command]) => command === "verify_topology" || command === "verify_inet",
+    );
+    expect(verifyCalls).toHaveLength(0);
+  });
+
+  it("fail-closed: verify_topology rejection does not advance and shows a dedicated message", async () => {
+    enableTauriRuntime();
+    mockTauriCommands({ verifyError: new Error("sidecar down") });
+    const { runTsnAgent } = await import("./agent-adapter");
+
+    const result = await runTsnAgent({
+      userIntent: "继续",
+      action: "confirm-stage",
+      session: sessionWithWorkflow(topologyWaitingWorkflow()),
+    });
+
+    expect(result.workflow.currentStep).toBe("topology"); // 不放行
+    expect(result.mode).toBe("local");
+    expect(result.assistantText).toContain("结构校验暂时无法运行");
+    expect(result.verification).toBeUndefined();
   });
 
   it("applies a validated mutationId stage result from the worker", async () => {
@@ -478,6 +587,7 @@ describe("runTsnAgent", () => {
 
   it("confirms a waiting topology stage via the button and auto-generates time-sync defaults (U4 regression)", async () => {
     enableTauriRuntime();
+    mockTauriCommands(); // 过关闸默认通过（verify ok=true）
     const { runTsnAgent } = await import("./agent-adapter");
 
     const result = await runTsnAgent({
@@ -487,7 +597,8 @@ describe("runTsnAgent", () => {
     });
 
     expect(result.mode).toBe("local");
-    expect(invokeMock).not.toHaveBeenCalled();
+    // 拓扑前进确认现在先过结构校验闸（调 verify_topology），不再是完全 invoke-free。
+    expect(invokeMock.mock.calls.some(([command]) => command === "verify_topology")).toBe(true);
     expect(result.workflow.stages.topology.status).toBe("confirmed");
     expect(result.workflow.currentStep).toBe("time-sync");
     expect(result.workflow.stages["time-sync"].status).toBe("waiting_confirmation");
@@ -862,6 +973,7 @@ describe("runTsnAgent", () => {
 
   it("U3: confirm-stage action advances a waiting stage when there is no pending rollback", async () => {
     enableTauriRuntime();
+    mockTauriCommands(); // 过关闸默认通过
     const { runTsnAgent } = await import("./agent-adapter");
 
     const result = await runTsnAgent({
@@ -871,7 +983,6 @@ describe("runTsnAgent", () => {
     });
 
     expect(result.mode).toBe("local");
-    expect(invokeMock).not.toHaveBeenCalled();
     expect(result.workflow.stages.topology.status).toBe("confirmed");
     expect(result.workflow.currentStep).toBe("time-sync");
     expect(result.workflow.stages["time-sync"].status).toBe("waiting_confirmation");

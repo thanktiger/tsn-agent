@@ -1258,6 +1258,43 @@ textarea:focus-visible {
     waitingSurface 1.4s ease-in-out infinite;
 }
 
+/* 结构验证未通过的消息：左侧错误色边 + 浅红底，明显区别于普通 AGENT 建议，
+   让用户一眼看出是"被拦下、待修"而非闲聊。 */
+.msg-agent.msg-verify-block {
+  border-left: 3px solid var(--error);
+  background: var(--error-dim);
+}
+
+.verify-header {
+  margin: 2px 0 6px;
+}
+
+.caliber-chip {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.6;
+}
+
+.caliber-chip.caliber-block {
+  color: var(--error);
+  background: var(--error-dim);
+  border: 1px solid var(--error);
+}
+
+/* 远端连不上等环境问题：中性「暂时无法验证」外观，区别于红色「验证未通过」（不误导去改拓扑）。 */
+.msg-agent.msg-verify-pending {
+  border-left: 3px solid var(--border, #555);
+}
+
+.caliber-chip.caliber-pending {
+  color: var(--text-secondary, #9aa0a6);
+  background: rgba(127, 127, 127, 0.14);
+  border: 1px solid var(--border, #666);
+}
+
 .msg-user p,
 .msg-agent p {
   margin: 0;

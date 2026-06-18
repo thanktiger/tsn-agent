@@ -33,6 +33,20 @@ export interface AgentEvent {
   createdAt?: string;
 }
 
+/** verify_topology 命令返回值的 TS 镜像（Rust topology_verify::VerifyResult）。 */
+export interface TopologyVerifyError {
+  code: string;
+  messageZh: string;
+  nodeRef?: string;
+}
+
+export interface TopologyVerifyResult {
+  ok: boolean;
+  /** 验到哪一级：structural_only（本批）/ loadability_only（第二批）/ schedulability（占位）。 */
+  caliber: string;
+  errors: TopologyVerifyError[];
+}
+
 export interface TsnAgentResult {
   events: AgentEvent[];
   workflow: WorkflowState;
@@ -43,6 +57,8 @@ export interface TsnAgentResult {
   topologyMutationId?: number;
   /** Plan 2026-06-09-003：本轮工具调用记录，挂到 assistant 消息渲染成卡片。 */
   toolCalls?: ToolCallRecord[];
+  /** 拓扑阶段确认过关闸的结构验证结论；用于对话里区分渲染（拦截/通过）+ 口径标签。 */
+  verification?: TopologyVerifyResult;
 }
 
 export interface TsnAgentRequest {

@@ -20,7 +20,7 @@ import {
   type WorkflowState,
 } from "../project/project-state";
 import { getTopologyRuntimeSummary } from "../topology/topology-service";
-import type { AgentEvent, TsnAgentRequest, TsnAgentResult } from "./agent-types";
+import type { AgentEvent, TopologyVerifyResult, TsnAgentRequest, TsnAgentResult } from "./agent-types";
 import { redactSecretsInValue } from "../sessions/session-repository";
 import { enrichToolCall, type RawToolCall, type ToolCallRecord } from "./tool-call-record";
 import {
@@ -98,6 +98,45 @@ export async function runTsnAgent(requestOrIntent: TsnAgentRequest | string): Pr
 
   // 显式确认动作（确认按钮）：切阶段本身确定性、不走大模型。
   if (action === "confirm-stage") {
+    // 拓扑阶段「前进确认」过关闸（只拦前进、不验回退；回退确认带 pendingStageChange）。
+    // 代码兜底硬拦：结构不过则不推进；通过则静默推进——结构反馈已由 agent 操作拓扑时经 MCP validate 给出。
+    if (sessionId && workflow.currentStep === "topology" && !workflow.pendingStageChange) {
+      let verdict: TopologyVerifyResult;
+      try {
+        verdict = await invoke<TopologyVerifyResult>("verify_topology", { request: { sessionId } });
+      } catch (error) {
+        // fail-closed：不推进、不冒泡到 App 通用 catch（否则把"继续"卡回输入框）。
+        logAgent(request.diagnostics, {
+          sessionId,
+          runId,
+          message: "结构校验调用失败，未推进",
+          details: { error: error instanceof Error ? error.message : String(error) },
+        });
+        return {
+          events: [],
+          workflow,
+          assistantText: "结构校验暂时无法运行，右侧工程保持原状态，未推进。请稍后再点「确认并继续」。",
+          mode: "local",
+        };
+      }
+      if (!verdict.ok) {
+        logAgent(request.diagnostics, {
+          sessionId,
+          runId,
+          message: "结构校验未通过，拦截推进",
+          details: { errorCount: verdict.errors.length },
+        });
+        return {
+          events: [],
+          workflow,
+          assistantText: composeVerificationBlockText(verdict),
+          mode: "local",
+          verification: verdict,
+        };
+      }
+      // 结构通过：代码兜底放行，静默推进（不再单独弹「结构没问题」）。
+    }
+
     const confirmResult = runConfirmAction(workflow);
     logAgent(request.diagnostics, {
       sessionId,
@@ -110,7 +149,7 @@ export async function runTsnAgent(requestOrIntent: TsnAgentRequest | string): Pr
       },
     });
 
-    // 无「带原话」标记 → 纯确定性确认（推进 / time-sync 自动生成 / 无操作），直接返回。
+    // 无「带原话」标记 → 纯确定性确认（推进 / time-sync 自动生成 / 无操作），直接返回（静默推进）。
     if (!confirmResult.carryIntent) {
       return confirmResult;
     }
@@ -243,6 +282,24 @@ export async function runTsnAgent(requestOrIntent: TsnAgentRequest | string): Pr
 }
 
 // ---------- 阶段推进（确定性） ----------
+
+// 结构校验未通过时的对话文案：可修复语气（非"出错了"）+ 问题清单 + 可操作引导 + 口径。
+// 结构化 verdict 另随 result.verification 回传，由 chat-pane 区分渲染（U4）。
+function composeVerificationBlockText(verdict: TopologyVerifyResult): string {
+  // 远端连不上（环境问题）：不说拓扑错、不列问题清单当拓扑错（U5 据 code 走中性外观）。
+  if (verdict.errors.some((error) => error.code === "inet_unreachable")) {
+    return [
+      "校验暂时无法运行：连不上远端 INET，右侧工程保持原状态，未推进。",
+      "请检查网络 / 远端后再点「确认并继续」。",
+    ].join("\n");
+  }
+  const problems = verdict.errors.map((error) => `· ${error.messageZh}`);
+  const head =
+    verdict.caliber === "loadability_only"
+      ? "拓扑在 INET 上还跑不起来，先修好再继续（仅能加载运行）："
+      : "拓扑还差一点，先修好再继续（仅结构级）：";
+  return [head, ...problems, "改好后再点「确认并继续」。"].join("\n");
+}
 
 // 确认按钮的确定性入口：先处理待确认的破坏性回退，否则普通推进。切阶段本身不走大模型；
 // 但回退「带原话」时返回 carryIntent，由 runTsnAgent 在切换后的阶段用原话自动跑一轮大模型。

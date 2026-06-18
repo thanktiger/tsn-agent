@@ -199,6 +199,7 @@ export function App() {
                 ...message,
                 content: redactProviderNamesForDisplay(result.assistantText),
                 toolCalls: result.toolCalls,
+                verification: result.verification,
               }
             : message,
         ),
@@ -382,7 +383,9 @@ export function App() {
         <div className="brand-spacer" />
       </header>
 
-      {isAgentRunning && <AgentRunStatusBar elapsedSeconds={agentRunElapsedSeconds} phase={agentRunPhase} />}
+      {isAgentRunning && (
+        <AgentRunStatusBar elapsedSeconds={agentRunElapsedSeconds} phase={agentRunPhase} />
+      )}
 
       <main className="project-layout">
         <WorkspaceTools

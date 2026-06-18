@@ -458,56 +458,26 @@ pub async fn validate(
         return resp;
     }
 
-    // 兼容：未传 topology 时，沿用 U4a-1 行为做 P0 表层 dangling link 检测。
+    // 未传 topology = 验**库内已落库**拓扑：跑与确认过关闸（verify_topology 命令）同一套完整
+    // 结构校验（连通/端口配对/孤立/可达/角色/编号重复），让 agent 每次操作拓扑后调它就拿到
+    // 与确认闸一致的中文结论、当场反馈给用户。带 topology 草稿则走下面的 schema 级校验。
     let Some(topology) = req.topology else {
-        let mut errors = Vec::new();
-        let mut warnings = Vec::new();
-        let node_count: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM topology_nodes WHERE session_id = ?")
-                .bind(&req.session_id)
-                .fetch_one(&state.pool)
-                .await
-                .unwrap_or(0);
-        if node_count == 0 {
-            warnings.push("topology has no nodes yet".to_string());
-        }
-        let dangling: Vec<(String, String)> = sqlx::query(
-            r#"SELECT l.src_sync_name, l.dst_sync_name FROM topology_links l
-               WHERE l.session_id = ?
-                 AND (
-                   NOT EXISTS (SELECT 1 FROM topology_nodes n
-                               WHERE n.session_id = l.session_id AND n.sync_name = l.src_sync_name)
-                   OR
-                   NOT EXISTS (SELECT 1 FROM topology_nodes n
-                               WHERE n.session_id = l.session_id AND n.sync_name = l.dst_sync_name)
-                 )"#,
+        let summary = match crate::topology_query_command::load_and_verify_topology(
+            &state.pool,
+            &req.session_id,
         )
-        .bind(&req.session_id)
-        .fetch_all(&state.pool)
         .await
-        .map(|rows| {
-            rows.into_iter()
-                .map(|r| (r.get::<String, _>("src_sync_name"), r.get::<String, _>("dst_sync_name")))
-                .collect()
-        })
-        .unwrap_or_default();
-        for (src, dst) in dangling {
-            errors.push(format!("link references missing node(s): {src}->{dst}"));
-        }
-        let ok = errors.is_empty();
-        return (
-            StatusCode::OK,
-            Json(json!({
-                "ok": ok,
-                "summary": {
-                    "valid": ok,
-                    "errors": errors,
-                    "warnings": warnings,
-                    "source": "p0_tables",
-                }
-            })),
-        )
-            .into_response();
+        {
+            Ok(result) => json!({
+                "valid": result.ok,
+                "errors": result.errors.iter().map(|e| e.message_zh.clone()).collect::<Vec<_>>(),
+                "caliber": result.caliber,
+                "source": "p0_structural",
+            }),
+            Err(e) => json!({ "valid": false, "errors": [e], "source": "p0_structural" }),
+        };
+        let ok = summary.get("valid").and_then(Value::as_bool).unwrap_or(false);
+        return (StatusCode::OK, Json(json!({ "ok": ok, "summary": summary }))).into_response();
     };
 
     let report = validate_intermediate_topology(&topology);

@@ -11,6 +11,20 @@ import { ToolCallCard } from "./tool-call-card";
 const INTENT_PLACEHOLDER = "例如：我需要 4 个交换机，每个交换机连接 5 个端系统";
 const STEPPER_STEPS = ["topology", "time-sync", "flow-template", "planning-export"] as const;
 
+/** 验证口径 → 给用户看的中文标签（"绿/红"永远带它出现，杜绝误读为时延已保证）。 */
+function caliberLabel(caliber: string): string {
+  switch (caliber) {
+    case "structural_only":
+      return "仅结构级";
+    case "loadability_only":
+      return "仅能加载运行";
+    case "schedulability":
+      return "已验可调度性";
+    default:
+      return "未知口径";
+  }
+}
+
 export interface ChatPaneProps {
   scenarioConfig: ScenarioConfig;
   workflow: WorkflowState;
@@ -72,15 +86,34 @@ export function ChatPane({
       </div>
 
       <div className="messages" aria-live="polite" ref={scrollContainerRef}>
-        {messages.map((message) => (
+        {messages.map((message) => {
+          // 结构验证未通过的消息区分渲染：让用户一眼看出是"被拦下、去修"而非普通建议。
+          const verifyBlock =
+            message.role === "assistant" && message.verification && !message.verification.ok
+              ? message.verification
+              : undefined;
+          // 远端连不上（inet_unreachable）是环境问题：走中性「暂时无法验证」外观，不套红「验证未通过」
+          // （否则误导用户去改一个其实没问题的拓扑）。结构错 / 跑不起来才走红 block。
+          const isEnvIssue = verifyBlock?.errors.some((error) => error.code === "inet_unreachable") ?? false;
+          const showRedBlock = Boolean(verifyBlock) && !isEnvIssue;
+          return (
           <article
             className={[
               message.role === "user" ? "msg-user" : "msg-agent",
+              showRedBlock ? "msg-verify-block" : "",
+              verifyBlock && isEnvIssue ? "msg-verify-pending" : "",
               message.id === pendingAssistantMessageId ? "pending" : "",
             ].filter(Boolean).join(" ")}
             key={message.id}
           >
             <span className="message-role">{message.role === "user" ? "USER" : "AGENT"}</span>
+            {verifyBlock && (
+              <div className="verify-header">
+                <span className={isEnvIssue ? "caliber-chip caliber-pending" : "caliber-chip caliber-block"}>
+                  {isEnvIssue ? "暂时无法验证" : "验证未通过"} · {caliberLabel(verifyBlock.caliber)}
+                </span>
+              </div>
+            )}
             {/* Plan 2026-06-10-001 U5：工具事件常先于首个文本 chunk（此时仍是 pending
                 态）——卡片在两个分支都渲染；pending 时卡片在上、等待指示器在下。 */}
             {message.role === "assistant" && message.toolCalls && message.toolCalls.length > 0 && (
@@ -103,7 +136,8 @@ export function ChatPane({
               <p>{message.content}</p>
             )}
           </article>
-        ))}
+          );
+        })}
       </div>
 
       <div className="composer">
@@ -182,7 +216,13 @@ export function ChatPane({
   );
 }
 
-export function AgentRunStatusBar({ elapsedSeconds, phase }: { elapsedSeconds: number; phase: AgentRunPhase }) {
+export function AgentRunStatusBar({
+  elapsedSeconds,
+  phase,
+}: {
+  elapsedSeconds: number;
+  phase: AgentRunPhase;
+}) {
   const message = getAgentRunStatusMessage(phase);
 
   return (

@@ -166,7 +166,7 @@ describe("claude-agent-worker", () => {
     const [skeleton, guidance] = capturedSystemPrompt.split("<<<SKILL_GUIDANCE>>>");
     expect(skeleton).toContain("工程状态只接受结构化校验结果");
     // KTD8 迁入骨架的协议不变量（骨架是唯一载体，回退即丢失）。
-    expect(skeleton).toContain("不要再调用 topology_validate 复检");
+    expect(skeleton).toContain("apply_operations 改动拓扑后，调 topology_validate（不传参数）");
     expect(skeleton).toContain("逐字节复用上一次的同一 operations");
     // U5：切阶段工具规则在骨架里（前进=确认按钮、回退=工具）。
     expect(skeleton).toContain("request_stage_change");

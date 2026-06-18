@@ -51,7 +51,7 @@ description: TSN Agent 拓扑阶段主索引。承载场景无关的领域语义
 2. 调用 `mcp__tsn_topology__topology_describe_templates`（带 `scenario` 参数）获取模板目录与参数 schema（字段名与**合法域**以该返回为准）。
 3. 按场景 reference 的「模板选择」与「规范图 preset 表」确定 `templateId` 与参数，**显式**传给 `mcp__tsn_topology__topology_initialize`；它写入工程数据库并返回 `mutationId`（右侧据此落图），同时替换该会话已有拓扑。
 4. 落库结果用 `mcp__tsn_topology__topology_inspect` 查看。
-5. 用中文说明当前拓扑摘要并等待用户确认。
+5. 用中文说明当前拓扑摘要并等待用户确认（`initialize` 已校验落库，无需再 validate 复检）。
 
 ## 已有拓扑编辑路径
 
@@ -61,8 +61,17 @@ description: TSN Agent 拓扑阶段主索引。承载场景无关的领域语义
 2. 在 rows 中按 name/nodeType/连接关系定位目标节点与链路，得到精确的 syncName / linkSeq；如用户引用不唯一，先用中文数字编号选项向用户澄清。定位时按上文「显示名映射」匹配。
 3. 构造原子 operations（如插入交换机 = `[link_delete, node_add, link_add, link_add]`）：新节点的 `nodeType` 复制 inspect 返回的同类节点原文，新链路的 `stylesJson` 参照既有链路、`srcSyncName`/`dstSyncName` 填两端节点的 syncName；新 `syncName`/`linkSeq` 必须避开 rows 中已占用的值。
 4. 调用 `mcp__tsn_topology__topology_apply_operations`；不把 rows 或 changeSet 写进对话。
+5. 按下文「结构验证」验一遍库内结构，把结论告诉用户。
 
 支持的 op：`node_add` / `node_update` / `node_delete` / `link_add` / `link_delete`（字段 camelCase，详见工具 schema）。「移动节点」「改属性」用 `node_update`；`node_add` 撞已占用 syncName 会报 `SYNC_NAME_TAKEN`。
+
+## 结构验证（apply_operations 改动拓扑后必做）
+
+每次 `topology_apply_operations` 改动拓扑后，调用 `mcp__tsn_topology__topology_validate`（**不传任何参数**）验证库内已落库拓扑的结构：连通性、端口配对、孤立节点、转发可达、节点角色、编号重复。（`initialize` 已校验落库，不必复检。）
+
+- `summary.errors[]`（中文）非空 → **如实把问题逐条告诉用户、让其修**，不要声称结构没问题。
+- `errors[]` 为空 → 结构没问题（仅结构级），简短带过即可。
+- 这是 `仅结构级` 校验：只代表结构连通可达，**不**代表时延/调度已验（那是后续阶段的事）。
 
 ## 回复边界
 

@@ -87,9 +87,12 @@ export function createTopologyToolRegistry(): TopologyMcpToolDefinition[] {
       allowedToolName: "mcp__tsn_topology__topology_validate",
       title: "Validate intermediate topology",
       description:
-        "Validate a full topology draft JSON (must include schemaVersion/nodes/links) and return structured errors. "
-        + "Do NOT call this after topology.initialize: initialize already validates and persists, and its return "
-        + "(mutationId/summary) is not a topology. Use topology.inspect to read persisted rows.",
+        "Validate the session's topology. Call with NO arguments to check the PERSISTED (already-applied) topology — "
+        + "this runs the full structural check (connectivity, port pairing, isolated nodes, forwarding reachability, "
+        + "node roles, duplicate ids) and returns Chinese summary.errors[] you MUST relay to the user. Call it after "
+        + "each round of apply_operations to confirm structure is sound and tell the user the result. "
+        + "(Passing a full draft JSON instead runs schema-level validation only.) "
+        + "Do NOT call right after topology.initialize — it already validates+persists.",
       inputSchema: {
         topology: z.unknown().optional(),
       },
