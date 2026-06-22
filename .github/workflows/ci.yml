@@ -37,6 +37,9 @@ jobs:
       - name: Biome (lint + format)
         run: npm run lint
 
+      - name: Type check (tsc)
+        run: npx tsc --noEmit
+
       - name: Install Linux dependencies (for clippy)
         run: |
           sudo apt-get update
