@@ -20,6 +20,8 @@ import {
   requestStageChangeTool,
   runClaude,
   TOPOLOGY_MCP_ALLOWED_TOOLS,
+  UNDO_TOOL_NAME,
+  undoLastChangeTool,
 } from "./claude-agent-worker.mjs";
 import { TOPOLOGY_MCP_ALLOWED_TOOLS as REGISTRY_TOPOLOGY_MCP_ALLOWED_TOOLS } from "./mcp/topology-tools";
 
@@ -58,6 +60,14 @@ async function* messages(items) {
   }
 }
 
+function restoreEnv(key, value) {
+  if (value === undefined) {
+    delete process.env[key];
+  } else {
+    process.env[key] = value;
+  }
+}
+
 describe("claude-agent-worker", () => {
   // 回归：打包路径 "TSN Agent.app" 含空格，旧 new URL().pathname 保留 %20 导致 entry
   // 自检失配、runWorker 永不执行、worker 静默 exit 0（dev 路径无空格故从未暴露）。
@@ -90,6 +100,7 @@ describe("claude-agent-worker", () => {
         "Read",
         REQUEST_STAGE_CHANGE_TOOL_NAME,
         ...TOPOLOGY_MCP_ALLOWED_TOOLS,
+        UNDO_TOOL_NAME,
       ]);
       expect(input.options.settingSources).toEqual(["user", "project"]);
       expect(input.options.skills).toEqual(["tsn-topology", "tsn-flow-planning"]);
@@ -99,6 +110,7 @@ describe("claude-agent-worker", () => {
         "Read",
         REQUEST_STAGE_CHANGE_TOOL_NAME,
         ...TOPOLOGY_MCP_ALLOWED_TOOLS,
+        UNDO_TOOL_NAME,
       ]);
       expect(input.options.mcpServers.tsn_topology).toMatchObject({
         type: "stdio",
@@ -565,6 +577,62 @@ describe("claude-agent-worker", () => {
     // 拓扑写工具只在拓扑阶段开放——非拓扑阶段直写库的结果不会被对账，会让工程与 workflow 静默分叉。
     expect(topologyStage).toContain("mcp__tsn_topology__topology_apply_operations");
     expect(timeSyncStage).not.toContain("mcp__tsn_topology__topology_apply_operations");
+  });
+
+  it("U6: undo tool is whitelisted only in the topology stage (not in other stages)", () => {
+    const topologyStage = buildAllowedToolsForStage({ stage: "topology" }, true);
+    const timeSyncStage = buildAllowedToolsForStage({ stage: "time-sync" }, true);
+    const flowStage = buildAllowedToolsForStage({ stage: "flow-template" }, true);
+    expect(topologyStage).toContain(UNDO_TOOL_NAME);
+    // 本期只撤 topology——在时间同步 / 流量规划阶段撤销会错误回退拓扑。
+    expect(timeSyncStage).not.toContain(UNDO_TOOL_NAME);
+    expect(flowStage).not.toContain(UNDO_TOOL_NAME);
+  });
+
+  it("U6: undo tool stays available in the topology stage even when the topology stdio host is unresolved", () => {
+    // 撤销 in-process（不连 tsn_topology stdio server），故只门控 stage、不门控 hasTopologyMcpConfig。
+    const topologyStage = buildAllowedToolsForStage({ stage: "topology" }, false);
+    expect(topologyStage).toContain(UNDO_TOOL_NAME);
+    expect(topologyStage).not.toContain("mcp__tsn_topology__topology_apply_operations");
+  });
+
+  it("U6: undo tool is defined as undo_last_change with the expected mcp name", () => {
+    expect(undoLastChangeTool.name).toBe("undo_last_change");
+    expect(UNDO_TOOL_NAME).toBe("mcp__tsn_workflow__undo_last_change");
+  });
+
+  it("U6: undo tool handler calls the sidecar undo route and passes through the structured result", async () => {
+    const previousEnv = {
+      url: process.env.TSN_AGENT_DB_RPC_URL,
+      token: process.env.TSN_AGENT_DB_RPC_TOKEN,
+      sessionId: process.env.TSN_AGENT_SESSION_ID,
+    };
+    process.env.TSN_AGENT_DB_RPC_URL = "http://127.0.0.1:65535";
+    process.env.TSN_AGENT_DB_RPC_TOKEN = "test-token";
+    process.env.TSN_AGENT_SESSION_ID = "session-undo";
+
+    const sidecarBody = { ok: true, undone: true, summary: { mutationId: 9 } };
+    const fetchMock = vi.fn(async (url, init) => {
+      expect(url).toBe("http://127.0.0.1:65535/db/topology/undo");
+      expect(init.method).toBe("POST");
+      // 无参 undo：sessionId 由 fetchSidecar 从 env 注入，工具 handler 不传任何 body。
+      expect(JSON.parse(init.body)).toEqual({ sessionId: "session-undo" });
+      return new Response(JSON.stringify(sidecarBody), { status: 200 });
+    });
+    const previousFetch = globalThis.fetch;
+    globalThis.fetch = fetchMock;
+
+    try {
+      const result = await undoLastChangeTool.handler({}, {});
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const payload = JSON.parse(result.content[0].text);
+      expect(payload).toEqual({ ok: true, status: 200, body: sidecarBody });
+    } finally {
+      globalThis.fetch = previousFetch;
+      restoreEnv("TSN_AGENT_DB_RPC_URL", previousEnv.url);
+      restoreEnv("TSN_AGENT_DB_RPC_TOKEN", previousEnv.token);
+      restoreEnv("TSN_AGENT_SESSION_ID", previousEnv.sessionId);
+    }
   });
 
   it("U2: extracts a stage-change proposal in a non-topology stage (no stage gate)", () => {
@@ -1140,6 +1208,7 @@ describe("claude-agent-worker", () => {
       "Read",
       REQUEST_STAGE_CHANGE_TOOL_NAME,
       ...TOPOLOGY_MCP_ALLOWED_TOOLS,
+      UNDO_TOOL_NAME,
     ]);
     expect(audit.sdkOptions.skills).toEqual(["tsn-topology", "tsn-flow-planning"]);
     expect(audit.toolCalls.map((call) => call.text).join("\n")).toContain(
