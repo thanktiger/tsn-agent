@@ -40,6 +40,12 @@ export interface WorkflowState {
    * 切阶段是确定性的，但随即用这句原话在新阶段自动跑一轮大模型——免去用户重输。
    */
   pendingStageChangeIntent?: string;
+  /**
+   * 画布「撤销」按钮（带外）回退成功后置的一次性标志：下一轮会话上下文注入一段
+   * 通用回退通知，提示大模型编辑/回答前先 topology.inspect。注入后立即清位（一次性），
+   * 且不随 session payload 持久化（normalizeWorkflowState 显式 drop），避免重启还原出过期通知。
+   */
+  pendingUndoNotice?: boolean;
 }
 
 export type WorkflowAction =
@@ -118,6 +124,8 @@ export function normalizeWorkflowState(
             : {}),
         }
       : {}),
+    // pendingUndoNotice 显式不复制：撤销回退通知是一次性带外标志，不得随 session payload
+    // 持久化，否则崩溃-未消费-重启后会还原出过期通知。它只在内存里活到下一轮注入即清。
   };
 }
 
@@ -164,6 +172,16 @@ export function clearPendingStageChange(workflow: WorkflowState): WorkflowState 
   }
 
   const { pendingStageChange: _drop, pendingStageChangeIntent: _dropIntent, ...rest } = workflow;
+  return rest;
+}
+
+// 撤销回退通知一次性消费：注入进会话上下文后立即清位，避免下一轮重复注入。
+export function clearPendingUndoNotice(workflow: WorkflowState): WorkflowState {
+  if (!workflow.pendingUndoNotice) {
+    return workflow;
+  }
+
+  const { pendingUndoNotice: _drop, ...rest } = workflow;
   return rest;
 }
 

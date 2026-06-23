@@ -374,6 +374,41 @@ describe("runTsnAgent", () => {
     expect(context).not.toContain("[工具]");
   });
 
+  it("injects the undo-rollback notice when pendingUndoNotice is set (U7)", async () => {
+    enableTauriRuntime();
+    mockTauriCommands({ claude: { assistantText: "好的。", sessionId: "claude-session-1" } });
+    const { runTsnAgent } = await import("./agent-adapter");
+
+    const result = await runTsnAgent({
+      userIntent: "现在有几个交换机？",
+      session: sessionWithWorkflow({ ...createInitialWorkflowState(), pendingUndoNotice: true }),
+    });
+
+    const call = invokeMock.mock.calls.find(([command]) => command === "run_claude_agent");
+    const context = (call?.[1] as { request: { conversationContext: string } }).request
+      .conversationContext;
+    expect(context).toContain("上一步拓扑变更已被撤销");
+    expect(context).toContain("topology.inspect");
+    // 一次性：注入后标志从返回的 workflow 清除，避免下一轮重复注入。
+    expect(result.workflow.pendingUndoNotice).toBeUndefined();
+  });
+
+  it("omits the undo-rollback notice when pendingUndoNotice is absent (U7)", async () => {
+    enableTauriRuntime();
+    mockTauriCommands({ claude: { assistantText: "好的。", sessionId: "claude-session-1" } });
+    const { runTsnAgent } = await import("./agent-adapter");
+
+    await runTsnAgent({
+      userIntent: "现在有几个交换机？",
+      session: sessionWithWorkflow(createInitialWorkflowState()),
+    });
+
+    const call = invokeMock.mock.calls.find(([command]) => command === "run_claude_agent");
+    const context = (call?.[1] as { request: { conversationContext: string } }).request
+      .conversationContext;
+    expect(context).not.toContain("上一步拓扑变更已被撤销");
+  });
+
   it("returns empty toolCalls on the deterministic confirm path (U4)", async () => {
     enableTauriRuntime();
     mockTauriCommands();
