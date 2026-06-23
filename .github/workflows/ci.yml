@@ -62,5 +62,10 @@ jobs:
       - name: rustfmt --check
         run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
 
+      # tauri.conf.json 把 src-node/dist/claude-runtime/ 当打包资源，构建脚本编译时校验该目录存在。
+      # clippy 会跑构建脚本，但 lint job 不跑 build:worker（不需要 208MB 的真 binary），故建一个空目录占位即可过校验。
+      - name: Stub tauri claude-runtime resource (for clippy build script)
+        run: mkdir -p src-node/dist/claude-runtime
+
       - name: clippy -D warnings
         run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
