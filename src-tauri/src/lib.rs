@@ -21,6 +21,8 @@ mod topology_position_command;
 mod topology_query_command;
 mod topology_sidecar;
 mod topology_sidecar_routes;
+mod topology_undo;
+mod topology_undo_command;
 mod topology_verify;
 
 #[tauri::command]
@@ -94,6 +96,7 @@ pub fn run() {
             topology_backfill::view_session_payload,
             topology_mutations_command::get_topology_mutations_since,
             topology_position_command::update_node_position,
+            topology_undo_command::undo_topology,
             topology_query_command::query_topology,
             topology_query_command::verify_topology,
             inet_verify_command::verify_inet, // 暂未接前端：INET 验证挪到后续流量规划阶段，保留作其基础，勿当死代码删
@@ -110,10 +113,10 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("failed to build TSN Agent")
         .run(|app_handle, event| {
-            if matches!(event, tauri::RunEvent::Exit) {
-                if let Some(handle) = app_handle.try_state::<topology_sidecar::SidecarHandle>() {
-                    handle.shutdown();
-                }
+            if matches!(event, tauri::RunEvent::Exit)
+                && let Some(handle) = app_handle.try_state::<topology_sidecar::SidecarHandle>()
+            {
+                handle.shutdown();
             }
         });
 }

@@ -4,6 +4,7 @@ import {
   type WorkflowStageSummary,
 } from "../agent/workflow-stage-result";
 import {
+  clearPendingUndoNotice,
   confirmCurrentStage,
   createInitialWorkflowState,
   normalizeWorkflowState,
@@ -102,6 +103,24 @@ describe("workflow state machine", () => {
       normalizeWorkflowState({ ...base, pendingStageChange: "bogus-stage" as never })
         .pendingStageChange,
     ).toBeUndefined();
+  });
+
+  it("drops pendingUndoNotice when normalizing (one-shot flag must not persist)", () => {
+    const base = createInitialWorkflowState();
+    const normalized = normalizeWorkflowState({ ...base, pendingUndoNotice: true });
+
+    expect(normalized.pendingUndoNotice).toBeUndefined();
+    expect("pendingUndoNotice" in normalized).toBe(false);
+  });
+
+  it("clearPendingUndoNotice drops the flag and is a no-op when absent", () => {
+    const base = createInitialWorkflowState();
+    const cleared = clearPendingUndoNotice({ ...base, pendingUndoNotice: true });
+
+    expect(cleared.pendingUndoNotice).toBeUndefined();
+    expect("pendingUndoNotice" in cleared).toBe(false);
+    // 未置位时原样返回（同一引用）。
+    expect(clearPendingUndoNotice(base)).toBe(base);
   });
 
   it("preserves existing stage summaries when normalizing", () => {

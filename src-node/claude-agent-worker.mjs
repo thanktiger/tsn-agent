@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { createSdkMcpServer, query, tool } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import { createTopologyWorkflowStageResult } from "../src/agent/topology-workflow-stage-result";
+import { fetchSidecar } from "./mcp/sidecar-client";
 
 const TOPOLOGY_MCP_SERVER_NAME = "tsn_topology";
 export const TOPOLOGY_MCP_ALLOWED_TOOLS = [
@@ -24,6 +25,10 @@ export const TOPOLOGY_MCP_ALLOWED_TOOLS = [
 // 大模型的「想回到哪个阶段」结构化返回；返回值经 stageResults 同款通道回传给应用层。
 const WORKFLOW_MCP_SERVER_NAME = "tsn_workflow";
 export const REQUEST_STAGE_CHANGE_TOOL_NAME = `mcp__${WORKFLOW_MCP_SERVER_NAME}__request_stage_change`;
+// U6（单步撤销）：撤销工具也是 in-process（跑在 worker 主进程的 tsn_workflow server），
+// handler 直接调 sidecar undo route——fetchSidecar 读 worker 自己进程的 env（sessionId
+// 由 commands.rs 注入），无需传参。与 tsn_topology stdio 子进程工具不同，不走 buildTopologyMcpEnv 透传。
+export const UNDO_TOOL_NAME = `mcp__${WORKFLOW_MCP_SERVER_NAME}__undo_last_change`;
 
 export const requestStageChangeTool = tool(
   "request_stage_change",
@@ -49,10 +54,32 @@ export const requestStageChangeTool = tool(
   }),
 );
 
+export const undoLastChangeTool = tool(
+  "undo_last_change",
+  "用户说「撤销/回退刚才那步」时调用本工具，把上一次结构性拓扑改动（apply_operations / initialize）盖回到改动前的快照。无参数：会话由运行环境注入。指代不清（不确定要撤销哪一步、或上一步是不是用户想撤的）时，先用中文编号选项问清楚再调，不要擅自撤销。本工具不设单独确认闸，调用即直接执行；调用后工程库已回退，回答或继续编辑前先用 topology.inspect 重新确认当前拓扑，勿假设上一轮改动仍在。",
+  {},
+  async () => {
+    const result = await fetchSidecar("/db/topology/undo", {});
+    // 解包 fetchSidecar 信封，对齐其它 sidecar 工具的契约：成功直接给 body（{ok,undone,summary}），
+    // 失败给 {ok:false,errors:[...]}，而不是把 {ok,status,body} 整个信封丢给大模型（弱模型易误读）。
+    const payload = result.ok
+      ? result.body
+      : { ok: false, errors: [{ code: result.code, message: result.message }] };
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(payload),
+        },
+      ],
+    };
+  },
+);
+
 const workflowMcpServer = createSdkMcpServer({
   name: WORKFLOW_MCP_SERVER_NAME,
   version: "1.0.0",
-  tools: [requestStageChangeTool],
+  tools: [requestStageChangeTool, undoLastChangeTool],
 });
 
 export const responseSchema = {
@@ -479,6 +506,10 @@ export function buildAllowedToolsForStage(stageRunnerInput, hasTopologyMcpConfig
     // 拓扑写工具只在拓扑阶段开放：非拓扑阶段直接写库的结果不会被对账（提取按 stage 门槛），
     // 会让右侧工程与 workflow 状态静默分叉。改拓扑须先经切阶段工具回到拓扑阶段。
     ...(hasTopologyMcpConfig && stage === "topology" ? TOPOLOGY_MCP_ALLOWED_TOOLS : []),
+    // U6：撤销工具只在拓扑阶段开放（不像 request_stage_change 全阶段）——本期只撤 topology，
+    // 在时间同步 / 流量规划阶段撤销会错误回退拓扑。撤销 in-process 不依赖拓扑 stdio server，
+    // 故只门控 stage（不门控 hasTopologyMcpConfig）。
+    ...(stage === "topology" ? [UNDO_TOOL_NAME] : []),
   ];
 }
 

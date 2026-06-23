@@ -282,10 +282,11 @@ impl RemoteRunner for SshRunner {
 fn resolve_remote_bin(name: &str, env_override: &str) -> std::ffi::OsString {
     use std::ffi::OsString;
     use std::path::Path;
-    if let Some(p) = std::env::var_os(env_override) {
-        if !p.is_empty() && Path::new(&p).exists() {
-            return p;
-        }
+    if let Some(p) = std::env::var_os(env_override)
+        && !p.is_empty()
+        && Path::new(&p).exists()
+    {
+        return p;
     }
     for c in [
         format!("/usr/bin/{name}"),

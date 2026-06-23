@@ -254,6 +254,11 @@ async fn persist_initialized_topology(
         .map_err(|e| format!("begin failed: {e}"))?;
     let conn: &mut sqlx::SqliteConnection = &mut tx;
 
+    // 写前快照：在同事务、三表 DELETE 之前留 pre-image（整图重置可撤）。
+    crate::topology_undo::snapshot_pre_image(&mut *conn, session_id)
+        .await
+        .map_err(|e| format!("undo snapshot failed: {e}"))?;
+
     for table in ["topology_nodes", "topology_links", "topology_refs"] {
         sqlx::query(&format!("DELETE FROM {table} WHERE session_id = ?"))
             .bind(session_id)
@@ -502,21 +507,21 @@ pub async fn validate(
         let current_mutation_id = state
             .mutation_buffer
             .latest_mutation_id_for_session(&req.session_id);
-        if let Ok(cache) = state.last_validated_ok.lock() {
-            if validate_cache_hit(&cache, &req.session_id, current_mutation_id) {
-                let summary = json!({
-                    "valid": true,
-                    "errors": [],
-                    "caliber": crate::topology_verify::CALIBER_STRUCTURAL_ONLY,
-                    "source": "p0_structural",
-                    "cached": true,
-                });
-                return (
-                    StatusCode::OK,
-                    Json(json!({ "ok": true, "summary": summary })),
-                )
-                    .into_response();
-            }
+        if let Ok(cache) = state.last_validated_ok.lock()
+            && validate_cache_hit(&cache, &req.session_id, current_mutation_id)
+        {
+            let summary = json!({
+                "valid": true,
+                "errors": [],
+                "caliber": crate::topology_verify::CALIBER_STRUCTURAL_ONLY,
+                "source": "p0_structural",
+                "cached": true,
+            });
+            return (
+                StatusCode::OK,
+                Json(json!({ "ok": true, "summary": summary })),
+            )
+                .into_response();
         }
         let summary = match crate::topology_query_command::load_and_verify_topology(
             &state.pool,
@@ -671,6 +676,18 @@ pub async fn apply_operations(
         }
     };
 
+    // 写前快照：在同事务、首个 apply_op 之前留 pre-image。dry-run 分支
+    // rollback 时此快照随事务一并丢弃，无需额外清理（R4）。
+    if let Err(e) = crate::topology_undo::snapshot_pre_image(&mut tx, &req.session_id).await {
+        let _ = tx.rollback().await;
+        return structured_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DATABASE_ERROR",
+            &e.to_string(),
+            true,
+        );
+    }
+
     let mut applied = Vec::with_capacity(req.operations.len());
     for op in &req.operations {
         match apply_op(&mut tx, &req.session_id, op).await {
@@ -738,6 +755,59 @@ pub async fn apply_operations(
         }),
     )
         .into_response()
+}
+
+// ---------- undo ----------
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UndoRequest {
+    session_id: String,
+}
+
+/// 单步撤销：调撤销核心 `restore_pre_image`，有快照则盖回三表 + push + emit；
+/// 无快照回结构化「无可撤销」（ok=true, undone=false）。两入口共用核心，
+/// push/emit 留在调用点（KTD2/KTD4）；前端经 emit 信号全量 refetch（KTD5）。
+pub async fn undo(State(state): State<Arc<RouteState>>, Json(req): Json<UndoRequest>) -> Response {
+    if let Err(resp) = require_session(&state.pool, &req.session_id).await {
+        return resp;
+    }
+
+    match crate::topology_undo::restore_pre_image(&state.pool, &req.session_id).await {
+        Ok(true) => {
+            let record = state
+                .mutation_buffer
+                .push(req.session_id.clone(), "topology".to_string());
+            (state.emit)(record.clone());
+            (
+                StatusCode::OK,
+                Json(json!({
+                    "ok": true,
+                    "undone": true,
+                    "summary": {
+                        "sessionId": req.session_id,
+                        "mutationId": record.mutation_id,
+                    },
+                })),
+            )
+                .into_response()
+        }
+        Ok(false) => (
+            StatusCode::OK,
+            Json(json!({
+                "ok": true,
+                "undone": false,
+                "summary": { "sessionId": req.session_id },
+            })),
+        )
+            .into_response(),
+        Err(e) => structured_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DATABASE_ERROR",
+            &e.to_string(),
+            true,
+        ),
+    }
 }
 
 // ---------- helpers ----------

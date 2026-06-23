@@ -482,7 +482,7 @@ fn layout_line_ends_only(switch_count: usize) -> LineEndsOnlyLayout {
     let switch_position = |index: usize| -> IntermediatePosition {
         let row = index / row_capacity;
         let col = index % row_capacity;
-        let x = if row % 2 == 0 {
+        let x = if row.is_multiple_of(2) {
             LINE_X_BASE + LINE_X_PITCH * col as f64
         } else {
             let row0_last_x = LINE_X_BASE + LINE_X_PITCH * (row_capacity as f64 - 1.0);
@@ -504,7 +504,7 @@ fn layout_line_ends_only(switch_count: usize) -> LineEndsOnlyLayout {
         y: first_pos.y,
     };
     // 末行行向：偶数行向右伸，奇数行（反向行）向左伸。
-    let last_end_system = if last_row % 2 == 0 {
+    let last_end_system = if last_row.is_multiple_of(2) {
         IntermediatePosition {
             x: last_pos.x + LINE_ES_GAP,
             y: last_pos.y,
@@ -1287,10 +1287,10 @@ fn create_dual_plane_redundant_topology(
     let mut seen_switch: HashSet<String> = HashSet::new();
     for g in &params.switch_groups {
         for sid in [&g.plane_switches.a, &g.plane_switches.b] {
-            if let Some(sw) = switch_by_id.get(sid) {
-                if seen_switch.insert(sid.clone()) {
-                    ordered_switches.push(sw);
-                }
+            if let Some(sw) = switch_by_id.get(sid)
+                && seen_switch.insert(sid.clone())
+            {
+                ordered_switches.push(sw);
             }
         }
     }
@@ -1378,8 +1378,7 @@ fn create_dual_plane_redundant_topology(
     let mut numeric_node_id: i64 = 0;
     // U12：统一命名——无显式 name 时按 {类型前缀}+序号派生（交换机 SW-、端系统 ES-），
     // 不再回退节点 id（旧行为落库 name=sw1/e1，与 generic 的 SW-N/ES-N 分裂）。
-    let mut sw_ordinal: i64 = 1;
-    for sw in &ordered_switches {
+    for (sw_ordinal, sw) in (1_i64..).zip(&ordered_switches) {
         nodes.push(IntermediateNode {
             id: sw.id.clone(),
             numeric_id: numeric_node_id,
@@ -1394,11 +1393,9 @@ fn create_dual_plane_redundant_topology(
             ip_address: None,
         });
         numeric_node_id += 1;
-        sw_ordinal += 1;
     }
     let mut within_group: HashMap<String, usize> = HashMap::new();
-    let mut es_ordinal: i64 = 1;
-    for es in &ordered_es {
+    for (es_ordinal, es) in (1_i64..).zip(&ordered_es) {
         let gidx = *group_index.get(&es.group_id).unwrap_or(&0);
         let wi = {
             let counter = within_group.entry(es.group_id.clone()).or_insert(0);
@@ -1420,7 +1417,6 @@ fn create_dual_plane_redundant_topology(
             ip_address: Some(format!("10.0.{}.{}", gidx + 1, wi + 1)),
         });
         numeric_node_id += 1;
-        es_ordinal += 1;
     }
 
     // 构建链路：first-free 端口游标（每节点）。
@@ -1871,17 +1867,17 @@ fn validate_link_values(
             .get("target")
             .and_then(|t| t.get("nodeId"))
             .and_then(Value::as_str);
-        if let (Some(a), Some(b)) = (src_node, dst_node) {
-            if a == b {
-                errors.push(TopologyErrorOut::new(
-                    "SELF_LINK",
-                    format!(
-                        "Link {} cannot connect a node to itself.",
-                        id_str.as_deref().unwrap_or("")
-                    ),
-                    &path,
-                ));
-            }
+        if let (Some(a), Some(b)) = (src_node, dst_node)
+            && a == b
+        {
+            errors.push(TopologyErrorOut::new(
+                "SELF_LINK",
+                format!(
+                    "Link {} cannot connect a node to itself.",
+                    id_str.as_deref().unwrap_or("")
+                ),
+                &path,
+            ));
         }
     }
 }
@@ -2645,67 +2641,66 @@ pub fn validate_topology_artifacts(artifacts_value: &Value) -> ValidateArtifacts
     }
 
     // Cross-artifact: topo_feature edges reference unknown node
-    if let (Some(topology), Some(features_value)) = (&topology_data, &topo_feature) {
-        if let Some(nodes_arr) = topology
+    if let (Some(topology), Some(features_value)) = (&topology_data, &topo_feature)
+        && let Some(nodes_arr) = topology
             .get("node")
             .and_then(|n| n.get("nodes"))
             .and_then(Value::as_array)
-        {
-            let node_ids: HashSet<i64> = nodes_arr
-                .iter()
-                .filter_map(|n| {
-                    n.get("sync_name")
-                        .and_then(Value::as_str)
-                        .and_then(|s| s.parse::<i64>().ok())
-                })
-                .collect();
-            if let Some(features) = features_value.as_array() {
-                for (index, edge) in features.iter().enumerate() {
-                    let src = edge.get("src_node").and_then(Value::as_i64);
-                    let dst = edge.get("dst_node").and_then(Value::as_i64);
-                    if !matches!(src, Some(n) if node_ids.contains(&n))
-                        || !matches!(dst, Some(n) if node_ids.contains(&n))
-                    {
-                        errors.push(TopologyErrorOut::new(
-                            "ARTIFACT_REFERENCE_ERROR",
-                            "topo_feature edge references an unknown node.",
-                            &format!("$.artifacts['topo_feature.json'][{index}]"),
-                        ));
-                    }
+    {
+        let node_ids: HashSet<i64> = nodes_arr
+            .iter()
+            .filter_map(|n| {
+                n.get("sync_name")
+                    .and_then(Value::as_str)
+                    .and_then(|s| s.parse::<i64>().ok())
+            })
+            .collect();
+        if let Some(features) = features_value.as_array() {
+            for (index, edge) in features.iter().enumerate() {
+                let src = edge.get("src_node").and_then(Value::as_i64);
+                let dst = edge.get("dst_node").and_then(Value::as_i64);
+                if !matches!(src, Some(n) if node_ids.contains(&n))
+                    || !matches!(dst, Some(n) if node_ids.contains(&n))
+                {
+                    errors.push(TopologyErrorOut::new(
+                        "ARTIFACT_REFERENCE_ERROR",
+                        "topo_feature edge references an unknown node.",
+                        &format!("$.artifacts['topo_feature.json'][{index}]"),
+                    ));
                 }
             }
         }
     }
 
     // Cross-artifact: mac-forwarding entries reference unknown nodes
-    if let (Some(topology), Some(mac)) = (&topology_data, &mac_table) {
-        if let (Some(nodes_arr), Some(entries)) = (
+    if let (Some(topology), Some(mac)) = (&topology_data, &mac_table)
+        && let (Some(nodes_arr), Some(entries)) = (
             topology
                 .get("node")
                 .and_then(|n| n.get("nodes"))
                 .and_then(Value::as_array),
             mac.get("entries").and_then(Value::as_array),
-        ) {
-            let node_ids: HashSet<i64> = nodes_arr
-                .iter()
-                .filter_map(|n| {
-                    n.get("sync_name")
-                        .and_then(Value::as_str)
-                        .and_then(|s| s.parse::<i64>().ok())
-                })
-                .collect();
-            for (index, entry) in entries.iter().enumerate() {
-                let sw = entry.get("switch_node").and_then(Value::as_i64);
-                let dst = entry.get("destination_node").and_then(Value::as_i64);
-                if !matches!(sw, Some(n) if node_ids.contains(&n))
-                    || !matches!(dst, Some(n) if node_ids.contains(&n))
-                {
-                    errors.push(TopologyErrorOut::new(
-                        "ARTIFACT_REFERENCE_ERROR",
-                        "mac-forwarding-table entry references an unknown node.",
-                        &format!("$.artifacts['mac-forwarding-table.json'].entries[{index}]"),
-                    ));
-                }
+        )
+    {
+        let node_ids: HashSet<i64> = nodes_arr
+            .iter()
+            .filter_map(|n| {
+                n.get("sync_name")
+                    .and_then(Value::as_str)
+                    .and_then(|s| s.parse::<i64>().ok())
+            })
+            .collect();
+        for (index, entry) in entries.iter().enumerate() {
+            let sw = entry.get("switch_node").and_then(Value::as_i64);
+            let dst = entry.get("destination_node").and_then(Value::as_i64);
+            if !matches!(sw, Some(n) if node_ids.contains(&n))
+                || !matches!(dst, Some(n) if node_ids.contains(&n))
+            {
+                errors.push(TopologyErrorOut::new(
+                    "ARTIFACT_REFERENCE_ERROR",
+                    "mac-forwarding-table entry references an unknown node.",
+                    &format!("$.artifacts['mac-forwarding-table.json'].entries[{index}]"),
+                ));
             }
         }
     }
