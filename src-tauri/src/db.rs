@@ -242,6 +242,17 @@ pub const P0_DOMAIN_SCHEMA_SQL: &str = r#"
             REFERENCES nodes(session_id, node_id) ON DELETE CASCADE
     );
 
+    -- 单步撤销 pre-image blob（按 (session_id, domain) 覆盖式只留一份，
+    -- ON DELETE CASCADE 随 session 删除清快照）。本机临时状态，不进
+    -- SESSION_SCOPED_TABLES（不随 session 导出/导入）。
+    CREATE TABLE IF NOT EXISTS topology_undo_snapshots (
+        session_id  TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        domain      TEXT NOT NULL,
+        blob_json   TEXT NOT NULL,
+        created_at  TEXT NOT NULL,
+        PRIMARY KEY (session_id, domain)
+    );
+
     PRAGMA application_id = 1414745601;  -- 0x54534E01 ("TSN\x01")
 "#;
 
