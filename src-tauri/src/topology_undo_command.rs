@@ -40,7 +40,9 @@ async fn apply_undo(
         return Ok(None);
     }
 
-    Ok(Some(buffer.push(request.session_id.clone(), "topology".into())))
+    Ok(Some(
+        buffer.push(request.session_id.clone(), "topology".into()),
+    ))
 }
 
 #[tauri::command]
@@ -130,13 +132,18 @@ mod tests {
             assert_eq!(record.session_id, "s1");
             assert_eq!(record.domain, "topology");
 
-            let x: f64 =
-                sqlx::query_scalar("SELECT x FROM topology_nodes WHERE session_id='s1' AND sync_name='0'")
-                    .fetch_one(&pool)
-                    .await
-                    .unwrap();
+            let x: f64 = sqlx::query_scalar(
+                "SELECT x FROM topology_nodes WHERE session_id='s1' AND sync_name='0'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
             assert_eq!(x, 10.0, "撤销盖回快照态");
-            assert_eq!(buffer.since("s1", 0).mutations.len(), 1, "盖回须 push 一条 mutation");
+            assert_eq!(
+                buffer.since("s1", 0).mutations.len(),
+                1,
+                "盖回须 push 一条 mutation"
+            );
         });
     }
 

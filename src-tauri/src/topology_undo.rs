@@ -74,12 +74,11 @@ pub async fn snapshot_pre_image(
     .bind(session_id)
     .fetch_all(&mut *conn)
     .await?;
-    let ref_rows = sqlx::query(
-        r#"SELECT session_id, ref_json FROM topology_refs WHERE session_id = ?"#,
-    )
-    .bind(session_id)
-    .fetch_all(&mut *conn)
-    .await?;
+    let ref_rows =
+        sqlx::query(r#"SELECT session_id, ref_json FROM topology_refs WHERE session_id = ?"#)
+            .bind(session_id)
+            .fetch_all(&mut *conn)
+            .await?;
 
     let pre_image = TopologyPreImage {
         nodes: node_rows
@@ -134,10 +133,7 @@ pub async fn snapshot_pre_image(
 
 /// 撤销：读 pre-image（无则 no-op 返 false），自开事务把三表盖回，
 /// 清除 pre-image（使再次撤销返 false），commit 后返 true。
-pub async fn restore_pre_image(
-    pool: &Pool<Sqlite>,
-    session_id: &str,
-) -> Result<bool, sqlx::Error> {
+pub async fn restore_pre_image(pool: &Pool<Sqlite>, session_id: &str) -> Result<bool, sqlx::Error> {
     let mut tx = pool.begin().await?;
 
     let blob: Option<String> = sqlx::query_scalar(
@@ -205,13 +201,11 @@ pub async fn restore_pre_image(
     }
 
     // 撤销后清除 pre-image：再次 restore 返 false（R11「无可撤销」）。
-    sqlx::query(
-        r#"DELETE FROM topology_undo_snapshots WHERE session_id = ? AND domain = ?"#,
-    )
-    .bind(session_id)
-    .bind(UNDO_DOMAIN)
-    .execute(&mut *tx)
-    .await?;
+    sqlx::query(r#"DELETE FROM topology_undo_snapshots WHERE session_id = ? AND domain = ?"#)
+        .bind(session_id)
+        .bind(UNDO_DOMAIN)
+        .execute(&mut *tx)
+        .await?;
 
     tx.commit().await?;
     Ok(true)
@@ -270,7 +264,9 @@ mod tests {
         .unwrap();
     }
 
-    async fn dump_nodes(pool: &Pool<Sqlite>) -> Vec<(String, Option<String>, f64, f64, Option<String>, i64)> {
+    async fn dump_nodes(
+        pool: &Pool<Sqlite>,
+    ) -> Vec<(String, Option<String>, f64, f64, Option<String>, i64)> {
         sqlx::query(
             "SELECT sync_name, name, x, y, node_type, insert_order FROM topology_nodes \
              WHERE session_id='s1' ORDER BY insert_order, sync_name",
@@ -350,17 +346,31 @@ mod tests {
                 .execute(&pool)
                 .await
                 .unwrap();
-            sqlx::query("UPDATE topology_refs SET ref_json='{\"changed\":true}' WHERE session_id='s1'")
-                .execute(&pool)
-                .await
-                .unwrap();
+            sqlx::query(
+                "UPDATE topology_refs SET ref_json='{\"changed\":true}' WHERE session_id='s1'",
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
 
             let restored = restore_pre_image(&pool, "s1").await.unwrap();
             assert!(restored);
 
-            assert_eq!(dump_nodes(&pool).await, nodes_before, "节点逐字段还原（含 x/y）");
-            assert_eq!(dump_links(&pool).await, links_before, "链路还原（含 styles_json）");
-            assert_eq!(dump_refs(&pool).await, refs_before, "refs 还原（含 ref_json）");
+            assert_eq!(
+                dump_nodes(&pool).await,
+                nodes_before,
+                "节点逐字段还原（含 x/y）"
+            );
+            assert_eq!(
+                dump_links(&pool).await,
+                links_before,
+                "链路还原（含 styles_json）"
+            );
+            assert_eq!(
+                dump_refs(&pool).await,
+                refs_before,
+                "refs 还原（含 ref_json）"
+            );
         });
     }
 
@@ -431,7 +441,10 @@ mod tests {
                 .await
                 .unwrap();
             assert!(restore_pre_image(&pool, "s1").await.unwrap());
-            assert!(dump_links(&pool).await.is_empty(), "盖回最后一次快照（无链路）");
+            assert!(
+                dump_links(&pool).await.is_empty(),
+                "盖回最后一次快照（无链路）"
+            );
         });
     }
 

@@ -180,10 +180,7 @@ pub fn build_router(token: SecretToken, route_state: Arc<RouteState>) -> Router 
             "/db/topology/apply_operations",
             post(topology_sidecar_routes::apply_operations),
         )
-        .route(
-            "/db/topology/undo",
-            post(topology_sidecar_routes::undo),
-        )
+        .route("/db/topology/undo", post(topology_sidecar_routes::undo))
         .with_state(route_state)
         .route_layer(middleware::from_fn_with_state(
             token_state,
@@ -722,7 +719,11 @@ mod tests {
     async fn dump_three_tables(
         pool: &sqlx::Pool<sqlx::Sqlite>,
         session_id: &str,
-    ) -> (Vec<(String, f64, f64)>, Vec<(i64, String, String)>, Vec<String>) {
+    ) -> (
+        Vec<(String, f64, f64)>,
+        Vec<(i64, String, String)>,
+        Vec<String>,
+    ) {
         let nodes = sqlx::query(
             "SELECT sync_name, x, y FROM topology_nodes WHERE session_id = ? ORDER BY insert_order, sync_name",
         )
@@ -787,13 +788,21 @@ mod tests {
             assert_eq!(parsed["ok"], true);
 
             // pre-image 存在，且其序列化的三表态 == apply 前态。
-            let blob = read_pre_image(&pool, "s1").await.expect("非 dry-run 后留 pre-image");
+            let blob = read_pre_image(&pool, "s1")
+                .await
+                .expect("非 dry-run 后留 pre-image");
             let pre: serde_json::Value = serde_json::from_str(&blob).unwrap();
             let pre_nodes: Vec<(String, f64, f64)> = pre["nodes"]
                 .as_array()
                 .unwrap()
                 .iter()
-                .map(|n| (n["sync_name"].as_str().unwrap().to_string(), n["x"].as_f64().unwrap(), n["y"].as_f64().unwrap()))
+                .map(|n| {
+                    (
+                        n["sync_name"].as_str().unwrap().to_string(),
+                        n["x"].as_f64().unwrap(),
+                        n["y"].as_f64().unwrap(),
+                    )
+                })
                 .collect();
             assert_eq!(pre_nodes, before.0, "pre-image 节点 == 写前节点（含 x/y）");
             assert!(pre["links"].as_array().unwrap().is_empty());
@@ -881,7 +890,11 @@ mod tests {
                 .iter()
                 .map(|n| n["sync_name"].as_str().unwrap().to_string())
                 .collect();
-            assert_eq!(syncs, vec!["0".to_string()], "pre-image == 第二次 apply 前态");
+            assert_eq!(
+                syncs,
+                vec!["0".to_string()],
+                "pre-image == 第二次 apply 前态"
+            );
         });
     }
 
@@ -902,13 +915,21 @@ mod tests {
             // 第二次 initialize：pre-image 应等于第一次的整图态。
             initialize_hop_linear(router, &token, "s1", 2).await;
 
-            let blob = read_pre_image(&pool, "s1").await.expect("initialize 后留 pre-image");
+            let blob = read_pre_image(&pool, "s1")
+                .await
+                .expect("initialize 后留 pre-image");
             let pre: serde_json::Value = serde_json::from_str(&blob).unwrap();
             let pre_nodes: Vec<(String, f64, f64)> = pre["nodes"]
                 .as_array()
                 .unwrap()
                 .iter()
-                .map(|n| (n["sync_name"].as_str().unwrap().to_string(), n["x"].as_f64().unwrap(), n["y"].as_f64().unwrap()))
+                .map(|n| {
+                    (
+                        n["sync_name"].as_str().unwrap().to_string(),
+                        n["x"].as_f64().unwrap(),
+                        n["y"].as_f64().unwrap(),
+                    )
+                })
                 .collect();
             let pre_links: Vec<(i64, String, String)> = pre["links"]
                 .as_array()
@@ -922,8 +943,14 @@ mod tests {
                     )
                 })
                 .collect();
-            assert_eq!(pre_nodes, before.0, "pre-image 节点 == initialize 前整图节点");
-            assert_eq!(pre_links, before.1, "pre-image 链路 == initialize 前整图链路");
+            assert_eq!(
+                pre_nodes, before.0,
+                "pre-image 节点 == initialize 前整图节点"
+            );
+            assert_eq!(
+                pre_links, before.1,
+                "pre-image 链路 == initialize 前整图链路"
+            );
         });
     }
 
@@ -938,11 +965,22 @@ mod tests {
 
             initialize_hop_linear(router, &token, "s1", 2).await;
 
-            let blob = read_pre_image(&pool, "s1").await.expect("首次 initialize 也留 pre-image");
+            let blob = read_pre_image(&pool, "s1")
+                .await
+                .expect("首次 initialize 也留 pre-image");
             let pre: serde_json::Value = serde_json::from_str(&blob).unwrap();
-            assert!(pre["nodes"].as_array().unwrap().is_empty(), "首次 initialize pre-image 节点为空");
-            assert!(pre["links"].as_array().unwrap().is_empty(), "首次 initialize pre-image 链路为空");
-            assert!(pre["refs"].as_array().unwrap().is_empty(), "首次 initialize pre-image refs 为空");
+            assert!(
+                pre["nodes"].as_array().unwrap().is_empty(),
+                "首次 initialize pre-image 节点为空"
+            );
+            assert!(
+                pre["links"].as_array().unwrap().is_empty(),
+                "首次 initialize pre-image 链路为空"
+            );
+            assert!(
+                pre["refs"].as_array().unwrap().is_empty(),
+                "首次 initialize pre-image refs 为空"
+            );
         });
     }
 
