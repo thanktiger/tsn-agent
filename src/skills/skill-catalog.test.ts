@@ -23,4 +23,9 @@ describe("skill catalog", () => {
       notes: "已有独立 skill，可作为后续 skill 详情和执行状态展示的基准。",
     });
   });
+
+  it("U11: tsn-time-sync is enabled (stage made real)", () => {
+    const timeSync = SKILL_CATALOG.find((skill) => skill.id === "tsn-time-sync");
+    expect(timeSync?.status).toBe("enabled");
+  });
 });

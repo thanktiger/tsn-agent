@@ -742,7 +742,7 @@ describe("runTsnAgent", () => {
     );
   });
 
-  it("rejects placeholder stage results for other stages", async () => {
+  it("U9: ignores time-sync stage results instead of rejecting them (writes go via sidecar tools)", async () => {
     enableTauriRuntime();
     mockTauriCommands({
       claude: {
@@ -768,18 +768,19 @@ describe("runTsnAgent", () => {
       session: sessionWithWorkflow(createInitialWorkflowState()),
     });
 
+    // U9：time-sync 写库走 sidecar 工具、不经 stageResult——结果被忽略，不再「暂未启用」报错。
     expect(result.workflow.stages.topology.status).toBe("current");
-    expect(result.events).toEqual(
+    expect(result.events).not.toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           kind: "error",
-          content: expect.stringContaining("time-sync 阶段结果暂未启用"),
+          content: expect.stringContaining("暂未启用"),
         }),
       ]),
     );
   });
 
-  it("confirms a waiting topology stage via the button and auto-generates time-sync defaults (U4 regression)", async () => {
+  it("U9: confirming topology advances into time-sync and guides GM selection (status current)", async () => {
     enableTauriRuntime();
     mockTauriCommands(); // 过关闸默认通过（verify ok=true）
     const { runTsnAgent } = await import("./agent-adapter");
@@ -795,14 +796,11 @@ describe("runTsnAgent", () => {
     expect(invokeMock.mock.calls.some(([command]) => command === "verify_topology")).toBe(true);
     expect(result.workflow.stages.topology.status).toBe("confirmed");
     expect(result.workflow.currentStep).toBe("time-sync");
-    expect(result.workflow.stages["time-sync"].status).toBe("waiting_confirmation");
-    // 阶段处理没丢：进入 time-sync 自动生成默认摘要。
-    expect(result.workflow.stages["time-sync"].summary).toContain("统一时钟");
-    expect(result.events).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ kind: "confirmation-required", stage: "time-sync" }),
-      ]),
-    );
+    // U9：进入 time-sync 不再自动生成固定摘要 + waiting_confirmation；改为引导选 GM（status current）。
+    expect(result.workflow.stages["time-sync"].status).toBe("current");
+    expect(result.assistantText).toContain("GM");
+    // 仍可点「确认并继续」（current 非 topology 阶段动作含 confirm-stage），由 U6 校验闸把关。
+    expect(result.workflow.availableActions).toContain("confirm-stage");
   });
 
   it("shows the offline notice when the confirm button advances into a gray stage (U4 regression)", async () => {
@@ -1007,7 +1005,7 @@ describe("runTsnAgent", () => {
     expect(confirmed.assistantText).toContain("没有待确认的操作");
   });
 
-  it("U3-fix(E): confirming a rollback to time-sync re-arms it with auto-generated defaults", async () => {
+  it("U9: confirming a rollback to time-sync re-arms it in the GM-selection (current) state", async () => {
     enableTauriRuntime();
     const base = createInitialWorkflowState();
     base.currentStep = "flow-template";
@@ -1025,8 +1023,10 @@ describe("runTsnAgent", () => {
 
     expect(result.mode).toBe("local");
     expect(result.workflow.currentStep).toBe("time-sync");
-    expect(result.workflow.stages["time-sync"].status).toBe("waiting_confirmation");
-    expect(result.workflow.stages["time-sync"].summary).toContain("统一时钟");
+    // U9：回退到 time-sync 重新进入引导选 GM（current），不再固定摘要 + waiting_confirmation。
+    expect(result.workflow.stages["time-sync"].status).toBe("current");
+    expect(result.assistantText).toContain("GM");
+    expect(result.workflow.availableActions).toContain("confirm-stage");
     expect(result.workflow.pendingStageChange).toBeUndefined();
     expect(result.workflow.stages["flow-template"].status).toBe("locked");
   });
@@ -1189,7 +1189,8 @@ describe("runTsnAgent", () => {
     expect(result.mode).toBe("local");
     expect(result.workflow.stages.topology.status).toBe("confirmed");
     expect(result.workflow.currentStep).toBe("time-sync");
-    expect(result.workflow.stages["time-sync"].status).toBe("waiting_confirmation");
+    // U9：进入 time-sync 为引导选 GM 的 current 态（非 waiting_confirmation）。
+    expect(result.workflow.stages["time-sync"].status).toBe("current");
   });
 
   it("U3: rejects an illegal (offline) stage-switch target", async () => {

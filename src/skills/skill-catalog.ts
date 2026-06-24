@@ -32,11 +32,12 @@ export const SKILL_CATALOG: SkillCatalogItem[] = [
     stage: "time-sync",
     stageLabel: "时间同步",
     displayName: "时间同步",
-    description: "生成 gPTP 或统一时钟假设摘要，为后续仿真和规划保留同步域参数。",
-    inputSummary: "拓扑草案、场景默认时间同步策略",
-    outputSummary: "时间同步摘要、主时钟假设、后续可细化参数",
-    status: "draft",
-    notes: "第一版仍以结构化摘要为主，后续可扩展为真实 gPTP 参数生成。",
+    description:
+      "引导用户用自然语言指定时钟主节点（GM），按「GM + 拓扑」确定性算时钟同步树（端口 master/slave/passive 角色），补默认同步参数请确认，之后可换 GM / 改参数 / 启停链路。",
+    inputSummary: "拓扑、用户指定的 GM、同步参数、启停链路意图",
+    outputSummary: "时钟同步树（端口角色）、同步参数、禁用链路集",
+    status: "enabled",
+    notes: "确定性核心：端口角色衍生不可直填，关键不变量由 Rust 重算 + 确认闸兜底。",
   },
   {
     id: "tsn-flow-planning",

@@ -406,7 +406,8 @@ function runConfirmAction(workflow: WorkflowState): TsnAgentResult & { carryInte
       };
     }
 
-    // 回退到 time-sync 需重新自动生成摘要并进入待确认——否则会停在 current 且无确认按钮（死胡同）。
+    // 回退到 time-sync：重新走引导选 GM（current 态仍带确认按钮，由 U6 校验闸把关），
+    // 否则会停在裸 current 无引导文案。
     if (target === "time-sync" && switched.stages["time-sync"].status === "current") {
       return runTimeSyncStage(switched);
     }
@@ -482,12 +483,20 @@ function runAfterConfirmation(workflow: WorkflowState): TsnAgentResult {
   };
 }
 
+// U9：进入时间同步阶段的引导（确定性、不走大模型）。阶段置 current（非 waiting_confirmation）：
+// 用户先用自然语言指定 GM（经大模型调 timesync 工具落库），再点「确认并继续」由 U6 校验闸放行。
+// GM 未定时点确认 → verify_time_sync 拦截（GM_NOT_SET），提示选 GM。
 function runTimeSyncStage(workflow: WorkflowState): TsnAgentResult {
-  const scenarioConfig = getScenarioConfig(workflow.scenarioConfigId);
-  const summary = scenarioConfig.defaults.timeSyncSummary;
+  const guidance = [
+    "进入时间同步阶段。请用自然语言指定时钟主节点（GM），例如「把 GM 设成 ES-1」。",
+    "可同时指定同步参数（同步周期 / 测量周期 / 偏移阈值等）；没指定的我会补推荐默认值，整理好整份配置请你确认。",
+    "之后也能随时换 GM、改参数或启停某条链路，系统会按新设置重算时钟树。",
+  ].join("\n");
+  // status: current（waitingConfirmation:false）——不进 waiting_confirmation，等用户先给 GM。
   const nextWorkflow = recordStageResult(workflow, {
     step: "time-sync",
-    summary,
+    summary: "等待指定时钟主节点（GM）。",
+    waitingConfirmation: false,
   });
   const events = [
     createEvent({
@@ -495,31 +504,23 @@ function runTimeSyncStage(workflow: WorkflowState): TsnAgentResult {
       kind: "stage-start",
       stage: "time-sync",
       title: "时间同步阶段开始",
-      content: "生成时间同步默认摘要。",
+      content: "请指定时钟主节点（GM）。",
       status: "info",
     }),
     createEvent({
-      id: "event-time-sync-stage-result",
-      kind: "stage-result",
+      id: "event-time-sync-guidance",
+      kind: "thought",
       stage: "time-sync",
-      title: "时间同步默认值",
-      content: summary,
-      status: "success",
-    }),
-    createEvent({
-      id: "event-time-sync-confirmation",
-      kind: "confirmation-required",
-      stage: "time-sync",
-      title: "等待确认",
-      content: "确认同步假设后进入下一阶段，或说明需要调整的同步约束。",
-      status: "warning",
+      title: "指定时钟主节点",
+      content: guidance,
+      status: "info",
     }),
   ];
 
   return {
     events,
     workflow: nextWorkflow,
-    assistantText: events.map((event) => event.content).join("\n"),
+    assistantText: guidance,
     mode: "local",
   };
 }
@@ -656,8 +657,10 @@ function applyTopologyStageResults(input: {
 
     try {
       const candidate = parseWorkflowStageResult(rawResult);
+      // U9：time-sync 写库走 sidecar 工具（set_gm 等），不经 stageResult payload——
+      // 前端靠查库渲染。故 time-sync 阶段结果接受但忽略（不再 push「暂未启用」、不落工程态）。
+      // parse 只产 topology / time-sync 两种 stage；排除 time-sync 后剩 topology。
       if (candidate.stage !== "topology") {
-        rejections.push(`${candidate.stage} 阶段结果暂未启用。`);
         continue;
       }
       parsed = candidate;

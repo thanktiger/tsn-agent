@@ -11,6 +11,7 @@ mod session_import;
 mod session_store;
 mod skill_factory_hashes;
 mod skill_files;
+mod timesync_query_command;
 mod timesync_sidecar_routes;
 mod timesync_tree;
 mod timesync_verify;
@@ -98,6 +99,7 @@ pub fn run() {
             topology_undo_command::undo_topology,
             topology_query_command::query_topology,
             topology_query_command::verify_topology,
+            timesync_query_command::query_timesync,
             verify_time_sync,
             inet_verify_command::verify_inet, // 暂未接前端：INET 验证挪到后续流量规划阶段，保留作其基础，勿当死代码删（复审触发：未随流量规划 Phase B 启用则 2026-09 重审是否归档至 docs/deferred/）
             session_store::get_current_session,

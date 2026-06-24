@@ -1989,6 +1989,71 @@ textarea:focus-visible {
   white-space: nowrap;
 }
 
+/* U11：time-sync 阶段时钟树角色视觉——GM 绿、被同步蓝、旁路灰、未覆盖红。
+   叠加在节点类型配色之上（class 顺序保证 timesync-* 后写、优先生效）。 */
+.tsn-node.timesync-gm {
+  border-color: #16a34a;
+  border-width: 2px;
+  background: #ecfdf5;
+  box-shadow: 0 0 0 2px rgba(22, 163, 74, 0.25);
+}
+
+.tsn-node.timesync-synced {
+  border-color: #2563eb;
+  background: #eff6ff;
+}
+
+.tsn-node.timesync-passive {
+  border-color: rgba(100, 116, 139, 0.55);
+  background: #f1f5f9;
+  opacity: 0.85;
+}
+
+.tsn-node.timesync-uncovered {
+  border-color: #dc2626;
+  background: #fef2f2;
+}
+
+.tsn-node-role {
+  color: var(--text-secondary, #475569) !important;
+  font-weight: 600;
+}
+
+.tsn-node.timesync-gm .tsn-node-type {
+  background: #16a34a;
+}
+
+/* 时钟同步信息栏：GM + 禁用链路 + 未覆盖告警。 */
+.clock-tree-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin: 0 12px 8px;
+  padding: 6px 12px;
+  border: 1px solid rgba(22, 163, 74, 0.3);
+  border-radius: 6px;
+  background: rgba(236, 253, 245, 0.7);
+  font-size: 12px;
+}
+
+.clock-tree-title {
+  font-weight: 700;
+  color: #15803d;
+}
+
+.clock-tree-gm strong {
+  color: #15803d;
+}
+
+.clock-tree-meta {
+  color: var(--text-muted);
+}
+
+.clock-tree-warn {
+  color: #b91c1c;
+}
+
 /* R2：handle 不再承担视觉与交互（floating 边自算锚点）；保留 DOM 但完全隐形。
    不用 opacity——避免 hover 时 React Flow 默认高亮残留。 */
 .tsn-node .react-flow__handle {

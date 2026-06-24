@@ -13,6 +13,8 @@ import {
   type ReactFlowInstance,
 } from "@xyflow/react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { WorkflowStep } from "../../../domain/scenario-config";
+import { type TimesyncSnapshot, timesyncRoleForNode } from "../../../sessions/timesync-snapshot";
 import {
   countEndSystems,
   countSwitches,
@@ -25,6 +27,8 @@ import {
   nodeRowLabel,
   nodeTypeToken,
   type TsnNodeKind,
+  type TsnNodeTimesync,
+  timesyncRoleBadge,
   topologySnapshotToReactFlow,
 } from "./topology-flow";
 import { TsnFloatingEdge } from "./tsn-floating-edge";
@@ -35,6 +39,7 @@ export {
   nodeTypeToken,
   parseLinkStyles,
   planeClassName,
+  timesyncRoleBadge,
   topologySnapshotToReactFlow,
 } from "./topology-flow";
 
@@ -140,6 +145,10 @@ export interface WorkspacePaneProps {
   hasUserInteraction: boolean;
   /** 本 session 最近观测的 mutationId（R11 陈旧写检测基准）。 */
   lastMutationId: number;
+  /** U11：当前工作流阶段；time-sync 阶段画布叠加时钟树（端口角色）视图。 */
+  workflowStep?: WorkflowStep;
+  /** U11：时钟同步配置快照（time-sync 阶段渲染时钟树用；其它阶段忽略）。 */
+  timesyncSnapshot?: TimesyncSnapshot;
   onSelectConfigTab: (tab: ConfigTabId) => void;
   onNodeSelect: (event: unknown, node: Node) => void;
   onLinkSelect: (event: unknown, edge: Edge) => void;
@@ -160,6 +169,8 @@ export function WorkspacePane({
   isAgentRunning,
   hasUserInteraction,
   lastMutationId,
+  workflowStep,
+  timesyncSnapshot,
   onSelectConfigTab,
   onNodeSelect,
   onLinkSelect,
@@ -169,13 +180,31 @@ export function WorkspacePane({
   commitNodePosition = invokeCommitNodePosition,
   undoTopology = invokeUndoTopology,
 }: WorkspacePaneProps) {
-  const flowTopology = useMemo(
-    () =>
-      topologySnapshot && !isEmptyTopologySnapshot(topologySnapshot)
-        ? topologySnapshotToReactFlow(topologySnapshot)
-        : undefined,
-    [topologySnapshot],
-  );
+  // U11：time-sync 阶段叠加时钟树视图——画布节点注入端口角色（GM/同步/旁路/未覆盖）。
+  const showClockTree = workflowStep === "time-sync";
+  const flowTopology = useMemo(() => {
+    if (!topologySnapshot || isEmptyTopologySnapshot(topologySnapshot)) {
+      return undefined;
+    }
+    const flow = topologySnapshotToReactFlow(topologySnapshot);
+    if (!showClockTree) {
+      return flow;
+    }
+    // 富化节点 data：注入时钟树角色，画布 TsnTopologyNode 据此渲染角色徽标 + GM 高亮。
+    return {
+      ...flow,
+      nodes: flow.nodes.map((node) => {
+        const summary = timesyncRoleForNode(timesyncSnapshot, node.id);
+        const timesync: TsnNodeTimesync = {
+          role: summary.role,
+          masterCount: summary.masterCount,
+          slaveCount: summary.slaveCount,
+          isGm: summary.role === "gm",
+        };
+        return { ...node, data: { ...node.data, timesync } };
+      }),
+    };
+  }, [topologySnapshot, showClockTree, timesyncSnapshot]);
 
   // —— 拖动状态（R5/R7/R10/R11）——
   const [flowNodes, setFlowNodes] = useState<Node[]>([]);
@@ -520,6 +549,26 @@ export function WorkspacePane({
     ? topologySnapshot?.nodes.find((node) => node.mid === selectedLink.dstNode)
     : undefined;
 
+  // U11：时钟同步信息栏派生数据（GM 显示名、未覆盖节点）。只在 time-sync 阶段用。
+  const clockTreeInfo = useMemo(() => {
+    if (!showClockTree) {
+      return undefined;
+    }
+    const gmMid = timesyncSnapshot?.domain?.gmMid ?? null;
+    const gmNode = gmMid ? topologySnapshot?.nodes.find((node) => node.mid === gmMid) : undefined;
+    const gmLabel = gmMid ? (gmNode ? nodeRowLabel(gmNode) : `节点 ${gmMid}`) : null;
+    // 未覆盖：设了 GM 但拓扑节点不在 timesync_nodes（BFS 从 GM 到不了）——与 Rust
+    // UNCOVERED_NODES 告警同口径。旁路（passive）节点在树里只是端口全空，不算未覆盖，
+    // 由画布徽标「旁路」表达，不进此告警栏。
+    const uncovered = gmMid
+      ? (topologySnapshot?.nodes ?? [])
+          .filter((node) => timesyncRoleForNode(timesyncSnapshot, node.mid).role === "uncovered")
+          .map((node) => nodeRowLabel(node))
+      : [];
+    const disabledCount = timesyncSnapshot?.domain?.disabledLinkSeqs.length ?? 0;
+    return { gmLabel, uncovered, disabledCount };
+  }, [showClockTree, timesyncSnapshot, topologySnapshot]);
+
   return (
     <section className="workspace-pane" aria-label="工程状态">
       <div className="topology-stage grid-bg">
@@ -538,6 +587,28 @@ export function WorkspacePane({
             {undoConfirming ? "确认撤销?" : "撤销"}
           </button>
         </div>
+        {showClockTree && hasTopology && (
+          <div className="clock-tree-bar" role="group" aria-label="时钟同步">
+            <span className="clock-tree-title mono">时钟同步树</span>
+            <span className="clock-tree-gm">
+              {clockTreeInfo?.gmLabel ? (
+                <>
+                  主时钟 <strong>{clockTreeInfo.gmLabel}</strong>
+                </>
+              ) : (
+                "未指定时钟主节点（GM）"
+              )}
+            </span>
+            {clockTreeInfo && clockTreeInfo.disabledCount > 0 && (
+              <span className="clock-tree-meta mono">禁用链路 {clockTreeInfo.disabledCount}</span>
+            )}
+            {clockTreeInfo && clockTreeInfo.uncovered.length > 0 && (
+              <span className="clock-tree-warn" role="status">
+                未覆盖：{clockTreeInfo.uncovered.join("、")}
+              </span>
+            )}
+          </div>
+        )}
         {saveFailed && (
           <div className="transfer-notice error tsn-position-notice" role="alert">
             位置保存失败，已恢复
@@ -725,17 +796,35 @@ function TsnTopologyNode({ data }: NodeProps) {
     label?: string;
     nodeType?: TsnNodeKind;
     mid?: string;
+    timesync?: TsnNodeTimesync;
   };
   const nodeType = nodeData.nodeType ?? "endSystem";
+  const timesync = nodeData.timesync;
+  // time-sync 阶段：节点附时钟树角色 class（GM 高亮 + 角色配色）+ 角色徽标。
+  const className = timesync
+    ? `tsn-node ${nodeType} timesync timesync-${timesync.role}`
+    : `tsn-node ${nodeType}`;
 
   return (
-    <div className={`tsn-node ${nodeType}`}>
+    <div className={className}>
       {/* R2：floating 边不锚定 handle；保留一对隐形 handle 满足 React Flow 边合法性。 */}
       <Handle id="s" type="source" position={Position.Top} />
       <Handle id="t" type="target" position={Position.Top} />
       <span className="tsn-node-type mono">{NODE_KIND_BADGE[nodeType]}</span>
       <strong>{nodeData.label}</strong>
-      <small className="mono">节点 {nodeData.mid}</small>
+      {timesync ? (
+        <small
+          className="mono tsn-node-role"
+          title={`时钟角色 ${timesyncRoleBadge(timesync.role)}`}
+        >
+          {timesyncRoleBadge(timesync.role)}
+          {timesync.role === "synced" || timesync.role === "gm"
+            ? `·M${timesync.masterCount}/S${timesync.slaveCount}`
+            : ""}
+        </small>
+      ) : (
+        <small className="mono">节点 {nodeData.mid}</small>
+      )}
     </div>
   );
 }

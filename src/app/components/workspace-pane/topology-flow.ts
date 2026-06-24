@@ -167,6 +167,30 @@ export function topologySnapshotToReactFlow(snapshot: TopologyRowSnapshot): {
   };
 }
 
+import type { TimesyncNodeRole } from "../../../sessions/timesync-snapshot";
+
+/** time-sync 阶段画布注入到 React Flow 节点 data 的时钟树角色（拓扑阶段为 undefined）。 */
+export interface TsnNodeTimesync {
+  role: TimesyncNodeRole;
+  masterCount: number;
+  slaveCount: number;
+  isGm: boolean;
+}
+
+/** 时钟树角色 → 节点徽标短文（画布上 GM/被同步/旁路/未覆盖一目了然）。 */
+export function timesyncRoleBadge(role: TimesyncNodeRole): string {
+  switch (role) {
+    case "gm":
+      return "GM";
+    case "synced":
+      return "同步";
+    case "passive":
+      return "旁路";
+    default:
+      return "未覆盖";
+  }
+}
+
 const NODE_KIND_PREFIX: Record<TsnNodeKind, string> = {
   switch: "SW",
   endSystem: "ES",

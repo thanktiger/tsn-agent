@@ -19,11 +19,15 @@ import {
   redactSecrets,
   requestStageChangeTool,
   runClaude,
+  TIMESYNC_MCP_ALLOWED_TOOLS,
   TOPOLOGY_MCP_ALLOWED_TOOLS,
   UNDO_TOOL_NAME,
   undoLastChangeTool,
 } from "./claude-agent-worker.mjs";
-import { TOPOLOGY_MCP_ALLOWED_TOOLS as REGISTRY_TOPOLOGY_MCP_ALLOWED_TOOLS } from "./mcp/topology-tools";
+import {
+  TIMESYNC_MCP_ALLOWED_TOOLS as REGISTRY_TIMESYNC_MCP_ALLOWED_TOOLS,
+  TOPOLOGY_MCP_ALLOWED_TOOLS as REGISTRY_TOPOLOGY_MCP_ALLOWED_TOOLS,
+} from "./mcp/topology-tools";
 
 function topologyStageResultFixture(mutationId = 7) {
   return createTopologyWorkflowStageResult(
@@ -103,7 +107,7 @@ describe("claude-agent-worker", () => {
         UNDO_TOOL_NAME,
       ]);
       expect(input.options.settingSources).toEqual(["user", "project"]);
-      expect(input.options.skills).toEqual(["tsn-topology", "tsn-flow-planning"]);
+      expect(input.options.skills).toEqual(["tsn-topology", "tsn-time-sync", "tsn-flow-planning"]);
       expect(input.options.tools).toEqual({ type: "preset", preset: "claude_code" });
       expect(input.options.allowedTools).toEqual([
         "Skill",
@@ -599,6 +603,72 @@ describe("claude-agent-worker", () => {
   it("U6: undo tool is defined as undo_last_change with the expected mcp name", () => {
     expect(undoLastChangeTool.name).toBe("undo_last_change");
     expect(UNDO_TOOL_NAME).toBe("mcp__tsn_workflow__undo_last_change");
+  });
+
+  it("U10: worker timesync allowedTools stays aligned with the timesync registry", () => {
+    expect(TIMESYNC_MCP_ALLOWED_TOOLS).toEqual(REGISTRY_TIMESYNC_MCP_ALLOWED_TOOLS);
+  });
+
+  it("U10: time-sync stage whitelists timesync tools but not topology write tools", () => {
+    const timeSyncStage = buildAllowedToolsForStage({ stage: "time-sync" }, true);
+    const topologyStage = buildAllowedToolsForStage({ stage: "topology" }, true);
+    // time-sync 阶段：放行全部 timesync 工具。
+    for (const tool of TIMESYNC_MCP_ALLOWED_TOOLS) {
+      expect(timeSyncStage).toContain(tool);
+    }
+    // time-sync 阶段：不放行拓扑写工具（initialize/apply 越阶段会让工程静默分叉）。
+    expect(timeSyncStage).not.toContain("mcp__tsn_topology__topology_apply_operations");
+    expect(timeSyncStage).not.toContain("mcp__tsn_topology__topology_initialize");
+    // 反向：拓扑阶段不放行 timesync 工具。
+    for (const tool of TIMESYNC_MCP_ALLOWED_TOOLS) {
+      expect(topologyStage).not.toContain(tool);
+    }
+  });
+
+  it("U10: timesync tools require the topology stdio host (gated by hasTopologyMcpConfig)", () => {
+    // timesync 工具与 topology 同住 tsn_topology server；server 没注册（host 未解析）就不放行。
+    const timeSyncStageNoHost = buildAllowedToolsForStage({ stage: "time-sync" }, false);
+    for (const tool of TIMESYNC_MCP_ALLOWED_TOOLS) {
+      expect(timeSyncStageNoHost).not.toContain(tool);
+    }
+    // 切阶段工具仍在（in-process，不依赖 stdio host）。
+    expect(timeSyncStageNoHost).toContain(REQUEST_STAGE_CHANGE_TOOL_NAME);
+  });
+
+  it("U10: time-sync stage injects the tsn-time-sync SKILL.md as a single string after the guidance sentinel", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "tsn-agent-timesync-skill-"));
+    const skillDir = join(rootDir, "tsn-time-sync");
+    await mkdir(skillDir, { recursive: true });
+    await writeFile(join(skillDir, "SKILL.md"), "[TIMESYNC-SKILL-PROBE] 时钟同步指引正文", "utf8");
+    // 同时放一个拓扑 SKILL.md 当干扰项：time-sync 阶段不得注入它。
+    const topologyDir = join(rootDir, "tsn-topology");
+    await mkdir(topologyDir, { recursive: true });
+    await writeFile(join(topologyDir, "SKILL.md"), "[TOPOLOGY-SKILL] 不应被注入", "utf8");
+
+    let capturedSystemPrompt;
+    const query = async function* (input) {
+      capturedSystemPrompt = input.options.systemPrompt;
+      yield { type: "result", structured_output: { assistantText: "ok" } };
+    };
+
+    await runClaude(
+      "把 GM 设成 ES-1",
+      {
+        cwd: "/tmp/project",
+        skillRoot: rootDir,
+        stageRunnerInput: { userIntent: "把 GM 设成 ES-1", stage: "time-sync" },
+      },
+      query,
+    );
+
+    // 注入是单字符串（拼接，绝不 string[]——string[] 会崩 redactSecrets）。
+    expect(typeof capturedSystemPrompt).toBe("string");
+    const [skeleton, guidance] = capturedSystemPrompt.split("<<<SKILL_GUIDANCE>>>");
+    expect(skeleton).toContain("工程状态只接受结构化校验结果");
+    expect(guidance).toContain("[TIMESYNC-SKILL-PROBE] 时钟同步指引正文");
+    // time-sync 阶段不注入拓扑场景 reference 分隔，也不注入拓扑 SKILL.md。
+    expect(capturedSystemPrompt).not.toContain("<<<SCENARIO_REFERENCE>>>");
+    expect(capturedSystemPrompt).not.toContain("[TOPOLOGY-SKILL]");
   });
 
   it("U6: undo tool handler calls the sidecar undo route and passes through the structured result", async () => {
@@ -1241,7 +1311,7 @@ describe("claude-agent-worker", () => {
       ...TOPOLOGY_MCP_ALLOWED_TOOLS,
       UNDO_TOOL_NAME,
     ]);
-    expect(audit.sdkOptions.skills).toEqual(["tsn-topology", "tsn-flow-planning"]);
+    expect(audit.sdkOptions.skills).toEqual(["tsn-topology", "tsn-time-sync", "tsn-flow-planning"]);
     expect(audit.toolCalls.map((call) => call.text).join("\n")).toContain(
       "[工具] mcp__tsn_topology__topology_describe_templates",
     );

@@ -31,6 +31,7 @@ import {
 import { type WorkspaceToolPanel, WorkspaceTools } from "./components/workspace-tools";
 import { useAgentRunController } from "./hooks/use-agent-run-controller";
 import { useSessionRepository } from "./hooks/use-session-repository";
+import { useTimesyncSnapshot } from "./hooks/use-timesync-snapshot";
 import { useTopologySnapshot } from "./hooks/use-topology-snapshot";
 import {
   exportCurrentSession,
@@ -79,6 +80,7 @@ export function App() {
     refetch: refetchTopology,
     lastMutationId,
   } = useTopologySnapshot(currentSession.id);
+  const { snapshot: timesyncSnapshot } = useTimesyncSnapshot(currentSession.id);
   const [transferNotice, setTransferNotice] = useState<TransferNotice | undefined>();
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
 
@@ -435,6 +437,8 @@ export function App() {
           isAgentRunning={isAgentRunning}
           hasUserInteraction={hasUserInteraction}
           lastMutationId={lastMutationId}
+          workflowStep={workflow.currentStep}
+          timesyncSnapshot={timesyncSnapshot}
           onSelectConfigTab={setActiveConfigTab}
           onNodeSelect={handleNodeSelect}
           onLinkSelect={handleLinkSelect}

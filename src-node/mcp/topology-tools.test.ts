@@ -32,14 +32,20 @@ vi.mock("./sidecar-client", () => ({
 }));
 
 import { z } from "zod";
+import { TIMESYNC_TOOL_NAMES } from "../../src/topology/topology-service";
 import type { SidecarResult } from "./sidecar-client";
 import {
   applyOperationsInputSchema,
   assertTopologyToolMapping,
+  createTimesyncToolRegistry,
   createTopologyToolRegistry,
   expectedAllowedToolName,
   initializeInputSchema,
+  runTimesyncTool,
   runTopologyTool,
+  setGmInputSchema,
+  setParamsInputSchema,
+  TIMESYNC_MCP_ALLOWED_TOOLS,
   TOPOLOGY_MCP_ALLOWED_TOOLS,
 } from "./topology-tools";
 import { createTsnTopologyMcpServer, isCliEntrypoint } from "./tsn-topology-server";
@@ -791,5 +797,142 @@ describe("initializeInputSchema dual-plane narrowing (U2)", () => {
     const paired = structuredClone(base);
     paired.params.crossPlaneLinks.mode = "paired";
     expect(schema.safeParse(paired).success).toBe(false);
+  });
+});
+
+describe("timesync MCP tool registry", () => {
+  beforeEach(() => {
+    fetchSidecarMock.mockReset();
+    fetchSidecarMock.mockImplementation(async () => ({
+      ok: true as const,
+      status: 200,
+      body: { ok: true, summary: {} },
+    }));
+  });
+
+  afterEach(() => {
+    fetchSidecarMock.mockReset();
+  });
+
+  it("registers the timesync tools with the expected allowedTool mappings", () => {
+    const registry = createTimesyncToolRegistry();
+    expect(registry.map((tool) => tool.name)).toEqual(TIMESYNC_TOOL_NAMES);
+    expect(registry.map((tool) => tool.allowedToolName)).toEqual(TIMESYNC_MCP_ALLOWED_TOOLS);
+    expect(TIMESYNC_MCP_ALLOWED_TOOLS).toEqual(TIMESYNC_TOOL_NAMES.map(expectedAllowedToolName));
+    // timesync 工具与 topology 工具同住 tsn_topology server，前缀一致。
+    for (const name of TIMESYNC_MCP_ALLOWED_TOOLS) {
+      expect(name.startsWith("mcp__tsn_topology__timesync_")).toBe(true);
+    }
+  });
+
+  it("set_gm forwards gmMid + optional flags to the sidecar", async () => {
+    await parseToolText(
+      runTimesyncTool("timesync.set_gm", { gmMid: "3", oneStepMode: 1, freSwitch: 0 }),
+    );
+    const { route, body } = lastFetchCall();
+    expect(route).toBe("/db/timesync/set_gm");
+    expect(body).toMatchObject({ gmMid: "3", oneStepMode: 1, freSwitch: 0 });
+  });
+
+  it("toggle_link forwards linkSeq + disabled", async () => {
+    await parseToolText(runTimesyncTool("timesync.toggle_link", { linkSeq: 2, disabled: true }));
+    const { route, body } = lastFetchCall();
+    expect(route).toBe("/db/timesync/toggle_link");
+    expect(body).toMatchObject({ linkSeq: 2, disabled: true });
+  });
+
+  it("set_params forwards only provided fields (mid omitted = all nodes)", async () => {
+    await parseToolText(runTimesyncTool("timesync.set_params", { syncPeriod: 256 }));
+    const { route, body } = lastFetchCall();
+    expect(route).toBe("/db/timesync/set_params");
+    expect(body).toMatchObject({ syncPeriod: 256 });
+    // pruneUndefined 剔除未提供字段：不发 mid / offsetThreshold。
+    expect(body).not.toHaveProperty("mid");
+    expect(body).not.toHaveProperty("offsetThreshold");
+  });
+
+  it("inspect and undo post with no extra body", async () => {
+    await parseToolText(runTimesyncTool("timesync.inspect", {}));
+    expect(lastFetchCall().route).toBe("/db/timesync/inspect");
+    await parseToolText(runTimesyncTool("timesync.undo", {}));
+    expect(lastFetchCall().route).toBe("/db/timesync/undo");
+  });
+
+  it("propagates sidecar failures as structured tool errors", async () => {
+    fetchSidecarMock.mockResolvedValueOnce({
+      ok: false as const,
+      status: 422,
+      code: "FORBIDDEN_OPERATION",
+      message: "unknown session",
+      retryable: false,
+    });
+    const payload = (await parseToolText(runTimesyncTool("timesync.set_gm", { gmMid: "3" }))) as {
+      ok: boolean;
+      errors: Array<{ code: string }>;
+    };
+    expect(payload.ok).toBe(false);
+    expect(payload.errors[0].code).toBe("FORBIDDEN_OPERATION");
+  });
+
+  it("returns UNKNOWN_TOOL for an unregistered timesync tool name", async () => {
+    const payload = (await parseToolText(
+      // biome-ignore lint/suspicious/noExplicitAny: 故意传非法工具名探测 UNKNOWN_TOOL。
+      runTimesyncTool("timesync.bogus" as any, {}),
+    )) as { ok: boolean; errors: Array<{ code: string }> };
+    expect(payload.ok).toBe(false);
+    expect(payload.errors[0].code).toBe("UNKNOWN_TOOL");
+  });
+});
+
+describe("timesync input schemas (zod boundary)", () => {
+  const setGm = z.object(setGmInputSchema());
+  const setParams = z.object(setParamsInputSchema());
+
+  it("set_gm requires non-empty gmMid; flags are 0/1", () => {
+    expect(setGm.safeParse({ gmMid: "3" }).success).toBe(true);
+    expect(setGm.safeParse({ gmMid: "" }).success).toBe(false);
+    expect(setGm.safeParse({ gmMid: "3", oneStepMode: 1, freSwitch: 0 }).success).toBe(true);
+    // 标志越界（2 / 负数）早失败。
+    expect(setGm.safeParse({ gmMid: "3", oneStepMode: 2 }).success).toBe(false);
+    expect(setGm.safeParse({ gmMid: "3", freSwitch: -1 }).success).toBe(false);
+  });
+
+  it("set_params accepts powers of two for periods (1..32768) and rejects non-powers", () => {
+    expect(setParams.safeParse({ syncPeriod: 128 }).success).toBe(true);
+    expect(setParams.safeParse({ syncPeriod: 1 }).success).toBe(true);
+    expect(setParams.safeParse({ syncPeriod: 32768 }).success).toBe(true);
+    expect(setParams.safeParse({ measurePeriod: 1024 }).success).toBe(true);
+    // 非 2 的幂 / 越上界 → 拒绝。
+    expect(setParams.safeParse({ syncPeriod: 100 }).success).toBe(false);
+    expect(setParams.safeParse({ syncPeriod: 0 }).success).toBe(false);
+    expect(setParams.safeParse({ syncPeriod: 65536 }).success).toBe(false);
+  });
+
+  it("set_params meanLinkDelayThresh is a power of two 1..128", () => {
+    expect(setParams.safeParse({ meanLinkDelayThresh: 128 }).success).toBe(true);
+    expect(setParams.safeParse({ meanLinkDelayThresh: 64 }).success).toBe(true);
+    // 800（U7 Rust 默认）不是 2 的幂、且 >128 → zod 拒绝（须由用户夹到合法幂）。
+    expect(setParams.safeParse({ meanLinkDelayThresh: 800 }).success).toBe(false);
+    expect(setParams.safeParse({ meanLinkDelayThresh: 256 }).success).toBe(false);
+    expect(setParams.safeParse({ meanLinkDelayThresh: 3 }).success).toBe(false);
+  });
+
+  it("set_params offsetThreshold is an integer 0..4095", () => {
+    expect(setParams.safeParse({ offsetThreshold: 0 }).success).toBe(true);
+    expect(setParams.safeParse({ offsetThreshold: 1000 }).success).toBe(true);
+    expect(setParams.safeParse({ offsetThreshold: 4095 }).success).toBe(true);
+    expect(setParams.safeParse({ offsetThreshold: 4096 }).success).toBe(false);
+    expect(setParams.safeParse({ offsetThreshold: -1 }).success).toBe(false);
+    expect(setParams.safeParse({ offsetThreshold: 1.5 }).success).toBe(false);
+  });
+
+  it("set_params reportEnable is 0/1; mid optional non-empty", () => {
+    expect(setParams.safeParse({ reportEnable: 1 }).success).toBe(true);
+    expect(setParams.safeParse({ reportEnable: 0 }).success).toBe(true);
+    expect(setParams.safeParse({ reportEnable: 2 }).success).toBe(false);
+    expect(setParams.safeParse({ mid: "5", syncPeriod: 256 }).success).toBe(true);
+    expect(setParams.safeParse({ mid: "" }).success).toBe(false);
+    // 空补丁（全部省略）是合法的——sidecar 端 COALESCE 全 no-op。
+    expect(setParams.safeParse({}).success).toBe(true);
   });
 });

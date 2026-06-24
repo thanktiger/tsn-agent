@@ -19,6 +19,16 @@ export const TOPOLOGY_MCP_ALLOWED_TOOLS = [
   "mcp__tsn_topology__topology_validate_artifacts",
   "mcp__tsn_topology__topology_apply_operations",
 ];
+// timesync 工具同住 tsn_topology stdio server，仅在 time-sync 阶段放行（见
+// buildAllowedToolsForStage）。worker 是纯 ESM、不能 import TS registry，故此处镜像
+// topology-tools.ts 的 TIMESYNC_MCP_ALLOWED_TOOLS；测试断言两者一致防漂移。
+export const TIMESYNC_MCP_ALLOWED_TOOLS = [
+  "mcp__tsn_topology__timesync_set_gm",
+  "mcp__tsn_topology__timesync_toggle_link",
+  "mcp__tsn_topology__timesync_set_params",
+  "mcp__tsn_topology__timesync_inspect",
+  "mcp__tsn_topology__timesync_undo",
+];
 
 // U1（独立编排能力）：切阶段工具独立于四个阶段，用 SDK in-process 自定义工具承载，
 // 不连 sidecar、不写状态、不做合法性判断（合法性在应用层 agent-adapter）。它只把
@@ -202,7 +212,7 @@ export async function runClaude(userPrompt, options = {}, queryFn = query) {
     // AskUserQuestion 在 dontAsk 模式下必然被拒（无终端 UI），硬禁省掉模型
     // 尝试浪费的 turn；prompt 交互规则 1 告知替代路径（中文数字编号选项）。
     disallowedTools: ["AskUserQuestion"],
-    skills: ["tsn-topology", "tsn-flow-planning"],
+    skills: ["tsn-topology", "tsn-time-sync", "tsn-flow-planning"],
     // tsn_workflow（切阶段工具，in-process）始终注册；tsn_topology 仅在 server 路径存在时注册。
     mcpServers: { ...(topologyMcpConfig ?? {}), [WORKFLOW_MCP_SERVER_NAME]: workflowMcpServer },
     env: {
@@ -506,9 +516,13 @@ export function buildAllowedToolsForStage(stageRunnerInput, hasTopologyMcpConfig
     // 拓扑写工具只在拓扑阶段开放：非拓扑阶段直接写库的结果不会被对账（提取按 stage 门槛），
     // 会让右侧工程与 workflow 状态静默分叉。改拓扑须先经切阶段工具回到拓扑阶段。
     ...(hasTopologyMcpConfig && stage === "topology" ? TOPOLOGY_MCP_ALLOWED_TOOLS : []),
+    // U10：timesync 工具只在时间同步阶段开放。与 topology 工具同住 tsn_topology stdio
+    // server，故同样门控 hasTopologyMcpConfig（server 没注册就别白名单它们）。timesync 写库
+    // 走 sidecar、前端靠查库渲染，不经 stageResult 对账，但 stage 门控仍防跨阶段误写。
+    ...(hasTopologyMcpConfig && stage === "time-sync" ? TIMESYNC_MCP_ALLOWED_TOOLS : []),
     // U6：撤销工具只在拓扑阶段开放（不像 request_stage_change 全阶段）——本期只撤 topology，
     // 在时间同步 / 流量规划阶段撤销会错误回退拓扑。撤销 in-process 不依赖拓扑 stdio server，
-    // 故只门控 stage（不门控 hasTopologyMcpConfig）。
+    // 故只门控 stage（不门控 hasTopologyMcpConfig）。time-sync 阶段撤销走 timesync.undo 工具。
     ...(stage === "topology" ? [UNDO_TOOL_NAME] : []),
   ];
 }
@@ -530,8 +544,19 @@ const SCENARIO_REFERENCE_SENTINEL = "<<<SCENARIO_REFERENCE>>>";
 // 未知/缺失场景回退到通用场景（与 SKILL.md 场景路由表一致）。
 const FALLBACK_SCENARIO_ID = "generic-tsn";
 
+// 阶段 → 注入哪个 SKILL.md 目录。time-sync 注入 tsn-time-sync，其余（topology/未知）
+// 注入 tsn-topology。注入始终是单字符串拼接（绝不 string[]——string[] 会崩 redactSecrets）。
+function skillDirForStage(stageRunnerInput) {
+  const stage =
+    isRecord(stageRunnerInput) && typeof stageRunnerInput.stage === "string"
+      ? stageRunnerInput.stage
+      : undefined;
+  return stage === "time-sync" ? "tsn-time-sync" : "tsn-topology";
+}
+
 async function buildSystemPromptForStage(stageRunnerInput, skillRoot) {
-  const skillPath = join(skillRoot, "tsn-topology", "SKILL.md");
+  const skillDir = skillDirForStage(stageRunnerInput);
+  const skillPath = join(skillRoot, skillDir, "SKILL.md");
 
   let guidance;
   try {
@@ -545,6 +570,14 @@ async function buildSystemPromptForStage(stageRunnerInput, skillRoot) {
         skillPath,
         error: normalizeError(error),
       },
+    };
+  }
+
+  // 场景 reference 注入只属于拓扑阶段（references/ 是拓扑场景模板细则）。其它阶段
+  // （time-sync）只注入骨架 + 该阶段 SKILL.md 正文，不做场景分隔。
+  if (skillDir !== "tsn-topology") {
+    return {
+      systemPrompt: `${SYSTEM_PROMPT_SKELETON}\n\n${SKILL_GUIDANCE_SENTINEL}\n${guidance}`,
     };
   }
 
