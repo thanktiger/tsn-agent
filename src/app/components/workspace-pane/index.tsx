@@ -67,11 +67,20 @@ export interface CommitNodePositionResult {
   mutationId: number;
 }
 
+export interface UndoTopologyResult {
+  undone: boolean;
+}
+
 /** R5：默认写通道 = update_node_position Tauri command（测试可注入替身）。 */
 async function invokeCommitNodePosition(
   args: CommitNodePositionArgs,
 ): Promise<CommitNodePositionResult> {
   return await invoke<CommitNodePositionResult>("update_node_position", { request: args });
+}
+
+/** U8：默认撤销通道 = undo_topology Tauri command（测试可注入替身）。 */
+async function invokeUndoTopology(sessionId: string): Promise<UndoTopologyResult> {
+  return await invoke<UndoTopologyResult>("undo_topology", { request: { sessionId } });
 }
 
 interface PendingPosition {
@@ -140,7 +149,10 @@ export interface WorkspacePaneProps {
   onClearSelection: () => void;
   /** 写入失败/陈旧时的回正：重拉快照覆盖本地（R10/R11）。 */
   onRefreshTopology: () => void;
+  /** U8：撤销成功后置一次性回退通知标志（下一轮注入），由 App 经 setCurrentSession 实现。 */
+  onUndone?: () => void;
   commitNodePosition?: (args: CommitNodePositionArgs) => Promise<CommitNodePositionResult>;
+  undoTopology?: (sessionId: string) => Promise<UndoTopologyResult>;
 }
 
 export function WorkspacePane({
@@ -155,7 +167,9 @@ export function WorkspacePane({
   onLinkSelect,
   onClearSelection,
   onRefreshTopology,
+  onUndone,
   commitNodePosition = invokeCommitNodePosition,
+  undoTopology = invokeUndoTopology,
 }: WorkspacePaneProps) {
   const flowTopology = useMemo(
     () =>
@@ -184,6 +198,13 @@ export function WorkspacePane({
   const resetSessionRef = useRef<string | undefined>(undefined);
   const [saveFailed, setSaveFailed] = useState(false);
   const saveFailedTimerRef = useRef<number | undefined>(undefined);
+  // U8：撤销「无可撤销」/失败时的非静默反馈（短暂内联提示）。
+  const [undoNotice, setUndoNotice] = useState<string | undefined>(undefined);
+  const undoNoticeTimerRef = useRef<number | undefined>(undefined);
+  const [undoBusy, setUndoBusy] = useState(false);
+  // U8：撤销无 redo、且会回滚拖拽布局——按钮加内联两步确认（点一下进确认态、再点才执行）。
+  const [undoConfirming, setUndoConfirming] = useState(false);
+  const undoConfirmTimerRef = useRef<number | undefined>(undefined);
   const flowInstanceRef = useRef<ReactFlowInstance<Node, Edge> | undefined>(undefined);
   const [flowInstanceVersion, setFlowInstanceVersion] = useState(0);
   const lastViewportResetKeyRef = useRef<string | undefined>(undefined);
@@ -287,6 +308,12 @@ export function WorkspacePane({
       if (saveFailedTimerRef.current !== undefined) {
         window.clearTimeout(saveFailedTimerRef.current);
       }
+      if (undoNoticeTimerRef.current !== undefined) {
+        window.clearTimeout(undoNoticeTimerRef.current);
+      }
+      if (undoConfirmTimerRef.current !== undefined) {
+        window.clearTimeout(undoConfirmTimerRef.current);
+      }
     },
     [],
   );
@@ -298,6 +325,69 @@ export function WorkspacePane({
     }
     saveFailedTimerRef.current = window.setTimeout(() => setSaveFailed(false), 3000);
   }, []);
+
+  const showUndoNotice = useCallback((text: string) => {
+    setUndoNotice(text);
+    if (undoNoticeTimerRef.current !== undefined) {
+      window.clearTimeout(undoNoticeTimerRef.current);
+    }
+    undoNoticeTimerRef.current = window.setTimeout(() => setUndoNotice(undefined), 3000);
+  }, []);
+
+  const cancelUndoConfirm = useCallback(() => {
+    setUndoConfirming(false);
+    if (undoConfirmTimerRef.current !== undefined) {
+      window.clearTimeout(undoConfirmTimerRef.current);
+      undoConfirmTimerRef.current = undefined;
+    }
+  }, []);
+
+  const runUndo = useCallback(async () => {
+    const sessionId = topologySnapshot?.sessionId;
+    if (!sessionId || undoBusy) {
+      return;
+    }
+    setUndoBusy(true);
+    try {
+      const result = await undoTopology(sessionId);
+      if (result.undone) {
+        // 双保险：emit 已触发刷新，这里再显式全量 refetch；并置一次性回退通知标志（U7）。
+        onRefreshTopology();
+        onUndone?.();
+      } else {
+        // R11：无可撤销快照——非静默，给内联提示。
+        showUndoNotice("没有可撤销的改动");
+      }
+    } catch {
+      showUndoNotice("撤销失败");
+    } finally {
+      setUndoBusy(false);
+    }
+  }, [
+    topologySnapshot?.sessionId,
+    undoBusy,
+    undoTopology,
+    onRefreshTopology,
+    onUndone,
+    showUndoNotice,
+  ]);
+
+  // 内联两步：第一次点击进入「确认撤销?」态（几秒后或失焦自动取消），第二次点击才真正执行。
+  const handleUndo = useCallback(() => {
+    if (undoBusy) {
+      return;
+    }
+    if (!undoConfirming) {
+      setUndoConfirming(true);
+      if (undoConfirmTimerRef.current !== undefined) {
+        window.clearTimeout(undoConfirmTimerRef.current);
+      }
+      undoConfirmTimerRef.current = window.setTimeout(() => setUndoConfirming(false), 3000);
+      return;
+    }
+    cancelUndoConfirm();
+    void runUndo();
+  }, [undoBusy, undoConfirming, cancelUndoConfirm, runUndo]);
 
   const handleNodesChange = useCallback((changes: NodeChange[]) => {
     setFlowNodes((nodes) => applyNodeChanges(changes, nodes));
@@ -439,10 +529,25 @@ export function WorkspacePane({
           <Stat label="交换机" value={switchCount} />
           <Stat label="端系统" value={endSystemCount} />
           <Stat label="链路" value={linkCount} />
+          <button
+            type="button"
+            className={undoConfirming ? "topology-undo-button confirming" : "topology-undo-button"}
+            aria-label="撤销上一次结构改动"
+            disabled={!hasTopology || undoBusy}
+            onClick={handleUndo}
+            onBlur={cancelUndoConfirm}
+          >
+            {undoConfirming ? "确认撤销?" : "撤销"}
+          </button>
         </div>
         {saveFailed && (
           <div className="transfer-notice error tsn-position-notice" role="alert">
             位置保存失败，已恢复
+          </div>
+        )}
+        {undoNotice && (
+          <div className="transfer-notice error tsn-position-notice" role="status">
+            {undoNotice}
           </div>
         )}
         <div

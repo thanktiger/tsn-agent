@@ -502,6 +502,61 @@ describe("App", () => {
     expect(screen.getByText("草案已生成")).toBeInTheDocument();
   });
 
+  it("undo button invokes undo_topology and lands pendingUndoNotice on the next run session (U8/U7)", async () => {
+    enableTauriRuntime();
+    invokeMock.mockImplementation(
+      async (command: string, args?: { request?: { sessionId?: string } }) => {
+        if (command === "query_topology") {
+          return sampleTopologyRows(args?.request?.sessionId ?? "unknown");
+        }
+        if (command === "get_topology_mutations_since") {
+          return { mutations: [], latest: 0, outOfRange: false };
+        }
+        if (command === "list_sessions") {
+          return [];
+        }
+        if (command === "get_current_session") {
+          return null;
+        }
+        if (command === "undo_topology") {
+          return { undone: true };
+        }
+        return undefined;
+      },
+    );
+    const user = userEvent.setup();
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByText("3 nodes / 2 edges")).toBeInTheDocument();
+    });
+
+    const undoButton = screen.getByRole("button", { name: "撤销上一次结构改动" });
+    await user.click(undoButton); // 第一步：确认态
+    await user.click(undoButton); // 第二步：执行
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith(
+        "undo_topology",
+        expect.objectContaining({
+          request: expect.objectContaining({ sessionId: expect.any(String) }),
+        }),
+      ),
+    );
+
+    // 下一轮 agent run 的 session.workflow 携带一次性 pendingUndoNotice（喂给 U7 注入）。
+    await typeDefaultIntent(user);
+    await user.click(screen.getByRole("button", { name: "生成规划草案" }));
+    await waitFor(() =>
+      expect(runTsnAgentMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          session: expect.objectContaining({
+            workflow: expect.objectContaining({ pendingUndoNotice: true }),
+          }),
+        }),
+      ),
+    );
+  });
+
   it("shows node and link details for canvas selections", async () => {
     enableTauriRuntime();
     invokeMock.mockImplementation(

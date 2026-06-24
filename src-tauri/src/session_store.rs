@@ -76,10 +76,10 @@ pub async fn get_current_session(
             .await
             .map_err(db_error)?;
 
-    if let Some(session_id) = current_id {
-        if let Some(session) = select_session(pool, &session_id).await? {
-            return Ok(Some(session));
-        }
+    if let Some(session_id) = current_id
+        && let Some(session) = select_session(pool, &session_id).await?
+    {
+        return Ok(Some(session));
     }
 
     let latest = sqlx::query(
@@ -669,6 +669,119 @@ mod tests {
                 .expect("application_id pragma");
             assert_eq!(app_id, 0x5453_4E01);
         });
+    }
+
+    #[test]
+    fn undo_snapshots_table_has_expected_columns_and_pk() {
+        tauri::async_runtime::block_on(async {
+            let pool = fresh_memory_pool().await;
+
+            // 列：session_id / domain / blob_json / created_at
+            let cols: Vec<String> =
+                sqlx::query("SELECT name FROM pragma_table_info('topology_undo_snapshots')")
+                    .fetch_all(&pool)
+                    .await
+                    .expect("table_info")
+                    .iter()
+                    .map(|row| row.get::<String, _>("name"))
+                    .collect();
+            assert_eq!(
+                cols,
+                vec!["session_id", "domain", "blob_json", "created_at"],
+                "undo snapshots 列清单 actual = {cols:?}"
+            );
+
+            // 主键 (session_id, domain)：pragma 的 pk 序号 1/2。
+            let pk: Vec<(String, i64)> = sqlx::query(
+                "SELECT name, pk FROM pragma_table_info('topology_undo_snapshots') WHERE pk > 0 ORDER BY pk",
+            )
+            .fetch_all(&pool)
+            .await
+            .expect("pk info")
+            .iter()
+            .map(|row| (row.get::<String, _>("name"), row.get::<i64, _>("pk")))
+            .collect();
+            assert_eq!(
+                pk,
+                vec![("session_id".to_string(), 1), ("domain".to_string(), 2)]
+            );
+        });
+    }
+
+    #[test]
+    fn safety_net_creates_undo_snapshots_table_on_old_db() {
+        tauri::async_runtime::block_on(async {
+            // 模拟「老库」：只有 v1 schema，没有 topology_undo_snapshots。
+            let options = sqlx::sqlite::SqliteConnectOptions::new()
+                .in_memory(true)
+                .foreign_keys(true);
+            let pool = SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect_with(options)
+                .await
+                .expect("memory sqlite");
+            sqlx::query(crate::db::SESSION_SCHEMA_SQL)
+                .execute(&pool)
+                .await
+                .expect("v1 schema");
+
+            let before = list_tables(&pool).await;
+            assert!(
+                !before.iter().any(|t| t == "topology_undo_snapshots"),
+                "老库不应预含该表"
+            );
+
+            // 启动自愈：safety_net 跑一遍后该表被建出。
+            sqlx::query(&crate::db::safety_net_schema_sql())
+                .execute(&pool)
+                .await
+                .expect("safety_net_schema_sql");
+
+            let after = list_tables(&pool).await;
+            assert!(
+                after.iter().any(|t| t == "topology_undo_snapshots"),
+                "safety-net 后应建出 topology_undo_snapshots，actual = {after:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn deleting_session_cascade_removes_undo_snapshot_rows() {
+        tauri::async_runtime::block_on(async {
+            let pool = fresh_memory_pool().await;
+            sqlx::query("INSERT INTO sessions (id, title, created_at, updated_at, payload) VALUES ('s1','t','t','t','{}')")
+                .execute(&pool).await.expect("seed session");
+            sqlx::query(
+                "INSERT INTO topology_undo_snapshots (session_id, domain, blob_json, created_at) \
+                 VALUES ('s1', 'topology', '{}', 't')",
+            )
+            .execute(&pool)
+            .await
+            .expect("seed snapshot");
+
+            sqlx::query("DELETE FROM sessions WHERE id = 's1'")
+                .execute(&pool)
+                .await
+                .expect("delete session");
+
+            let remaining: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM topology_undo_snapshots WHERE session_id = 's1'",
+            )
+            .fetch_one(&pool)
+            .await
+            .expect("count snapshots");
+            assert_eq!(remaining, 0, "删除 session 应级联清掉其撤销快照");
+        });
+    }
+
+    #[test]
+    fn session_scoped_tables_excludes_undo_snapshots() {
+        assert!(
+            !crate::db::SESSION_SCOPED_TABLES
+                .iter()
+                .any(|(table, _)| *table == "topology_undo_snapshots"),
+            "撤销快照是本机临时状态，不得进导出/导入清单"
+        );
     }
 
     #[test]

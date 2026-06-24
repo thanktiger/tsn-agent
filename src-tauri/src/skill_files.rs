@@ -446,15 +446,15 @@ fn resolve_effective_root(
     app_data: Option<&Path>,
     resource: Option<&Path>,
 ) -> EffectiveSkillRoot {
-    if let Some(dev) = dev {
-        if dev.exists() {
-            return EffectiveSkillRoot {
-                path: dev.to_path_buf(),
-                writable: true,
-                status: SkillFileRootStatus::Available,
-                reason: None,
-            };
-        }
+    if let Some(dev) = dev
+        && dev.exists()
+    {
+        return EffectiveSkillRoot {
+            path: dev.to_path_buf(),
+            writable: true,
+            status: SkillFileRootStatus::Available,
+            reason: None,
+        };
     }
 
     if let Some(app_data) = app_data {
@@ -468,17 +468,17 @@ fn resolve_effective_root(
                 };
             }
             Err(reason) => {
-                if let Some(resource) = resource {
-                    if resource.exists() {
-                        return EffectiveSkillRoot {
-                            path: resource.to_path_buf(),
-                            writable: false,
-                            status: SkillFileRootStatus::Readonly,
-                            reason: Some(format!(
-                                "可写 skill 副本不可用（{reason}），当前为内置只读副本。"
-                            )),
-                        };
-                    }
+                if let Some(resource) = resource
+                    && resource.exists()
+                {
+                    return EffectiveSkillRoot {
+                        path: resource.to_path_buf(),
+                        writable: false,
+                        status: SkillFileRootStatus::Readonly,
+                        reason: Some(format!(
+                            "可写 skill 副本不可用（{reason}），当前为内置只读副本。"
+                        )),
+                    };
                 }
                 return EffectiveSkillRoot {
                     path: app_data.to_path_buf(),
@@ -490,15 +490,15 @@ fn resolve_effective_root(
         }
     }
 
-    if let Some(resource) = resource {
-        if resource.exists() {
-            return EffectiveSkillRoot {
-                path: resource.to_path_buf(),
-                writable: false,
-                status: SkillFileRootStatus::Readonly,
-                reason: None,
-            };
-        }
+    if let Some(resource) = resource
+        && resource.exists()
+    {
+        return EffectiveSkillRoot {
+            path: resource.to_path_buf(),
+            writable: false,
+            status: SkillFileRootStatus::Readonly,
+            reason: None,
+        };
     }
 
     EffectiveSkillRoot {
@@ -778,17 +778,17 @@ fn resolve_skill_root_in(
         });
     }
 
-    if let Some(resource_id_dir) = resource_id_dir {
-        if resource_id_dir.exists() {
-            return Ok(SkillRoot {
-                path: resource_id_dir
-                    .canonicalize()
-                    .map_err(|error| format!("无法解析内置 skill 文件目录：{error}"))?,
-                writable: false,
-                status: SkillFileRootStatus::Readonly,
-                reason: Some("该 skill 播种到可写目录失败，当前为内置只读副本。".to_string()),
-            });
-        }
+    if let Some(resource_id_dir) = resource_id_dir
+        && resource_id_dir.exists()
+    {
+        return Ok(SkillRoot {
+            path: resource_id_dir
+                .canonicalize()
+                .map_err(|error| format!("无法解析内置 skill 文件目录：{error}"))?,
+            writable: false,
+            status: SkillFileRootStatus::Readonly,
+            reason: Some("该 skill 播种到可写目录失败，当前为内置只读副本。".to_string()),
+        });
     }
 
     Ok(SkillRoot {

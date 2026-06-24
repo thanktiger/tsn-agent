@@ -6,6 +6,7 @@ import type { DiagnosticLogRepository } from "../diagnostics/diagnostic-log-repo
 import { getScenarioConfig, WORKFLOW_STEPS, type WorkflowStep } from "../domain/scenario-config";
 import {
   clearPendingStageChange,
+  clearPendingUndoNotice,
   confirmCurrentStage,
   normalizeWorkflowState,
   recordStageResult,
@@ -69,7 +70,13 @@ export async function runTsnAgent(
   const request =
     typeof requestOrIntent === "string" ? { userIntent: requestOrIntent } : requestOrIntent;
   const { userIntent, action } = request;
-  const workflow = normalizeWorkflowState(request.session?.workflow);
+  // normalizeWorkflowState 会 drop 掉一次性的 pendingUndoNotice（不持久化）。但按钮路径是
+  // 在内存里经 setCurrentSession 置位的带外标志，本轮注入还需要它——所以从原始 workflow 取回
+  // 再挂上来。它只活在内存、注入后立即清，存储/加载路径仍由 normalize 一律剥离。
+  const normalized = normalizeWorkflowState(request.session?.workflow);
+  const workflow: WorkflowState = request.session?.workflow?.pendingUndoNotice
+    ? { ...normalized, pendingUndoNotice: true }
+    : normalized;
   const runId = request.runId ?? createRunId();
   const sessionId = request.session?.id;
   const startedAt = Date.now();
@@ -159,8 +166,10 @@ export async function runTsnAgent(
     });
 
     // 无「带原话」标记 → 纯确定性确认（推进 / time-sync 自动生成 / 无操作），直接返回（静默推进）。
+    // 清掉一次性回退通知：确认推进了阶段，若按钮撤销的标志还挂着，会在后续别的阶段晚一轮
+    // 发出「拓扑已撤销，先 inspect」的陈旧通知。这条路径不跑大模型、不注入，标志在此消费即弃。
     if (!confirmResult.carryIntent) {
-      return confirmResult;
+      return { ...confirmResult, workflow: clearPendingUndoNotice(confirmResult.workflow) };
     }
 
     // 回退带着原话：切阶段已完成（确定性），下面用原话在切换后的阶段继续走大模型。
@@ -204,6 +213,16 @@ export async function runTsnAgent(
       : undefined,
   });
 
+  // 一次性消费撤销回退通知：用当前 effectiveWorkflow（含标志）拼上下文后立即清位，
+  // 清后的 workflow 流进 applyStageResults 与最终返回，确保不会下一轮重复注入。
+  const conversationContext = buildConversationContext(
+    request.session,
+    effectiveWorkflow,
+    snapshot,
+    effectiveIntent,
+  );
+  effectiveWorkflow = clearPendingUndoNotice(effectiveWorkflow);
+
   try {
     const claude = await invoke<ClaudeAgentResponse>("run_claude_agent", {
       request: {
@@ -211,12 +230,7 @@ export async function runTsnAgent(
         runId,
         appSessionId: sessionId,
         resumeSessionId: request.session?.claudeSessionId,
-        conversationContext: buildConversationContext(
-          request.session,
-          effectiveWorkflow,
-          snapshot,
-          effectiveIntent,
-        ),
+        conversationContext,
         stageRunnerInput: {
           userIntent: effectiveIntent,
           stage: effectiveWorkflow.currentStep,
@@ -818,6 +832,9 @@ function buildConversationContext(
     "重要：流量规划与规划导出在当前版本暂时下线，不要声称可以生成流量规划或导出文件。",
     workflow.pendingStageChange
       ? `重要：已有一个待用户确认的回退提议（目标阶段：${scenarioConfig.stageLabels[workflow.pendingStageChange]}）。不要重复调用 request_stage_change；等待用户点确认按钮。`
+      : "",
+    workflow.pendingUndoNotice
+      ? "重要：上一步拓扑变更已被撤销，工程数据库已回退到撤销前状态。在回答关于当前拓扑的问题或进行任何编辑之前，必须先用 topology.inspect 查看当前真实状态，不要假设你上一轮的改动仍然存在。"
       : "",
     "",
     "最近对话：",

@@ -82,10 +82,10 @@ fn session_total_bytes(dir: &Path) -> Result<u64, String> {
     let mut total: u64 = 0;
     let entries = fs::read_dir(dir).map_err(|error| format!("无法读取会话日志目录：{error}"))?;
     for entry in entries.flatten() {
-        if let Ok(meta) = entry.metadata() {
-            if meta.is_file() {
-                total = total.saturating_add(meta.len());
-            }
+        if let Ok(meta) = entry.metadata()
+            && meta.is_file()
+        {
+            total = total.saturating_add(meta.len());
         }
     }
     Ok(total)

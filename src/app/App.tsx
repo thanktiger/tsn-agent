@@ -322,6 +322,17 @@ export function App() {
     setSelectedTopologyItem(undefined);
   }
 
+  // U8/U7：画布撤销成功后置一次性回退通知标志。该标志须落在喂给下一轮 agent 的
+  // 内存 session 上（submitIntent 读 contextSession = currentSession），下一轮
+  // runTsnAgent 经 request.session.workflow.pendingUndoNotice 取回并注入；
+  // normalizeWorkflowState 不持久化它，重启不还原。
+  function handleTopologyUndone() {
+    setCurrentSession((session) => ({
+      ...session,
+      workflow: { ...session.workflow, pendingUndoNotice: true },
+    }));
+  }
+
   async function handleExportSession() {
     if (isAgentRunning) {
       return;
@@ -466,6 +477,7 @@ export function App() {
           onLinkSelect={handleLinkSelect}
           onClearSelection={handleClearTopologySelection}
           onRefreshTopology={() => void refetchTopology()}
+          onUndone={handleTopologyUndone}
         />
       </main>
 

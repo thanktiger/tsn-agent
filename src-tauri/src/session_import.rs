@@ -76,10 +76,10 @@ pub async fn import_session(
     }
     // symlink 拒绝（codex review：metadata 检查与后续 SQLite open 是两次路径
     // 解析，symlink 是最廉价的混淆面；剩余 TOCTOU 窗口在单用户桌面下接受）。
-    if let Ok(meta) = std::fs::symlink_metadata(&source) {
-        if meta.file_type().is_symlink() {
-            return Err(format!("源路径是符号链接，拒绝导入：{}", source.display()));
-        }
+    if let Ok(meta) = std::fs::symlink_metadata(&source)
+        && meta.file_type().is_symlink()
+    {
+        return Err(format!("源路径是符号链接，拒绝导入：{}", source.display()));
     }
     let metadata = std::fs::metadata(&source).map_err(|e| format!("无法读取源文件元数据：{e}"))?;
     if metadata.len() > MAX_IMPORT_FILE_BYTES {

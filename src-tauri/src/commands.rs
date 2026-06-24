@@ -650,15 +650,13 @@ fn find_worker_path(app: Option<&tauri::AppHandle>) -> Result<PathBuf, String> {
         return Ok(development_worker_path);
     }
 
-    if let Some(app) = app {
-        if let Ok(resource_path) = app
+    if let Some(app) = app
+        && let Ok(resource_path) = app
             .path()
             .resolve("src-node/claude-agent-worker.mjs", BaseDirectory::Resource)
-        {
-            if resource_path.exists() {
-                return Ok(resource_path);
-            }
-        }
+        && resource_path.exists()
+    {
+        return Ok(resource_path);
     }
 
     if development_worker_path.exists() {
@@ -698,10 +696,11 @@ fn find_claude_binary(app: Option<&tauri::AppHandle>) -> Option<PathBuf> {
 /// 可用）。可用 TSN_AGENT_NODE_PATH 显式覆盖。
 fn resolve_node_command() -> std::ffi::OsString {
     use std::ffi::OsString;
-    if let Some(p) = std::env::var_os("TSN_AGENT_NODE_PATH") {
-        if !p.is_empty() && Path::new(&p).exists() {
-            return p;
-        }
+    if let Some(p) = std::env::var_os("TSN_AGENT_NODE_PATH")
+        && !p.is_empty()
+        && Path::new(&p).exists()
+    {
+        return p;
     }
     #[cfg(unix)]
     {
@@ -750,14 +749,12 @@ fn repo_root_from_worker(worker_path: &Path) -> PathBuf {
         .and_then(Path::file_name)
         .and_then(|name| name.to_str())
         == Some("dist")
-    {
-        if let Some(repo_root) = worker_path
+        && let Some(repo_root) = worker_path
             .parent()
             .and_then(Path::parent)
             .and_then(Path::parent)
-        {
-            return repo_root.to_path_buf();
-        }
+    {
+        return repo_root.to_path_buf();
     }
 
     worker_path

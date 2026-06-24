@@ -68,10 +68,10 @@ pub struct VerifyLink {
 /// 节点展示名：优先用 name 列（如 SW-1/ES-1），缺失时按类型前缀 + sync_name 派生，
 /// 与前端显示名映射一致，让结论里的节点引用对用户可读。
 fn display_name(node: &VerifyNode) -> String {
-    if let Some(name) = node.name.as_deref() {
-        if !name.is_empty() {
-            return name.to_string();
-        }
+    if let Some(name) = node.name.as_deref()
+        && !name.is_empty()
+    {
+        return name.to_string();
     }
     let prefix = match node.node_type.as_deref() {
         Some(NODE_TYPE_SWITCH) => "SW",

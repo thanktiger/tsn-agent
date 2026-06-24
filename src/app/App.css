@@ -1767,6 +1767,38 @@ textarea:focus-visible {
   white-space: nowrap;
 }
 
+.topology-undo-button {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 11px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  background: rgba(255, 255, 255, 0.88);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+  transition:
+    color 0.15s,
+    border-color 0.15s;
+}
+
+.topology-undo-button:hover:not(:disabled) {
+  color: var(--text-primary);
+  border-color: var(--accent);
+}
+
+.topology-undo-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.35;
+}
+
+/* 内联两步确认态：醒目提示「再点一次才执行」。 */
+.topology-undo-button.confirming {
+  color: #b42318;
+  border-color: #b42318;
+  background: rgba(180, 35, 24, 0.08);
+}
+
 .topology-canvas {
   position: absolute;
   inset: 0;

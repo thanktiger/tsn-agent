@@ -85,13 +85,13 @@ pub(crate) async fn perform_single_session_export(
     // symlink guard：rename 会替换 symlink 本身，但 guard 防御「目标被换成
     // 指向他处的链接」的混淆场景。
     let target = Path::new(target_path);
-    if let Ok(meta) = std::fs::symlink_metadata(target) {
-        if meta.file_type().is_symlink() {
-            return Err(format!(
-                "目标路径是符号链接，拒绝导出：{}",
-                target.display()
-            ));
-        }
+    if let Ok(meta) = std::fs::symlink_metadata(target)
+        && meta.file_type().is_symlink()
+    {
+        return Err(format!(
+            "目标路径是符号链接，拒绝导出：{}",
+            target.display()
+        ));
     }
 
     // 随机后缀临时文件（codex review）：固定 `{target}.tmp` 会误删用户恰好

@@ -438,6 +438,103 @@ describe("WorkspacePane 拖动持久化（U4）", () => {
   });
 });
 
+describe("WorkspacePane 撤销按钮（U8）", () => {
+  it("点撤销调 undo_topology 并在成功后 refetch + 置回退通知标志", async () => {
+    const user = userEvent.setup();
+    const undoTopology = vi.fn(async () => ({ undone: true }));
+    const onRefreshTopology = vi.fn();
+    const onUndone = vi.fn();
+    render(
+      <WorkspacePane
+        {...baseProps({
+          topologySnapshot: sampleSnapshot(),
+          undoTopology,
+          onRefreshTopology,
+          onUndone,
+        })}
+      />,
+    );
+    const button = screen.getByRole("button", { name: "撤销上一次结构改动" });
+    await user.click(button); // 第一步：进入确认态
+    await user.click(button); // 第二步：执行
+    await waitFor(() => expect(undoTopology).toHaveBeenCalledWith("s1"));
+    expect(onRefreshTopology).toHaveBeenCalled();
+    expect(onUndone).toHaveBeenCalled();
+  });
+
+  it("撤销按钮内联两步：第一次点击只进入确认态不执行，第二次才撤销", async () => {
+    const user = userEvent.setup();
+    const undoTopology = vi.fn(async () => ({ undone: true }));
+    render(<WorkspacePane {...baseProps({ topologySnapshot: sampleSnapshot(), undoTopology })} />);
+    const button = screen.getByRole("button", { name: "撤销上一次结构改动" });
+    await user.click(button);
+    expect(button).toHaveTextContent("确认撤销?");
+    expect(undoTopology).not.toHaveBeenCalled();
+    await user.click(button);
+    await waitFor(() => expect(undoTopology).toHaveBeenCalledTimes(1));
+    expect(button).toHaveTextContent("撤销");
+  });
+
+  it("撤销确认态失焦自动取消", async () => {
+    const user = userEvent.setup();
+    const undoTopology = vi.fn(async () => ({ undone: true }));
+    render(<WorkspacePane {...baseProps({ topologySnapshot: sampleSnapshot(), undoTopology })} />);
+    const button = screen.getByRole("button", { name: "撤销上一次结构改动" });
+    await user.click(button);
+    expect(button).toHaveTextContent("确认撤销?");
+    fireEvent.blur(button);
+    expect(button).toHaveTextContent("撤销");
+    await user.click(button); // 失焦取消后再点 = 重新进入确认态，仍未执行
+    expect(undoTopology).not.toHaveBeenCalled();
+  });
+
+  it("Covers AE3：第二次撤销返回 undone:false → 非静默提示，不置标志", async () => {
+    const user = userEvent.setup();
+    const undoTopology = vi
+      .fn()
+      .mockResolvedValueOnce({ undone: true })
+      .mockResolvedValueOnce({ undone: false });
+    const onUndone = vi.fn();
+    render(
+      <WorkspacePane
+        {...baseProps({ topologySnapshot: sampleSnapshot(), undoTopology, onUndone })}
+      />,
+    );
+    const button = screen.getByRole("button", { name: "撤销上一次结构改动" });
+    await user.click(button); // 确认
+    await user.click(button); // 执行（undone:true）
+    await waitFor(() => expect(onUndone).toHaveBeenCalledTimes(1));
+    await user.click(button); // 再次确认
+    await user.click(button); // 再次执行（undone:false）
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("没有可撤销的改动"));
+    // undone:false 不再额外置标志。
+    expect(onUndone).toHaveBeenCalledTimes(1);
+  });
+
+  it("Covers AE5：空拓扑时撤销按钮禁用", () => {
+    render(<WorkspacePane {...baseProps()} />);
+    expect(screen.getByRole("button", { name: "撤销上一次结构改动" })).toBeDisabled();
+  });
+
+  it("撤销失败（command reject）给非静默提示，不置标志", async () => {
+    const user = userEvent.setup();
+    const undoTopology = vi.fn(async () => {
+      throw new Error("boom");
+    });
+    const onUndone = vi.fn();
+    render(
+      <WorkspacePane
+        {...baseProps({ topologySnapshot: sampleSnapshot(), undoTopology, onUndone })}
+      />,
+    );
+    const button = screen.getByRole("button", { name: "撤销上一次结构改动" });
+    await user.click(button); // 确认
+    await user.click(button); // 执行（reject）
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("撤销失败"));
+    expect(onUndone).not.toHaveBeenCalled();
+  });
+});
+
 describe("WorkspacePane 画布配置与视口（R9/R12）", () => {
   it("R9：节点可拖动、禁用框选与多选（ReactFlow 配置）", () => {
     render(<WorkspacePane {...baseProps({ topologySnapshot: sampleSnapshot() })} />);
