@@ -456,7 +456,6 @@ export function initializeInputSchema(): z.ZodRawShape {
             name: z.string().optional(),
             plane: planeSchema,
             groupId: z.string().min(1),
-            role: z.literal("access").optional(),
             portCount: z.number().int().positive().optional(),
           }),
         )
@@ -494,19 +493,6 @@ export function initializeInputSchema(): z.ZodRawShape {
       crossPlaneLinks: z.object({
         mode: z.literal("none"),
       }),
-      allocation: z
-        .object({
-          idPrefix: z
-            .object({
-              switch: z.string().optional(),
-              endSystem: z.string().optional(),
-              link: z.string().optional(),
-            })
-            .optional(),
-          portStrategy: z.literal("first-free").optional(),
-          layoutStrategy: z.literal("dual-plane-grid").optional(),
-        })
-        .optional(),
     })
     .strict();
 

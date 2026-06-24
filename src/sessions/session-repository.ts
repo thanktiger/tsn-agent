@@ -250,8 +250,7 @@ export function createEmptySession(): TsnSession {
         id: createId("message"),
         role: "assistant",
         createdAt: now,
-        content:
-          "告诉我你想搭建的 TSN 网络规模，我会按步骤给出拓扑、时间同步、流量规划和配置下发准备。",
+        content: "告诉我你想搭建的 TSN 网络规模，我会按步骤给出拓扑、时间同步和流量规划。",
       },
     ],
     agentEvents: [],

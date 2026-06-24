@@ -49,23 +49,19 @@ pub const LEGACY_DIAGNOSTIC_LOGS_DDL: &str = r#"
         ON diagnostic_logs(session_id, category);
 "#;
 
-/// Schema-version 2：plan v3 U2a — 15 张 P0 领域表（schema 草案
-/// `docs/plans/2026-06-03-001-schema-draft.md`，Spike A 已通过 BFE fixture
-/// canonical byte-equal round-trip）。
+/// Schema-version 2：拓扑权威表 topology_nodes / topology_links + 单步撤销
+/// pre-image 表 topology_undo_snapshots。
 ///
-/// 分组：
-/// - topology.json (3 表): topology_nodes / topology_links / topology_refs
-/// - topo_feature.json (1 表): topo_feature_links
-/// - node.json (11 表): nodes + 10 类业务配置子表
+/// （migration v2 历史上建过 13 张 node.* / topo_feature_links / topology_refs
+/// 空壳表，从未有业务写入；2026-06-24 随 migration v6 一并 DROP，见下方迁移向量。）
 ///
 /// 字段 NULLABLE 取舍依据 Spike A 报告：
 /// - topology_nodes.node_type：BFE fixture 不含 → NULLABLE
 /// - topology_links.name：BFE fixture 不含 → NULLABLE
-/// - nodes base_info 列：BFE node.json 不含 → 全 NULLABLE
 ///
 /// `application_id` 在本 migration 末尾设置（dev db v1→v2 升级时自动 set）。
 pub const P0_DOMAIN_SCHEMA_SQL: &str = r#"
-    -- topology.json (3 tables)
+    -- topology.json (2 tables)
     CREATE TABLE IF NOT EXISTS topology_nodes (
         session_id    TEXT    NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
         -- 节点逻辑序号（规划器/MAC 表的节点身份，如 "0"/"1"/"2"）：每会话唯一，作主键。
@@ -94,154 +90,6 @@ pub const P0_DOMAIN_SCHEMA_SQL: &str = r#"
     CREATE INDEX IF NOT EXISTS idx_topology_links_session
         ON topology_links(session_id, src_sync_name, dst_sync_name);
 
-    CREATE TABLE IF NOT EXISTS topology_refs (
-        session_id  TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-        ref_json    TEXT NOT NULL,
-        PRIMARY KEY (session_id)
-    );
-
-    -- topo_feature.json (1 table)
-    CREATE TABLE IF NOT EXISTS topo_feature_links (
-        session_id  TEXT    NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-        link_id     INTEGER NOT NULL,
-        src_node    INTEGER NOT NULL,
-        src_port    INTEGER NOT NULL,
-        dst_node    INTEGER NOT NULL,
-        dst_port    INTEGER NOT NULL,
-        speed       INTEGER NOT NULL,
-        st_queues   INTEGER NOT NULL,
-        macrotick   INTEGER,
-        PRIMARY KEY (session_id, link_id)
-    );
-    CREATE INDEX IF NOT EXISTS idx_topo_feature_session_src
-        ON topo_feature_links(session_id, src_node);
-    CREATE INDEX IF NOT EXISTS idx_topo_feature_session_dst
-        ON topo_feature_links(session_id, dst_node);
-
-    -- node.json (11 tables)
-    CREATE TABLE IF NOT EXISTS nodes (
-        session_id        TEXT    NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-        node_id           TEXT    NOT NULL,
-        is_global         INTEGER NOT NULL DEFAULT 0,
-        node_name         TEXT,
-        node_type         TEXT,
-        queue_num         INTEGER,
-        buffer_num        INTEGER,
-        port_num          INTEGER,
-        mac_address       TEXT,
-        ip                TEXT,
-        config_file_name  TEXT,
-        device_id         TEXT,
-        test_port         TEXT,
-        PRIMARY KEY (session_id, node_id)
-    );
-    CREATE INDEX IF NOT EXISTS idx_nodes_session
-        ON nodes(session_id, is_global, node_id);
-
-    CREATE TABLE IF NOT EXISTS nodes_oss_cfg (
-        session_id  TEXT NOT NULL,
-        node_id     TEXT NOT NULL,
-        cfg_json    TEXT NOT NULL,
-        PRIMARY KEY (session_id, node_id),
-        FOREIGN KEY (session_id, node_id)
-            REFERENCES nodes(session_id, node_id) ON DELETE CASCADE
-    );
-
-    CREATE TABLE IF NOT EXISTS nodes_sdu_table_cfg (
-        session_id      TEXT    NOT NULL,
-        node_id         TEXT    NOT NULL,
-        port_id         INTEGER NOT NULL,
-        traffic_class   INTEGER NOT NULL CHECK (traffic_class BETWEEN 0 AND 7),
-        sdu_size        INTEGER NOT NULL DEFAULT 0,
-        PRIMARY KEY (session_id, node_id, port_id, traffic_class),
-        FOREIGN KEY (session_id, node_id)
-            REFERENCES nodes(session_id, node_id) ON DELETE CASCADE
-    );
-
-    CREATE TABLE IF NOT EXISTS nodes_gcl_cfg (
-        session_id            TEXT    NOT NULL,
-        node_id               TEXT    NOT NULL,
-        port_id               INTEGER NOT NULL,
-        slot_index            INTEGER NOT NULL,
-        operation_name        TEXT    NOT NULL,
-        gate_state_value      TEXT    NOT NULL,
-        time_interval_value   INTEGER NOT NULL,
-        PRIMARY KEY (session_id, node_id, port_id, slot_index),
-        FOREIGN KEY (session_id, node_id)
-            REFERENCES nodes(session_id, node_id) ON DELETE CASCADE
-    );
-
-    CREATE TABLE IF NOT EXISTS nodes_time_cfg (
-        session_id  TEXT NOT NULL,
-        node_id     TEXT NOT NULL,
-        cfg_json    TEXT NOT NULL,
-        PRIMARY KEY (session_id, node_id),
-        FOREIGN KEY (session_id, node_id)
-            REFERENCES nodes(session_id, node_id) ON DELETE CASCADE
-    );
-
-    CREATE TABLE IF NOT EXISTS nodes_psfg_stream_filters (
-        session_id      TEXT    NOT NULL,
-        node_id         TEXT    NOT NULL,
-        filter_id       INTEGER NOT NULL,
-        spec_json       TEXT    NOT NULL,
-        flow_meter_id   INTEGER,
-        stream_gate_id  INTEGER,
-        PRIMARY KEY (session_id, node_id, filter_id),
-        FOREIGN KEY (session_id, node_id)
-            REFERENCES nodes(session_id, node_id) ON DELETE CASCADE
-    );
-
-    CREATE TABLE IF NOT EXISTS nodes_psfg_flow_meters (
-        session_id  TEXT    NOT NULL,
-        node_id     TEXT    NOT NULL,
-        meter_id    INTEGER NOT NULL,
-        spec_json   TEXT    NOT NULL,
-        PRIMARY KEY (session_id, node_id, meter_id),
-        FOREIGN KEY (session_id, node_id)
-            REFERENCES nodes(session_id, node_id) ON DELETE CASCADE
-    );
-
-    CREATE TABLE IF NOT EXISTS nodes_psfg_stream_gates (
-        session_id  TEXT    NOT NULL,
-        node_id     TEXT    NOT NULL,
-        gate_id     INTEGER NOT NULL,
-        spec_json   TEXT    NOT NULL,
-        PRIMARY KEY (session_id, node_id, gate_id),
-        FOREIGN KEY (session_id, node_id)
-            REFERENCES nodes(session_id, node_id) ON DELETE CASCADE
-    );
-
-    CREATE TABLE IF NOT EXISTS nodes_frer_cfg (
-        session_id  TEXT NOT NULL,
-        node_id     TEXT NOT NULL,
-        cfg_json    TEXT NOT NULL,
-        PRIMARY KEY (session_id, node_id),
-        FOREIGN KEY (session_id, node_id)
-            REFERENCES nodes(session_id, node_id) ON DELETE CASCADE
-    );
-
-    CREATE TABLE IF NOT EXISTS nodes_array_cfg (
-        session_id   TEXT    NOT NULL,
-        node_id      TEXT    NOT NULL,
-        cfg_kind     TEXT    NOT NULL CHECK (cfg_kind IN ('fwd_cfg', 'inform_cfg')),
-        entry_seq    INTEGER NOT NULL,
-        entry_json   TEXT    NOT NULL,
-        PRIMARY KEY (session_id, node_id, cfg_kind, entry_seq),
-        FOREIGN KEY (session_id, node_id)
-            REFERENCES nodes(session_id, node_id) ON DELETE CASCADE
-    );
-
-    CREATE TABLE IF NOT EXISTS nodes_object_cfg (
-        session_id   TEXT NOT NULL,
-        node_id      TEXT NOT NULL,
-        cfg_kind     TEXT NOT NULL CHECK (cfg_kind IN ('para_cfg', 'static_mac_cfg', 'tsnlight_cfg', 'multicast_cfg')),
-        cfg_json     TEXT NOT NULL,
-        PRIMARY KEY (session_id, node_id, cfg_kind),
-        FOREIGN KEY (session_id, node_id)
-            REFERENCES nodes(session_id, node_id) ON DELETE CASCADE
-    );
-
     -- 单步撤销 pre-image blob（按 (session_id, domain) 覆盖式只留一份，
     -- ON DELETE CASCADE 随 session 删除清快照）。本机临时状态，不进
     -- SESSION_SCOPED_TABLES（不随 session 导出/导入）。
@@ -257,10 +105,10 @@ pub const P0_DOMAIN_SCHEMA_SQL: &str = r#"
 "#;
 
 /// `connect_app_database` 内 safety-net 用：v1 + v2 schema 的 `CREATE IF NOT EXISTS`
-/// + v3 `DROP diagnostic_logs` + v4 backfill state 表，均幂等。
+/// + v3 `DROP diagnostic_logs` + v6 `DROP` 废弃空壳表，均幂等。
 pub fn safety_net_schema_sql() -> String {
     format!(
-        "{SESSION_SCHEMA_SQL}\n{P0_DOMAIN_SCHEMA_SQL}\n{DROP_DIAGNOSTIC_LOGS_SQL}\n{SESSION_BACKFILL_STATE_SQL}"
+        "{SESSION_SCHEMA_SQL}\n{P0_DOMAIN_SCHEMA_SQL}\n{DROP_DIAGNOSTIC_LOGS_SQL}\n{DROP_UNUSED_TABLES_SQL}"
     )
 }
 
@@ -371,7 +219,6 @@ pub async fn ensure_topology_rekey_to_sync_name(
 /// 防两端漂移 —— 导出写了 import 不收的表 = 静默丢数据。
 /// `sessions` 行本身不在清单内（两端都有特殊处理：导出置 payload、导入改写 id）。
 pub const SESSION_SCOPED_TABLES: &[(&str, &[&str])] = &[
-    ("topology_refs", &["session_id", "ref_json"]),
     (
         "topology_nodes",
         &[
@@ -395,96 +242,6 @@ pub const SESSION_SCOPED_TABLES: &[(&str, &[&str])] = &[
             "styles_json",
         ],
     ),
-    (
-        "topo_feature_links",
-        &[
-            "session_id",
-            "link_id",
-            "src_node",
-            "src_port",
-            "dst_node",
-            "dst_port",
-            "speed",
-            "st_queues",
-            "macrotick",
-        ],
-    ),
-    (
-        "nodes",
-        &[
-            "session_id",
-            "node_id",
-            "is_global",
-            "node_name",
-            "node_type",
-            "queue_num",
-            "buffer_num",
-            "port_num",
-            "mac_address",
-            "ip",
-            "config_file_name",
-            "device_id",
-            "test_port",
-        ],
-    ),
-    ("nodes_oss_cfg", &["session_id", "node_id", "cfg_json"]),
-    (
-        "nodes_sdu_table_cfg",
-        &[
-            "session_id",
-            "node_id",
-            "port_id",
-            "traffic_class",
-            "sdu_size",
-        ],
-    ),
-    (
-        "nodes_gcl_cfg",
-        &[
-            "session_id",
-            "node_id",
-            "port_id",
-            "slot_index",
-            "operation_name",
-            "gate_state_value",
-            "time_interval_value",
-        ],
-    ),
-    ("nodes_time_cfg", &["session_id", "node_id", "cfg_json"]),
-    (
-        "nodes_psfg_stream_filters",
-        &[
-            "session_id",
-            "node_id",
-            "filter_id",
-            "spec_json",
-            "flow_meter_id",
-            "stream_gate_id",
-        ],
-    ),
-    (
-        "nodes_psfg_flow_meters",
-        &["session_id", "node_id", "meter_id", "spec_json"],
-    ),
-    (
-        "nodes_psfg_stream_gates",
-        &["session_id", "node_id", "gate_id", "spec_json"],
-    ),
-    ("nodes_frer_cfg", &["session_id", "node_id", "cfg_json"]),
-    (
-        "nodes_array_cfg",
-        &[
-            "session_id",
-            "node_id",
-            "cfg_kind",
-            "entry_seq",
-            "entry_json",
-        ],
-    ),
-    (
-        "nodes_object_cfg",
-        &["session_id", "node_id", "cfg_kind", "cfg_json"],
-    ),
 ];
 
 /// Plan v3 U_R5：lazy migration。旧 v1 db 含 `diagnostic_logs` 表 + 索引；
@@ -496,10 +253,9 @@ pub const DROP_DIAGNOSTIC_LOGS_SQL: &str = r#"
     DROP TABLE IF EXISTS diagnostic_logs;
 "#;
 
-/// Plan v3 U5：backfill state 表（migration v4）。追踪每个 session 的
-/// payload TEXT → 15 P0 表的迁移状态。
-/// 实际 walker（CanonicalTsnProjectV0 JSON → topology_nodes / links 等）
-/// 由 next session 实现；本 unit 先建表 + 命令骨架。
+/// migration v4 的建表 SQL，**冻结不可改**：sqlx Migrator 按内容 checksum 校验
+/// 已应用迁移，改一个字节都会让老库启动报 VersionMismatch。session_backfill_state
+/// 的实际下线由 v6 `DROP` 完成（见 DROP_UNUSED_TABLES_SQL），此处仅保留历史原文。
 pub const SESSION_BACKFILL_STATE_SQL: &str = r#"
     CREATE TABLE IF NOT EXISTS session_backfill_state (
         session_id    TEXT    PRIMARY KEY NOT NULL,
@@ -509,6 +265,32 @@ pub const SESSION_BACKFILL_STATE_SQL: &str = r#"
     );
     CREATE INDEX IF NOT EXISTS idx_session_backfill_state
         ON session_backfill_state(state);
+"#;
+
+/// 废弃空壳表清理（migration v6，2026-06-24）：migration v2 建过 13 张 node.*
+/// 子表 + topo_feature_links + topology_refs，从未有业务写入（walker 下线后无人
+/// 填充）；v4 的 session_backfill_state 服务的 walker 已退化为 payload 健康检查，
+/// 连带恢复子系统一并下线。一次性 `DROP TABLE IF EXISTS`，child→parent 顺序
+/// （nodes_* 先于 nodes，避免 FK 悬挂）。新库这些表本就不再建，DROP 全 no-op。
+pub const DROP_UNUSED_TABLES_SQL: &str = r#"
+    DROP INDEX IF EXISTS idx_session_backfill_state;
+    DROP TABLE IF EXISTS session_backfill_state;
+    DROP TABLE IF EXISTS nodes_object_cfg;
+    DROP TABLE IF EXISTS nodes_array_cfg;
+    DROP TABLE IF EXISTS nodes_frer_cfg;
+    DROP TABLE IF EXISTS nodes_psfg_stream_gates;
+    DROP TABLE IF EXISTS nodes_psfg_flow_meters;
+    DROP TABLE IF EXISTS nodes_psfg_stream_filters;
+    DROP TABLE IF EXISTS nodes_time_cfg;
+    DROP TABLE IF EXISTS nodes_gcl_cfg;
+    DROP TABLE IF EXISTS nodes_sdu_table_cfg;
+    DROP TABLE IF EXISTS nodes_oss_cfg;
+    DROP INDEX IF EXISTS idx_nodes_session;
+    DROP TABLE IF EXISTS nodes;
+    DROP INDEX IF EXISTS idx_topo_feature_session_src;
+    DROP INDEX IF EXISTS idx_topo_feature_session_dst;
+    DROP TABLE IF EXISTS topo_feature_links;
+    DROP TABLE IF EXISTS topology_refs;
 "#;
 
 /// 端系统持久层标签统一（2026-06-17）：旧版给端系统节点的 `node_type` 存
@@ -542,6 +324,8 @@ pub fn migrations() -> Vec<tauri_plugin_sql::Migration> {
         tauri_plugin_sql::Migration {
             version: 4,
             description: "create_session_backfill_state",
+            // v4 SQL 必须原样保留（sqlx Migrator 对已应用迁移做 checksum 校验，
+            // 改动会让老库 VersionMismatch）。该表的下线由 v6 DROP 完成。
             sql: SESSION_BACKFILL_STATE_SQL,
             kind: tauri_plugin_sql::MigrationKind::Up,
         },
@@ -549,6 +333,12 @@ pub fn migrations() -> Vec<tauri_plugin_sql::Migration> {
             version: 5,
             description: "rename_networkcard_node_type_to_end_system",
             sql: RENAME_NETWORKCARD_NODE_TYPE_SQL,
+            kind: tauri_plugin_sql::MigrationKind::Up,
+        },
+        tauri_plugin_sql::Migration {
+            version: 6,
+            description: "drop_unused_node_and_backfill_tables",
+            sql: DROP_UNUSED_TABLES_SQL,
             kind: tauri_plugin_sql::MigrationKind::Up,
         },
     ]

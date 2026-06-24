@@ -48,9 +48,9 @@ export interface TopologyWorkflowStageResult extends WorkflowStageBaseResult {
 }
 
 export interface PlaceholderWorkflowStageResult extends WorkflowStageBaseResult {
-  stage: "time-sync" | "planning-export";
+  stage: "time-sync";
   payload: {
-    kind: "time-sync" | "planning-export";
+    kind: "time-sync";
   };
 }
 
@@ -66,7 +66,7 @@ export interface WorkflowStageSummary {
   safeEventSummary?: WorkflowStageSafeEventSummary;
 }
 
-const WORKFLOW_STEPS = ["topology", "time-sync", "flow-template", "planning-export"] as const;
+const WORKFLOW_STEPS = ["topology", "time-sync", "flow-template"] as const;
 const PRODUCER_TYPES = ["mcp", "local-runtime"] as const;
 
 export function parseWorkflowStageResult(value: unknown): WorkflowStageResult {

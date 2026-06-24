@@ -19,7 +19,6 @@ use sqlx::Row;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use crate::topology_backfill::legacy_node_type;
 use crate::topology_compute::{
     InitializeIntent, build_topology_artifacts, describe_topology_artifacts,
     initialize_topology as compute_initialize, validate_intermediate_topology,
@@ -240,6 +239,17 @@ pub async fn initialize(
     ok_summary(summary_value)
 }
 
+/// canonical 节点类型 → 持久层 node_type 字符串。端系统统一存 endSystem
+/// （历史上曾用 networkcard，已由 migration v5 收敛）。未知类型兜底 endSystem。
+fn legacy_node_type(canonical: &str) -> &'static str {
+    match canonical {
+        "switch" => "switch",
+        "endSystem" => "endSystem",
+        "server" => "server",
+        _ => "endSystem",
+    }
+}
+
 /// 把 initialize 计算出的 IntermediateTopology 重建到该 session 的 P0 表。
 /// 节点键 sync_name = numericId；连线两端引用 sync_name。Qunee 专有的 imac/sync_type
 /// 不再落库，需要时由 build_artifacts 从节点+node_type 现导。
@@ -259,7 +269,7 @@ async fn persist_initialized_topology(
         .await
         .map_err(|e| format!("undo snapshot failed: {e}"))?;
 
-    for table in ["topology_nodes", "topology_links", "topology_refs"] {
+    for table in ["topology_nodes", "topology_links"] {
         sqlx::query(&format!("DELETE FROM {table} WHERE session_id = ?"))
             .bind(session_id)
             .execute(&mut *conn)

@@ -222,6 +222,26 @@ describe("useSessionRepository", () => {
     expect(allSessions.some((s) => s.id === "to-delete")).toBe(false);
   });
 
+  it("isSessionDeleted tombstones a deleted id but not new/unknown ids", async () => {
+    const original: TsnSession = { ...createEmptySession(), id: "to-delete" };
+    await repository.save(original);
+    await repository.setCurrent(original.id);
+
+    const { result } = renderHook(() => useSessionRepository({ repository, diagnostics }));
+    await waitFor(() => expect(result.current.currentSession.id).toBe("to-delete"));
+
+    expect(result.current.isSessionDeleted("to-delete")).toBe(false);
+    expect(result.current.isSessionDeleted("never-existed")).toBe(false);
+
+    await act(async () => {
+      await result.current.handleDeleteSession();
+    });
+
+    // 删过的 id 进墓碑（拦掉残留指针的 UPSERT 回写）；从未删过的新会话 id 不进。
+    expect(result.current.isSessionDeleted("to-delete")).toBe(true);
+    expect(result.current.isSessionDeleted(result.current.currentSession.id)).toBe(false);
+  });
+
   it("sessionExists returns true for saved sessions and false for unknown", async () => {
     const saved: TsnSession = { ...createEmptySession(), id: "known" };
     await repository.save(saved);

@@ -12,7 +12,7 @@ import { redactProviderNamesForDisplay } from "../../../ui/display-redaction";
 import type { AgentRunPhase } from "../../hooks/use-agent-run-controller";
 import { ToolCallCard } from "./tool-call-card";
 
-const STEPPER_STEPS = ["topology", "time-sync", "flow-template", "planning-export"] as const;
+const STEPPER_STEPS = ["topology", "time-sync", "flow-template"] as const;
 
 /** 验证口径 → 给用户看的中文标签（"绿/红"永远带它出现，杜绝误读为时延已保证）。 */
 function caliberLabel(caliber: string): string {
@@ -63,8 +63,8 @@ export function ChatPane({
 
       <div className="chat-stepper" role="group" aria-label="配置步骤">
         {STEPPER_STEPS.map((step, index, steps) => {
-          // Phase B-α：flow-template / planning-export 阶段 aria-disabled + tooltip
-          const isFlowStage = step === "flow-template" || step === "planning-export";
+          // Phase B-α：flow-template 阶段 aria-disabled + tooltip
+          const isFlowStage = step === "flow-template";
           return (
             <Fragment key={step}>
               <Step
@@ -73,7 +73,7 @@ export function ChatPane({
                 status={workflow.stages[step].status}
                 disabled={isFlowStage}
                 disabledReason={
-                  isFlowStage ? "流量规划与规划导出在当前版本暂时下线，预计 v0.X 回归" : undefined
+                  isFlowStage ? "流量规划在当前版本暂时下线，预计 Phase B 回归" : undefined
                 }
               />
               {index < steps.length - 1 && (
@@ -290,7 +290,7 @@ function Step({
   index: string;
   label: string;
   status: WorkflowStepStatus;
-  /** Phase B-α (plan v3 U9c)：标记暂下线阶段（flow-template / planning-export）。 */
+  /** Phase B-α (plan v3 U9c)：标记暂下线阶段（flow-template）。 */
   disabled?: boolean;
   /** tooltip 文案，鼠标 hover + screen reader 都可以读。 */
   disabledReason?: string;

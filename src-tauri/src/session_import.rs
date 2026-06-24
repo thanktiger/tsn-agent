@@ -4,14 +4,12 @@
 //! 不直接 sqlite ATTACH（plan v3 KTD：避免外部 .db 解析层漏洞作为攻击面）。
 //! 改为：开外部 db 连接 → integrity_check + cell_size_check + trusted_schema=OFF
 //! → 行数/字段级上限校验 → 仅 SELECT `db::SESSION_SCOPED_TABLES` 白名单表 +
-//! sessions 1 行 → 在 main db 单事务内逐行 INSERT（FK 失败即 ROLLBACK）→
-//! 同事务写 `session_backfill_state = completed_walker`（导入会话不经历启动期
-//! pending 循环 —— 拓扑已随切片直接落 P0 表，无需 walker 重建，plan 2026-06-05-002 R6）。
+//! sessions 1 行 → 在 main db 单事务内逐行 INSERT（FK 失败即 ROLLBACK）。
 //!
 //! 与 plan v3 R19 "via ops whitelist" 的偏离（**追认现状**，收敛保留为 TODOS P2）：
-//! 当前 `topology_ops` 仅含 node/link 5 个 variant；其他子表直接 INSERT 而非走
-//! ops。styles_json 等 JSON 字段的内容级注入面（导入文本最终经 inspect 进入
-//! 模型上下文）同属 deferred —— 本层只做长度与 JSON object 结构校验。
+//! 当前 `topology_ops` 仅含 node/link 5 个 variant；styles_json 等 JSON 字段的
+//! 内容级注入面（导入文本最终经 inspect 进入模型上下文）同属 deferred ——
+//! 本层只做长度与 JSON object 结构校验。
 
 use serde::Deserialize;
 use sqlx::{Row, SqlitePool};
@@ -26,16 +24,11 @@ pub const MAX_IMPORT_FILE_BYTES: u64 = 10 * 1024 * 1024;
 /// 字段级字节上限（plan 2026-06-05-002 U2，security review）：
 /// 文件级 10MB + 行数上限挡不住「单行单字段塞 9MB」的炸弹 —— styles_json
 /// 会经 sidecar inspect 原文直达模型上下文。
-const MAX_SMALL_TEXT_BYTES: usize = 4 * 1024; // styles_json / sync_type
-const MAX_JSON_TEXT_BYTES: usize = 64 * 1024; // ref_json / cfg_json / spec_json / entry_json
-const MAX_IDENT_TEXT_BYTES: usize = 64; // mac_address / ip
+const MAX_SMALL_TEXT_BYTES: usize = 4 * 1024; // styles_json / name / sync_name 等
 const MAX_NAME_TEXT_BYTES: usize = 256; // sessions.title / project_name
 /// sessions.payload 字节上限：导出携带完整会话（已脱敏），主库实测 payload 在
 /// 数十 KB 量级；给 2MB 宽松上限防外部篡改文件单行灌爆（文件 10MB 是总闸）。
 const MAX_PAYLOAD_BYTES: usize = 2 * 1024 * 1024;
-/// 全部 scoped 表的总行数上限：行数守卫只盯 topology_nodes/links，子表
-/// （nodes_gcl_cfg 等）可在 10MB 内塞数十万小行造成单事务长锁 + 内存压力。
-const MAX_TOTAL_SCOPED_ROWS: usize = 50_000;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -58,10 +51,6 @@ pub struct ImportSessionResponse {
 pub struct ImportSummary {
     pub topology_nodes: u64,
     pub topology_links: u64,
-    pub topology_refs: u64,
-    pub topo_feature_links: u64,
-    pub nodes: u64,
-    pub subtables: u64,
 }
 
 #[tauri::command]
@@ -237,26 +226,6 @@ async fn perform_import_inner(
         ));
     }
 
-    // 总行数预检（codex review：原先在 fetch_all 物化之后才累计，且 main 事务
-    // 已开 —— 恶意文件仍可造成大量内存物化 + 长时间持有写事务）。COUNT 预检
-    // 在源库完成，超限即拒，main 事务尚未开启。
-    let mut total_scoped_rows: i64 = 0;
-    for (table, _) in crate::db::SESSION_SCOPED_TABLES {
-        let count: i64 = sqlx::query_scalar(&format!(
-            "SELECT COUNT(*) FROM {table} WHERE session_id = ?"
-        ))
-        .bind(&src_session_id)
-        .fetch_one(src_pool)
-        .await
-        .map_err(|e| format!("源 {table} 计数失败：{e}"))?;
-        total_scoped_rows += count;
-        if total_scoped_rows as usize > MAX_TOTAL_SCOPED_ROWS {
-            return Err(format!(
-                "源数据总行数超过上限 {MAX_TOTAL_SCOPED_ROWS}，拒绝导入"
-            ));
-        }
-    }
-
     // ---------- main db 事务：seed sessions + insert 子表 ----------
     let mut tx = main_pool
         .begin()
@@ -329,34 +298,12 @@ async fn perform_import_inner(
                 .await
                 .map_err(|e| format!("INSERT {table} 失败：{e}"))?;
             match *table {
-                "topology_refs" => summary.topology_refs += 1,
                 "topology_nodes" => summary.topology_nodes += 1,
                 "topology_links" => summary.topology_links += 1,
-                "topo_feature_links" => summary.topo_feature_links += 1,
-                "nodes" => summary.nodes += 1,
-                _ => summary.subtables += 1,
+                _ => {}
             }
         }
     }
-
-    // R6：导入会话写终态 backfill 状态（同事务 —— 行复制回滚时它也回滚）。
-    // 不写则下次启动 mark_pending_for_all_sessions 会把它标 pending，经历一轮
-    // 无谓的 pending→completed 循环（walker 对 '{}' 直接 mark_completed，不删行，
-    // 但循环依赖该分支语义永不变化）。内联 SQL：mark_completed 签名为 &SqlitePool，
-    // 不接受事务。
-    sqlx::query(
-        r#"INSERT INTO session_backfill_state (session_id, state, error_code, attempted_at)
-           VALUES (?, 'completed_walker', NULL, ?)
-           ON CONFLICT(session_id) DO UPDATE SET
-               state = 'completed_walker',
-               error_code = NULL,
-               attempted_at = excluded.attempted_at"#,
-    )
-    .bind(&target_session_id)
-    .bind(crate::topology_backfill::chrono_like_iso_now())
-    .execute(&mut *tx)
-    .await
-    .map_err(|e| format!("写入 backfill 状态失败：{e}"))?;
 
     tx.commit().await.map_err(|e| format!("commit 失败：{e}"))?;
 
@@ -366,27 +313,21 @@ async fn perform_import_inner(
     })
 }
 
-/// 字段级校验：长度上限按列名分级；styles_json 额外要求 JSON object 结构
-/// （非 object 的 styles_json 是 trivially crafted 的毒数据，UI/agent 端无消费语义）。
-/// 未点名的 TEXT 列（sync_name/name/node_id/node_name/operation_name 等会流向
-/// UI label 与 agent inspect）统一吃 4KB 兜底上限 —— 不再有无限大的口子。
+/// 字段级校验：所有 scoped TEXT 列（sync_name/name/src_sync_name/styles_json 等
+/// 会流向 UI label 与 agent inspect）统一吃 4KB 兜底上限 —— 不再有无限大的口子；
+/// styles_json 额外要求 JSON object 结构（非 object 的 styles_json 是 trivially
+/// crafted 的毒数据，UI/agent 端无消费语义）。
 fn validate_text_field(
     table: &str,
     col: &str,
     row: &sqlx::sqlite::SqliteRow,
 ) -> Result<(), String> {
-    let limit = match col {
-        "styles_json" => MAX_SMALL_TEXT_BYTES,
-        "ref_json" | "cfg_json" | "spec_json" | "entry_json" => MAX_JSON_TEXT_BYTES,
-        "mac_address" | "ip" => MAX_IDENT_TEXT_BYTES,
-        _ => MAX_SMALL_TEXT_BYTES,
-    };
     let Ok(Some(value)) = row.try_get::<Option<String>, _>(col) else {
         return Ok(());
     };
-    if value.len() > limit {
+    if value.len() > MAX_SMALL_TEXT_BYTES {
         return Err(format!(
-            "{table}.{col} 字段长度 {} 字节超过上限 {limit}，拒绝导入",
+            "{table}.{col} 字段长度 {} 字节超过上限 {MAX_SMALL_TEXT_BYTES}，拒绝导入",
             value.len()
         ));
     }
@@ -601,107 +542,6 @@ mod tests {
     }
 
     #[test]
-    fn import_writes_completed_walker_and_survives_startup_walker() {
-        tauri::async_runtime::block_on(async {
-            let (dir, main_pool) = seed_main_pool().await;
-            let export_path = produce_export_db(dir.path(), "{}").await;
-
-            perform_import(&main_pool, &export_path, Some("imported"))
-                .await
-                .unwrap();
-
-            // R6：导入即带终态 state 行。
-            let state: String = sqlx::query_scalar(
-                "SELECT state FROM session_backfill_state WHERE session_id='imported'",
-            )
-            .fetch_one(&main_pool)
-            .await
-            .unwrap();
-            assert_eq!(state, "completed_walker");
-
-            // 模拟下次 app 启动：mark_pending（INSERT OR IGNORE，有行不动）+ walker。
-            crate::topology_backfill::mark_pending_for_all_sessions(&main_pool)
-                .await
-                .unwrap();
-            let state_after_mark: String = sqlx::query_scalar(
-                "SELECT state FROM session_backfill_state WHERE session_id='imported'",
-            )
-            .fetch_one(&main_pool)
-            .await
-            .unwrap();
-            assert_eq!(
-                state_after_mark, "completed_walker",
-                "导入会话不得被重标 pending"
-            );
-
-            crate::topology_backfill::run_walker_for_pending_sessions(&main_pool)
-                .await
-                .unwrap();
-            let node_count: i64 = sqlx::query_scalar(
-                "SELECT COUNT(*) FROM topology_nodes WHERE session_id='imported'",
-            )
-            .fetch_one(&main_pool)
-            .await
-            .unwrap();
-            assert_eq!(
-                node_count, 2,
-                "导入的 P0 行必须在启动 walker 全跑后原样保留"
-            );
-        });
-    }
-
-    #[test]
-    fn import_failure_rolls_back_backfill_state_with_rows() {
-        tauri::async_runtime::block_on(async {
-            let (dir, main_pool) = seed_main_pool().await;
-            // 手工构造恶意切片：带孤儿 nodes_oss_cfg 行（无对应 nodes 行）。
-            // 真实导出函数 FK on 产不出这种文件 —— import 防的是任意外部 .db。
-            let export_path = dir.path().join("export.db");
-            let opts = sqlx::sqlite::SqliteConnectOptions::new()
-                .filename(&export_path)
-                .create_if_missing(true);
-            let evil_pool = SqlitePoolOptions::new()
-                .max_connections(1)
-                .connect_with(opts)
-                .await
-                .unwrap();
-            sqlx::query(&crate::db::safety_net_schema_sql())
-                .execute(&evil_pool)
-                .await
-                .unwrap();
-            sqlx::query("INSERT INTO sessions (id, title, created_at, updated_at, payload) VALUES ('orig', 't', 'now', 'now', '{}')")
-                .execute(&evil_pool).await.unwrap();
-            sqlx::query("PRAGMA foreign_keys = OFF")
-                .execute(&evil_pool)
-                .await
-                .unwrap();
-            sqlx::query("INSERT INTO nodes_oss_cfg (session_id, node_id, cfg_json) VALUES ('orig', 'ghost', '{}')")
-                .execute(&evil_pool).await.unwrap();
-            evil_pool.close().await;
-
-            let err = perform_import(&main_pool, &export_path, Some("broken"))
-                .await
-                .unwrap_err();
-            assert!(err.contains("nodes_oss_cfg"), "err={err}");
-
-            // 整体回滚：sessions 行与 backfill state 行都不存在（同事务联动）。
-            let sessions: i64 =
-                sqlx::query_scalar("SELECT COUNT(*) FROM sessions WHERE id='broken'")
-                    .fetch_one(&main_pool)
-                    .await
-                    .unwrap();
-            assert_eq!(sessions, 0);
-            let states: i64 = sqlx::query_scalar(
-                "SELECT COUNT(*) FROM session_backfill_state WHERE session_id='broken'",
-            )
-            .fetch_one(&main_pool)
-            .await
-            .unwrap();
-            assert_eq!(states, 0);
-        });
-    }
-
-    #[test]
     fn import_rejects_node_count_over_limit() {
         tauri::async_runtime::block_on(async {
             let (dir, main_pool) = seed_main_pool().await;
@@ -789,32 +629,9 @@ mod tests {
     }
 
     #[test]
-    fn import_rejects_oversized_ident_and_sanitizes_session_row() {
+    fn import_sanitizes_session_row() {
         tauri::async_runtime::block_on(async {
             let (dir, main_pool) = seed_main_pool().await;
-            // mac_address 超 64B → 拒（字段上限的 ident 档代表用例）。
-            let src_pool = source_pool(dir.path()).await;
-            sqlx::query("INSERT INTO sessions (id, title, created_at, updated_at, payload) VALUES ('orig', 't', 'now', 'now', '{}')")
-                .execute(&src_pool).await.unwrap();
-            sqlx::query(
-                "INSERT INTO nodes (session_id, node_id, mac_address) VALUES ('orig', 'n0', ?)",
-            )
-            .bind("a".repeat(65))
-            .execute(&src_pool)
-            .await
-            .unwrap();
-            let export_path = dir.path().join("export.db");
-            crate::session_export::perform_single_session_export(
-                &src_pool,
-                "orig",
-                export_path.to_str().unwrap(),
-            )
-            .await
-            .unwrap();
-            let err = perform_import(&main_pool, &export_path, Some("mac"))
-                .await
-                .unwrap_err();
-            assert!(err.contains("mac_address"), "err={err}");
 
             // 合法 JSON object payload 保留源字段，但内嵌 id 改写为行 PK（换 id
             // 重试场景下二者必须一致，见 import_rewrites_embedded_payload_id 测试）。
@@ -948,52 +765,6 @@ mod tests {
                 .await
                 .unwrap_err();
             assert!(err.contains("project_name"), "err={err}");
-
-            // 总行数 > MAX_TOTAL_SCOPED_ROWS → 拒(子表塞行;手工切片绕过 FK）。
-            let rows_path = dir.path().join("rows.db");
-            let opts = sqlx::sqlite::SqliteConnectOptions::new()
-                .filename(&rows_path)
-                .create_if_missing(true);
-            let rows_pool = SqlitePoolOptions::new()
-                .max_connections(1)
-                .connect_with(opts)
-                .await
-                .unwrap();
-            sqlx::query(&crate::db::safety_net_schema_sql())
-                .execute(&rows_pool)
-                .await
-                .unwrap();
-            sqlx::query("INSERT INTO sessions (id, title, created_at, updated_at, payload) VALUES ('orig', 't', 'now', 'now', '{}')")
-                .execute(&rows_pool).await.unwrap();
-            sqlx::query("PRAGMA foreign_keys = OFF")
-                .execute(&rows_pool)
-                .await
-                .unwrap();
-            // nodes 表（PK 含 node_id）灌入超过总上限的行数。
-            let mut batch = Vec::with_capacity(2000);
-            for i in 0..=MAX_TOTAL_SCOPED_ROWS {
-                batch.push(format!("('orig', 'n{i}')"));
-                if batch.len() == 2000 {
-                    let sql = format!(
-                        "INSERT INTO nodes (session_id, node_id) VALUES {}",
-                        batch.join(", ")
-                    );
-                    sqlx::query(&sql).execute(&rows_pool).await.unwrap();
-                    batch.clear();
-                }
-            }
-            if !batch.is_empty() {
-                let sql = format!(
-                    "INSERT INTO nodes (session_id, node_id) VALUES {}",
-                    batch.join(", ")
-                );
-                sqlx::query(&sql).execute(&rows_pool).await.unwrap();
-            }
-            rows_pool.close().await;
-            let err = perform_import(&main_pool, &rows_path, Some("rows"))
-                .await
-                .unwrap_err();
-            assert!(err.contains("总行数"), "err={err}");
         });
     }
 

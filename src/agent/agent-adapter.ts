@@ -408,14 +408,14 @@ function runAfterConfirmation(workflow: WorkflowState): TsnAgentResult {
       content: summary,
       status: "success",
     }),
-    ...(confirmed.currentStep === "flow-template" || confirmed.currentStep === "planning-export"
+    ...(confirmed.currentStep === "flow-template"
       ? [
           createEvent({
             id: "event-stage-offline",
             kind: "stage-result",
             stage: confirmed.currentStep,
             title: "后续阶段暂下线",
-            content: "流量规划与规划导出在当前版本暂时下线，预计 Phase B 回归。",
+            content: "流量规划在当前版本暂时下线，预计 Phase B 回归。",
             status: "info",
           }),
         ]
@@ -504,7 +504,7 @@ interface StageChangeRequest {
   reason?: string;
 }
 
-// 只允许切回有真实处理的阶段；flow-template / planning-export 暂下线，切过去是死胡同。
+// 只允许切回有真实处理的阶段；flow-template 暂下线，切过去是死胡同。
 const STAGE_SWITCH_TARGETS: readonly WorkflowStep[] = ["topology", "time-sync"];
 
 function asStageChangeRequest(value: unknown): StageChangeRequest | undefined {
@@ -828,8 +828,8 @@ function buildConversationContext(
       ? "重要：已有拓扑是工程数据库中的当前真实状态；本轮新请求必须通过 tsn_topology MCP 工具写入后才会更新右侧工程。"
       : "重要：当前还没有右侧工程；不要把示例或占位文本当作用户需求。",
     "重要：只描述当前阶段已经完成或正在等待确认的内容；不要提前宣称后续阶段的控制流、规划器输入或导出文件已经生成。",
-    "重要：固定阶段顺序是拓扑 -> 时间同步 -> 流量规划 -> 配置下发。拓扑确认后必须进入时间同步，不要说进入配置控制流或流量规划。",
-    "重要：流量规划与规划导出在当前版本暂时下线，不要声称可以生成流量规划或导出文件。",
+    "重要：固定阶段顺序是拓扑 -> 时间同步 -> 流量规划。拓扑确认后必须进入时间同步，不要说进入配置控制流或流量规划。",
+    "重要：流量规划在当前版本暂时下线，不要声称可以生成流量规划或导出文件。",
     workflow.pendingStageChange
       ? `重要：已有一个待用户确认的回退提议（目标阶段：${scenarioConfig.stageLabels[workflow.pendingStageChange]}）。不要重复调用 request_stage_change；等待用户点确认按钮。`
       : "",

@@ -657,8 +657,8 @@ fn create_link(
 
 // ============================================================================
 // dual-plane-redundant：参数 + 校验 + 生成（Plan 2026-06-09-004，aerospace-minimal）
-// 只声明被消费字段；allocation / role / name 等 zod `.strict()` 仍接受但生成器不
-// 消费的字段靠 serde 默认忽略多余键（不用 deny_unknown_fields），避免与 zod drift。
+// 只声明被消费字段；name 等 zod 仍接受但生成器不消费的字段靠 serde 默认忽略多余键
+// （不用 deny_unknown_fields），避免与 zod drift。
 // 所有字段 #[serde(default)]：解析不失败，空/缺值由 validate 层带精确 path 报错。
 // ============================================================================
 

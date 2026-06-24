@@ -75,7 +75,7 @@ describe("useTopologySnapshot", () => {
     const { result } = renderHook(() => useTopologySnapshot("s1"));
     await waitFor(() => expect(result.current.snapshot?.nodes).toHaveLength(1));
 
-    // 数据在外部变化（如 retry_backfill 重建）→ 调用方显式 refetch。
+    // 数据在外部变化（如 import 导入）→ 调用方显式 refetch。
     nodeCount = 5;
     await result.current.refetch();
 

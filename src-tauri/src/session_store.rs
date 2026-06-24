@@ -339,26 +339,12 @@ mod tests {
     /// U_R5 后 v1 schema 不再含 `diagnostic_logs`（迁出到文件 jsonl）。
     const EXPECTED_V1_TABLES: &[&str] = &["sessions", "app_state"];
 
-    /// Plan v3 U2a schema 草案：15 张 P0 领域表。
+    /// v2 schema 现状：拓扑权威两表 + 单步撤销 pre-image 表（历史的 13 张
+    /// node.* / topo_feature_links / topology_refs 空壳表已由 v6 DROP）。
     const EXPECTED_V2_TABLES: &[&str] = &[
-        // topology.json (3)
         "topology_nodes",
         "topology_links",
-        "topology_refs",
-        // topo_feature.json (1)
-        "topo_feature_links",
-        // node.json (11)
-        "nodes",
-        "nodes_oss_cfg",
-        "nodes_sdu_table_cfg",
-        "nodes_gcl_cfg",
-        "nodes_time_cfg",
-        "nodes_psfg_stream_filters",
-        "nodes_psfg_flow_meters",
-        "nodes_psfg_stream_gates",
-        "nodes_frer_cfg",
-        "nodes_array_cfg",
-        "nodes_object_cfg",
+        "topology_undo_snapshots",
     ];
 
     #[test]
@@ -418,20 +404,25 @@ mod tests {
     }
 
     #[test]
-    fn p0_domain_schema_lists_all_fifteen_tables() {
+    fn p0_domain_schema_lists_current_tables() {
         let sql = crate::db::P0_DOMAIN_SCHEMA_SQL;
         for table in EXPECTED_V2_TABLES {
             let needle = format!("CREATE TABLE IF NOT EXISTS {table}");
             assert!(sql.contains(&needle), "missing {table} in P0 schema");
+        }
+        // 废弃空壳表不应再由 v2 schema 建（v6 DROP 后新库本就不建）。
+        for dropped in ["topology_refs", "topo_feature_links", "nodes"] {
+            let needle = format!("CREATE TABLE IF NOT EXISTS {dropped} ");
+            assert!(!sql.contains(&needle), "{dropped} 不应再出现在 P0 schema");
         }
         // application_id (0x54534E01 = 1414745601) 必须由 v2 migration 写入。
         assert!(sql.contains("PRAGMA application_id = 1414745601"));
     }
 
     #[test]
-    fn migrations_expose_v1_through_v5_in_order() {
+    fn migrations_expose_v1_through_v6_in_order() {
         let migs = crate::db::migrations();
-        assert_eq!(migs.len(), 5);
+        assert_eq!(migs.len(), 6);
         assert_eq!(migs[0].version, 1);
         assert_eq!(migs[0].description, "create_session_store");
         assert_eq!(migs[1].version, 2);
@@ -445,6 +436,8 @@ mod tests {
             migs[4].description,
             "rename_networkcard_node_type_to_end_system"
         );
+        assert_eq!(migs[5].version, 6);
+        assert_eq!(migs[5].description, "drop_unused_node_and_backfill_tables");
     }
 
     /// 在内存库里手工建出旧（imac/sync_type）结构 + sessions，灌入样例数据，
@@ -660,6 +653,58 @@ mod tests {
     }
 
     #[test]
+    fn migration_v6_drops_unused_node_and_backfill_tables() {
+        tauri::async_runtime::block_on(async {
+            // 模拟存量库：建 sessions + 历史空壳表（v4 backfill + 一张 node 子表 + refs + feature）。
+            let options = sqlx::sqlite::SqliteConnectOptions::new()
+                .in_memory(true)
+                .foreign_keys(true);
+            let pool = SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect_with(options)
+                .await
+                .expect("memory sqlite");
+            sqlx::query(crate::db::SESSION_SCHEMA_SQL)
+                .execute(&pool)
+                .await
+                .expect("v1 schema");
+            sqlx::query(crate::db::SESSION_BACKFILL_STATE_SQL)
+                .execute(&pool)
+                .await
+                .expect("v4 backfill table");
+            sqlx::query(
+                "CREATE TABLE topology_refs (session_id TEXT, ref_json TEXT);
+                 CREATE TABLE nodes (session_id TEXT, node_id TEXT);
+                 CREATE TABLE topo_feature_links (session_id TEXT, link_id INTEGER);",
+            )
+            .execute(&pool)
+            .await
+            .expect("legacy shell tables");
+
+            // v6 DROP（safety_net 末尾内含同段 SQL）执行后，空壳表全清。
+            sqlx::query(crate::db::DROP_UNUSED_TABLES_SQL)
+                .execute(&pool)
+                .await
+                .expect("v6 drop");
+
+            let tables = list_tables(&pool).await;
+            for gone in [
+                "session_backfill_state",
+                "topology_refs",
+                "nodes",
+                "topo_feature_links",
+            ] {
+                assert!(
+                    !tables.iter().any(|t| t == gone),
+                    "{gone} 应已 DROP，actual = {tables:?}"
+                );
+            }
+            // 业务表不受影响。
+            assert!(tables.iter().any(|t| t == "sessions"));
+        });
+    }
+
+    #[test]
     fn safety_net_schema_applies_application_id_pragma() {
         tauri::async_runtime::block_on(async {
             let pool = fresh_memory_pool().await;
@@ -782,44 +827,5 @@ mod tests {
                 .any(|(table, _)| *table == "topology_undo_snapshots"),
             "撤销快照是本机临时状态，不得进导出/导入清单"
         );
-    }
-
-    #[test]
-    fn nodes_subtable_foreign_key_cascade_works() {
-        tauri::async_runtime::block_on(async {
-            // fresh_memory_pool 已通过 .foreign_keys(true) builder 启用 FK，
-            // 与 `connect_app_database` 生产路径一致。
-            let pool = fresh_memory_pool().await;
-
-            sqlx::query("INSERT INTO sessions (id, title, created_at, updated_at, payload) VALUES ('s1','t','t','t','{}')")
-                .execute(&pool).await.expect("seed session");
-            sqlx::query("INSERT INTO nodes (session_id, node_id) VALUES ('s1', 'n0')")
-                .execute(&pool)
-                .await
-                .expect("seed node");
-            sqlx::query(
-                "INSERT INTO nodes_oss_cfg (session_id, node_id, cfg_json) VALUES ('s1','n0','{}')",
-            )
-            .execute(&pool)
-            .await
-            .expect("seed oss_cfg");
-
-            // 删除 session → 应级联删除 nodes 与 nodes_oss_cfg。
-            sqlx::query("DELETE FROM sessions WHERE id = 's1'")
-                .execute(&pool)
-                .await
-                .expect("delete session");
-
-            let node_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM nodes")
-                .fetch_one(&pool)
-                .await
-                .expect("count nodes");
-            let oss_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM nodes_oss_cfg")
-                .fetch_one(&pool)
-                .await
-                .expect("count oss_cfg");
-            assert_eq!(node_count, 0);
-            assert_eq!(oss_count, 0);
-        });
     }
 }

@@ -1145,13 +1145,13 @@ describe("runTsnAgent", () => {
       claude: {
         assistantText: "...",
         sessionId: "claude-session-illegal",
-        stageResults: [{ kind: "stage-change-request", targetStage: "planning-export" }],
+        stageResults: [{ kind: "stage-change-request", targetStage: "flow-template" }],
       },
     });
     const { runTsnAgent } = await import("./agent-adapter");
 
     const result = await runTsnAgent({
-      userIntent: "切到配置生成阶段",
+      userIntent: "切到流量规划阶段",
       session: sessionWithWorkflow(timeSyncWaitingWorkflow()),
     });
 

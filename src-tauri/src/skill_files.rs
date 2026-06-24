@@ -4,12 +4,7 @@ use tauri::{Manager, path::BaseDirectory};
 
 const MAX_TEXT_FILE_BYTES: u64 = 256 * 1024;
 const PROJECT_SKILL_ROOT: &str = ".claude/skills";
-const SKILL_IDS: &[&str] = &[
-    "tsn-topology",
-    "tsn-time-sync",
-    "tsn-flow-planning",
-    "tsn-inet-export",
-];
+const SKILL_IDS: &[&str] = &["tsn-topology", "tsn-time-sync", "tsn-flow-planning"];
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]

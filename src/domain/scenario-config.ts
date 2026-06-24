@@ -1,9 +1,4 @@
-export const WORKFLOW_STEPS = [
-  "topology",
-  "time-sync",
-  "flow-template",
-  "planning-export",
-] as const;
+export const WORKFLOW_STEPS = ["topology", "time-sync", "flow-template"] as const;
 
 export type WorkflowStep = (typeof WORKFLOW_STEPS)[number];
 
@@ -56,7 +51,6 @@ export const SCENARIO_CONFIGS: Record<ScenarioConfigId, ScenarioConfig> = {
       topology: "拓扑",
       "time-sync": "时间同步",
       "flow-template": "流量规划",
-      "planning-export": "配置下发",
     },
     defaults: {
       timeSyncSummary: "默认假设全网已完成时间同步，后续仿真配置再细化 gPTP 主时钟和端口关系。",
@@ -88,7 +82,6 @@ export const SCENARIO_CONFIGS: Record<ScenarioConfigId, ScenarioConfig> = {
       topology: "拓扑生成",
       "time-sync": "时间同步",
       "flow-template": "流量规划",
-      "planning-export": "配置下发",
     },
     defaults: {
       timeSyncSummary:

@@ -52,7 +52,6 @@ export type WorkflowAction =
   | "generate-topology"
   | "confirm-stage"
   | "request-changes"
-  | "send-planning"
   | "quick-generate";
 
 export function createInitialWorkflowState(
@@ -322,10 +321,6 @@ function actionsForStage(stage: Pick<WorkflowStageState, "step" | "status">): Wo
   if (stage.status === "current") {
     if (stage.step === "topology") {
       return ["generate-topology", "quick-generate"];
-    }
-
-    if (stage.step === "planning-export") {
-      return ["send-planning"];
     }
 
     return ["confirm-stage"];

@@ -49,15 +49,4 @@ export const SKILL_CATALOG: SkillCatalogItem[] = [
     status: "disabled",
     notes: "流量规划暂时下线，预计随 Phase B 在工程数据库路径上重建。",
   },
-  {
-    id: "tsn-inet-export",
-    stage: "planning-export",
-    stageLabel: "配置下发",
-    displayName: "配置下发",
-    description: "汇总拓扑、流、规划结果和仿真参数，生成 INET/OMNeT++ 可消费的数据文件。",
-    inputSummary: "canonical project、规划器输入、规划结果、仿真默认值",
-    outputSummary: "NED、omnetpp.ini、traffic.ini、规划结果追溯文件",
-    status: "enabled",
-    notes: "当前负责生成仿真输入，真实执行 OMNeT++ 仍是后续能力。",
-  },
 ];

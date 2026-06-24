@@ -7,13 +7,11 @@ describe("skill catalog", () => {
       "tsn-topology",
       "tsn-time-sync",
       "tsn-flow-planning",
-      "tsn-inet-export",
     ]);
     expect(SKILL_CATALOG.map((skill) => skill.stage)).toEqual([
       "topology",
       "time-sync",
       "flow-template",
-      "planning-export",
     ]);
   });
 

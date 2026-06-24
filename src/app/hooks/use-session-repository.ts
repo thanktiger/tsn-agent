@@ -47,6 +47,12 @@ export interface UseSessionRepositoryReturn {
    */
   persistSessionIfCurrent: (next: TsnSession, options?: PersistSessionOptions) => Promise<void>;
   sessionExists: (sessionId: string) => Promise<boolean>;
+  /**
+   * 本次进程内被删除过的 session id 墓碑。删除后内存里可能仍残留指向该 session 的
+   * 指针（in-flight submitIntent 的 contextSession、确认按钮闭包等）；提交前用它拦掉
+   * UPSERT 回写复活。墓碑只记「删过」，故能区分「新会话本就不在库」（合法）与「已删」。
+   */
+  isSessionDeleted: (sessionId: string) => boolean;
   updateAssistantMessage: (sessionId: string, messageId: string, content: string) => void;
   /**
    * Plan 2026-06-10-001 U4：流式工具卡片纯内存更新（不写库）——run 期间按 id
@@ -77,6 +83,7 @@ export function useSessionRepository(
   const [currentSession, setCurrentSession] = useState<TsnSession>(initialSession);
   const [isHydrating, setIsHydrating] = useState(true);
   const initialSessionRef = useRef(initialSession);
+  const deletedSessionIds = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     let cancelled = false;
@@ -150,6 +157,10 @@ export function useSessionRepository(
     [repository],
   );
 
+  const isSessionDeleted = useCallback((sessionId: string) => {
+    return deletedSessionIds.current.has(sessionId);
+  }, []);
+
   const updateAssistantMessage = useCallback(
     (sessionId: string, messageId: string, content: string) => {
       setCurrentSession((session) => {
@@ -211,6 +222,7 @@ export function useSessionRepository(
 
   const handleDeleteSession = useCallback(async (): Promise<TsnSession> => {
     const deletedSessionId = currentSession.id;
+    deletedSessionIds.current.add(deletedSessionId);
     await repository.remove(deletedSessionId);
     await diagnostics.clearSession(deletedSessionId);
     const nextSession = await repository.ensureCurrentSession();
@@ -237,6 +249,7 @@ export function useSessionRepository(
     persistSession,
     persistSessionIfCurrent,
     sessionExists,
+    isSessionDeleted,
     updateAssistantMessage,
     updateAssistantToolCalls,
     reloadSessionsList,

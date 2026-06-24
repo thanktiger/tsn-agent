@@ -42,7 +42,7 @@ export interface TopologyVerifyError {
 
 export interface TopologyVerifyResult {
   ok: boolean;
-  /** 验到哪一级：structural_only（本批）/ loadability_only（第二批）/ schedulability（占位）。 */
+  /** 验到哪一级：structural_only / loadability_only（当前仅这两级会被产出）。 */
   caliber: string;
   errors: TopologyVerifyError[];
 }

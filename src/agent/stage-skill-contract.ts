@@ -4,8 +4,4 @@
  * 仅保留 skill 目录（skill-catalog / skill-file-service / SkillFilePreview）
  * 仍在使用的 skill 名字类型。
  */
-export type StageSkillName =
-  | "tsn-topology"
-  | "tsn-time-sync"
-  | "tsn-flow-planning"
-  | "tsn-inet-export";
+export type StageSkillName = "tsn-topology" | "tsn-time-sync" | "tsn-flow-planning";

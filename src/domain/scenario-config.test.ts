@@ -16,7 +16,6 @@ describe("scenario config", () => {
     expect(config.exampleIntent).toContain("双平面双跳");
     expect(config.stageLabels.topology).toBe("拓扑生成");
     expect(config.stageLabels["flow-template"]).toBe("流量规划");
-    expect(config.stageLabels["planning-export"]).toBe("配置下发");
     expect(config.flowTemplates[0].name).toBe("时序控制消息-1");
   });
 
@@ -41,7 +40,6 @@ describe("scenario config", () => {
     expect(config.displayName).toContain("箭载");
     expect(config.exampleIntent).toContain("双平面双跳");
     expect(config.stageLabels["flow-template"]).toBe("流量规划");
-    expect(config.stageLabels["planning-export"]).toBe("配置下发");
     expect(config.flowTemplates[0].name).toBe("时序控制消息-1");
     expect(config.flowTemplates[0].periodUs).toBe(1_000);
     expect(config.flowTemplates[0].frameSizeBytes).toBe(10);

@@ -30,16 +30,11 @@ function baseProps(overrides: Partial<WorkspaceToolsProps> = {}): WorkspaceTools
     onNewSession: vi.fn(),
     onSelectSession: vi.fn(),
     onDeleteSession: vi.fn(),
-    backfillFailures: [],
     transferNotice: undefined,
     transferBusy: false,
-    payloadView: undefined,
     onExportSession: vi.fn(),
     onImportSession: vi.fn(),
-    onViewPayload: vi.fn(),
-    onRequestRetry: vi.fn(),
     onRevealExport: vi.fn(),
-    onClosePayloadView: vi.fn(),
     ...overrides,
   };
 }
@@ -96,54 +91,6 @@ describe("WorkspaceTools", () => {
     render(<WorkspaceTools {...baseProps({ activePanel: "sessions", transferBusy: true })} />);
     expect(screen.getByRole("button", { name: /导出当前/ })).toBeDisabled();
     expect(screen.getByRole("button", { name: /导入会话/ })).toBeDisabled();
-  });
-
-  it("shows a failed badge and recovery area for backfill failures", () => {
-    const session = createEmptySession();
-    render(
-      <WorkspaceTools
-        {...baseProps({
-          activePanel: "sessions",
-          currentSession: session,
-          sessions: [session],
-          backfillFailures: [
-            {
-              sessionId: session.id,
-              state: "failed",
-              errorCode: "PAYLOAD_NOT_JSON",
-              attemptedAt: "2026-06-07T00:00:00Z",
-            },
-          ],
-        })}
-      />,
-    );
-    expect(screen.getByText("迁移失败")).toBeInTheDocument();
-    expect(screen.getByText("待恢复会话")).toBeInTheDocument();
-    expect(screen.getByText("原始数据不是合法 JSON")).toBeInTheDocument();
-  });
-
-  it("requests retry from the recovery area", async () => {
-    const user = userEvent.setup();
-    const onRequestRetry = vi.fn();
-    const session = createEmptySession();
-    render(
-      <WorkspaceTools
-        {...baseProps({
-          activePanel: "sessions",
-          backfillFailures: [
-            {
-              sessionId: session.id,
-              state: "failed",
-              errorCode: "PAYLOAD_NOT_JSON",
-              attemptedAt: "x",
-            },
-          ],
-          onRequestRetry,
-        })}
-      />,
-    );
-    await user.click(screen.getByRole("button", { name: /重建/ }));
-    expect(onRequestRetry).toHaveBeenCalledWith(session.id);
   });
 
   it("会话预览跳过工具消息，回退到最近的自然语言对话", () => {
