@@ -374,6 +374,22 @@ pub async fn ensure_topology_rekey_mid_and_ports(
         .await?;
     }
 
+    // 撤销快照跨 schema 版本不可复用：sync_name 时代的 blob 用旧 JSON key
+    // （sync_name/src_sync_name/dst_sync_name），重建后的 NodeRow/LinkRow 按
+    // mid/src_node/dst_node 反序列化找不到 key → 盖回空串损坏行。同事务清空，
+    // 迁移后不会拿旧 blob 撤出损坏数据（撤无可撤即可，不跨版本续命）。
+    // 表存在才删（生产库 P0 schema 必有此表；极简测试库可能没建）。
+    let has_undo_table: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='topology_undo_snapshots'",
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+    if has_undo_table > 0 {
+        sqlx::query("DELETE FROM topology_undo_snapshots")
+            .execute(&mut *tx)
+            .await?;
+    }
+
     tx.commit().await?;
     Ok(())
 }
@@ -401,15 +417,11 @@ pub fn parse_link_ports_and_speed(styles_json: &str) -> (Option<i64>, Option<i64
     (port_of("leftLabel"), port_of("rightLabel"), speed)
 }
 
-/// 端口标签数字提取：`"P1"`→1、`"1"`→1、`"eth0"`/空→None。
-/// 取标签里第一段连续数字（允许 `P`/`p` 等非数字前缀）。
+/// 端口标签数字提取：只认 `P<digits>`（大小写 P，如 `"P1"`→1）或纯数字（`"1"`→1）。
+/// 其余（`"eth0"`/`"GE0/1"`/空）→ None，避免跳过任意前缀误把 `"eth0"` 解析成 0。
 fn parse_port_label(label: &str) -> Option<i64> {
-    let digits: String = label
-        .chars()
-        .skip_while(|c| !c.is_ascii_digit())
-        .take_while(|c| c.is_ascii_digit())
-        .collect();
-    if digits.is_empty() {
+    let digits = label.strip_prefix(['P', 'p']).unwrap_or(label);
+    if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_digit()) {
         None
     } else {
         digits.parse::<i64>().ok()
@@ -587,10 +599,16 @@ mod tests {
     #[test]
     fn parse_port_label_extracts_digits() {
         assert_eq!(parse_port_label("P1"), Some(1));
+        assert_eq!(parse_port_label("P3"), Some(3));
         assert_eq!(parse_port_label("1"), Some(1));
+        assert_eq!(parse_port_label("5"), Some(5));
         assert_eq!(parse_port_label("P12"), Some(12));
-        assert_eq!(parse_port_label("eth0"), Some(0));
+        assert_eq!(parse_port_label("p7"), Some(7));
+        // 只认 P<digits> 或纯数字；其余前缀不再误解析。
+        assert_eq!(parse_port_label("eth0"), None);
+        assert_eq!(parse_port_label("GE0/1"), None);
         assert_eq!(parse_port_label("port"), None);
+        assert_eq!(parse_port_label("P"), None);
         assert_eq!(parse_port_label(""), None);
     }
 
@@ -715,6 +733,42 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(n, 2);
+    }
+
+    #[tokio::test]
+    async fn mid_rekey_clears_stale_undo_snapshots() {
+        // sync_name 时代写过的撤销快照（blob 用旧 key src_sync_name 等）跨 schema
+        // 版本不可复用；迁移守卫成功重建后必须清空，否则撤销会拿旧 blob 盖出损坏行。
+        let pool = sync_name_era_pool().await;
+        sqlx::query(
+            r#"CREATE TABLE topology_undo_snapshots (
+                session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                domain TEXT NOT NULL,
+                blob_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (session_id, domain)
+            );"#,
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        // 模拟一份 sync_name 时代的 topology 快照 blob（旧 key）。
+        sqlx::query(
+            "INSERT INTO topology_undo_snapshots (session_id, domain, blob_json, created_at) \
+             VALUES ('s1', 'topology', \
+             '{\"nodes\":[{\"session_id\":\"s1\",\"sync_name\":\"0\"}],\"links\":[]}', 'now')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        ensure_topology_rekey_mid_and_ports(&pool).await.unwrap();
+
+        let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM topology_undo_snapshots")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(remaining, 0, "迁移后旧快照应清空，避免盖出损坏行");
     }
 
     #[tokio::test]

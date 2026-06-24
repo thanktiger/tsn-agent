@@ -37,7 +37,8 @@ pub const MAX_INGRESS_PAYLOAD_BYTES: usize = 512_000;
 pub const MAX_ARTIFACT_BYTES: usize = 2_000_000;
 
 /// U12 导出：每节点 TSN 队列数（沿用 Qunee 时代 `queue_num` 常量 3）。
-const EXPORT_QUEUE_COUNT: i64 = 3;
+/// 也是 `persist_initialized_topology` 落库 queue_count 的事实源，使落库与导出一致。
+pub(crate) const EXPORT_QUEUE_COUNT: i64 = 3;
 
 // ============================================================================
 // Errors / Result envelope（与 src/topology/tool-result.ts 同步，summary-only）

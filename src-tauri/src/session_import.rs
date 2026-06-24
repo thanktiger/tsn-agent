@@ -613,6 +613,130 @@ mod tests {
         });
     }
 
+    /// 补测试 1（迁移发布闸）：拓扑新列 export→import 往返全字段等价。
+    /// seed 含新列非空值的 pool（mid/mac/ip/port_count/queue_count、
+    /// src_node/dst_node/src_port/dst_port/speed）→ export → import → 逐字段比对。
+    #[test]
+    fn round_trip_preserves_all_topology_columns() {
+        tauri::async_runtime::block_on(async {
+            let (dir, main_pool) = seed_main_pool().await;
+            let src_pool = source_pool(dir.path()).await;
+            sqlx::query("INSERT INTO sessions (id, title, created_at, updated_at, payload) VALUES ('orig', 't', 'now', 'now', '{}')")
+                .execute(&src_pool).await.unwrap();
+            // 节点：port_count/queue_count 非 DEFAULT 8，mac/ip 非空。
+            sqlx::query(
+                "INSERT INTO topology_nodes \
+                 (session_id, mid, name, x, y, node_type, mac, ip, port_count, queue_count, insert_order) \
+                 VALUES ('orig', '0', 'SW-0', 1.5, 2.5, 'switch', '02:00:00:00:00:00', '10.0.0.1', 4, 3, 0), \
+                        ('orig', '1', 'ES-1', 3.0, 4.0, 'endSystem', '02:00:00:00:00:01', '10.0.0.2', 2, 3, 1)",
+            )
+            .execute(&src_pool)
+            .await
+            .unwrap();
+            // 连线：src_port/dst_port/speed 非空。
+            sqlx::query(
+                "INSERT INTO topology_links \
+                 (session_id, link_seq, name, src_node, dst_node, src_port, dst_port, speed, styles_json) \
+                 VALUES ('orig', 0, 'l0', '0', '1', 3, 1, 1000, '{\"plane\":\"A\"}')",
+            )
+            .execute(&src_pool)
+            .await
+            .unwrap();
+
+            let export_path = dir.path().join("export.db");
+            crate::session_export::perform_single_session_export(
+                &src_pool,
+                "orig",
+                export_path.to_str().unwrap(),
+            )
+            .await
+            .unwrap();
+
+            perform_import(&main_pool, &export_path, Some("rt"))
+                .await
+                .unwrap();
+
+            // 节点逐字段（含新列）。
+            #[allow(clippy::type_complexity)]
+            let nodes: Vec<(
+                String,
+                Option<String>,
+                f64,
+                f64,
+                Option<String>,
+                Option<String>,
+                Option<String>,
+                i64,
+                i64,
+            )> = sqlx::query_as(
+                "SELECT mid, name, x, y, node_type, mac, ip, port_count, queue_count \
+                 FROM topology_nodes WHERE session_id='rt' ORDER BY insert_order",
+            )
+            .fetch_all(&main_pool)
+            .await
+            .unwrap();
+            assert_eq!(
+                nodes,
+                vec![
+                    (
+                        "0".to_string(),
+                        Some("SW-0".to_string()),
+                        1.5,
+                        2.5,
+                        Some("switch".to_string()),
+                        Some("02:00:00:00:00:00".to_string()),
+                        Some("10.0.0.1".to_string()),
+                        4,
+                        3,
+                    ),
+                    (
+                        "1".to_string(),
+                        Some("ES-1".to_string()),
+                        3.0,
+                        4.0,
+                        Some("endSystem".to_string()),
+                        Some("02:00:00:00:00:01".to_string()),
+                        Some("10.0.0.2".to_string()),
+                        2,
+                        3,
+                    ),
+                ],
+                "节点全列 round-trip 等价（含 mid/mac/ip/port_count/queue_count）"
+            );
+
+            // 连线逐字段（含新列）。
+            #[allow(clippy::type_complexity)]
+            let links: Vec<(
+                i64,
+                String,
+                String,
+                Option<i64>,
+                Option<i64>,
+                Option<i64>,
+                String,
+            )> = sqlx::query_as(
+                "SELECT link_seq, src_node, dst_node, src_port, dst_port, speed, styles_json \
+                     FROM topology_links WHERE session_id='rt' ORDER BY link_seq",
+            )
+            .fetch_all(&main_pool)
+            .await
+            .unwrap();
+            assert_eq!(
+                links,
+                vec![(
+                    0,
+                    "0".to_string(),
+                    "1".to_string(),
+                    Some(3),
+                    Some(1),
+                    Some(1000),
+                    "{\"plane\":\"A\"}".to_string(),
+                )],
+                "连线全列 round-trip 等价（含 src_node/dst_node/src_port/dst_port/speed）"
+            );
+        });
+    }
+
     #[test]
     fn import_rejects_node_count_over_limit() {
         tauri::async_runtime::block_on(async {

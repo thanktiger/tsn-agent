@@ -291,10 +291,14 @@ async fn persist_initialized_topology(
         // U3：mac/ip 确定性分配，ordinal 取节点 numeric_id（= mid）。
         let mac = crate::topology_intermediate::assign_mac(node.numeric_id);
         let ip = crate::topology_intermediate::assign_ip(node.numeric_id);
+        // 显式写 port_count = 该节点真实端口数（不落 schema DEFAULT 8，避免与导出
+        // build_topology_json 的 portCount=ports.len() 分叉、timesync 端口越界判错值）；
+        // queue_count 与导出 queueCount=3 对齐。
+        let port_count = node.ports.len() as i64;
         sqlx::query(
             r#"INSERT INTO topology_nodes
-               (session_id, mid, name, x, y, node_type, mac, ip, insert_order)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
+               (session_id, mid, name, x, y, node_type, mac, ip, port_count, queue_count, insert_order)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
         )
         .bind(session_id)
         .bind(&mid)
@@ -304,6 +308,8 @@ async fn persist_initialized_topology(
         .bind(type_str)
         .bind(&mac)
         .bind(&ip)
+        .bind(port_count)
+        .bind(crate::topology_compute::EXPORT_QUEUE_COUNT)
         .bind(index as i64)
         .execute(&mut *conn)
         .await
@@ -983,6 +989,82 @@ mod tests {
                 assert_eq!(
                     ip.as_deref(),
                     Some(crate::topology_intermediate::assign_ip(ordinal).as_str())
+                );
+            }
+        });
+    }
+
+    /// 修复 2：initialize 落库 port_count = 该节点真实端口数（不落 schema DEFAULT 8），
+    /// queue_count 与导出 queueCount=3 对齐——否则 timesync 端口越界判会信错值、导出分叉。
+    #[test]
+    fn persist_writes_real_port_count_and_export_queue_count() {
+        tauri::async_runtime::block_on(async {
+            let pool = SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect("sqlite::memory:")
+                .await
+                .unwrap();
+            sqlx::query(&crate::db::safety_net_schema_sql())
+                .execute(&pool)
+                .await
+                .unwrap();
+            sqlx::query("INSERT INTO sessions (id, title, created_at, updated_at, payload) VALUES ('s1', 't', 'now', 'now', '{}')")
+                .execute(&pool)
+                .await
+                .unwrap();
+
+            // 节点 0 有 4 端口、节点 1 有 2 端口（都 ≠ schema DEFAULT 8）。
+            let topology: crate::topology_intermediate::IntermediateTopology =
+                serde_json::from_value(serde_json::json!({
+                    "schemaVersion": "tsn-agent.topology.intermediate.v0",
+                    "metadata": { "templateId": "hop-linear", "layout": "line", "source": "template" },
+                    "nodes": [
+                        { "id": "sw1", "numericId": 0, "name": "SW-1", "type": "switch",
+                          "ports": [
+                            { "id": "P0", "name": "eth0", "index": 0 },
+                            { "id": "P1", "name": "eth1", "index": 1 },
+                            { "id": "P2", "name": "eth2", "index": 2 },
+                            { "id": "P3", "name": "eth3", "index": 3 }
+                          ],
+                          "position": { "x": 0.0, "y": 0.0 } },
+                        { "id": "es1", "numericId": 1, "name": "ES-1", "type": "endSystem",
+                          "ports": [
+                            { "id": "P0", "name": "eth0", "index": 0 },
+                            { "id": "P1", "name": "eth1", "index": 1 }
+                          ],
+                          "position": { "x": 1.0, "y": 1.0 } }
+                    ],
+                    "links": [],
+                    "diagnostics": []
+                }))
+                .unwrap();
+
+            super::persist_initialized_topology(&pool, "s1", &topology)
+                .await
+                .unwrap();
+
+            let rows = sqlx::query(
+                "SELECT mid, port_count, queue_count FROM topology_nodes WHERE session_id = 's1' ORDER BY insert_order",
+            )
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+            assert_eq!(rows.len(), 2);
+            assert_eq!(
+                rows[0].get::<i64, _>("port_count"),
+                4,
+                "节点0 port_count = ports.len()"
+            );
+            assert_eq!(
+                rows[1].get::<i64, _>("port_count"),
+                2,
+                "节点1 port_count = ports.len()"
+            );
+            for row in &rows {
+                assert_eq!(
+                    row.get::<i64, _>("queue_count"),
+                    crate::topology_compute::EXPORT_QUEUE_COUNT,
+                    "queue_count 与导出 queueCount 对齐"
                 );
             }
         });

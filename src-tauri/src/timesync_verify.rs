@@ -5,8 +5,9 @@
 //! 形状复刻 `topology_verify::VerifyResult`/`VerifyError`（同字段名 code/message_zh/
 //! node_ref，前端/agent 消费链零改）；caliber 恒 `timesync_structural`。
 //!
-//! 重算为唯一权威（R16）：比对仅检测漂移、报告（`SNAPSHOT_DRIFT` 告警），绝不在
-//! 本模块以快照覆盖重算——覆盖落库归 U7。
+//! 重算为唯一权威（R16）：比对仅检测漂移、报告（`SNAPSHOT_DRIFT`），绝不在
+//! 本模块以快照覆盖重算——覆盖落库归 U7。R17：SNAPSHOT_DRIFT 为阻断级
+//! （计入 ok=false），拓扑变更使快照失效时拦确认闸、逼用户重新 set_gm 刷新。
 
 use serde::Serialize;
 use sqlx::{Pool, Row, Sqlite};
@@ -52,7 +53,7 @@ struct SnapshotRoles {
 }
 
 /// 读 timesync 配置 + 重算 + 比对，返回 VerifyResult。errors 含 fail 级（GM 悬空/
-/// 未设、端口越界）与告警级（未覆盖节点、快照漂移、禁用链路悬空）。fail 级存在时 ok=false。
+/// 未设、端口越界、快照漂移）与告警级（未覆盖节点、禁用链路悬空）。fail 级存在时 ok=false。
 pub async fn verify_time_sync(
     pool: &Pool<Sqlite>,
     session_id: &str,
@@ -186,7 +187,8 @@ pub async fn verify_time_sync(
         }
     }
 
-    // 7. 快照漂移（告警，不 fail）：落库 master/slave 与重算不一致。按 mid 升序遍历。
+    // 7. 快照漂移（R17 阻断，fail）：落库 master/slave 与重算不一致 = 拓扑改后
+    //    timesync 快照失效（角色 stale）。按 mid 升序遍历。
     //    GM 悬空时重算结果（uncovered）不可信，跳过漂移检测避免噪音。
     if port_count_by_mid.contains_key(&gm_mid) {
         let mut drift_mids: Vec<&String> = snapshot.keys().collect();
@@ -200,7 +202,9 @@ pub async fn verify_time_sync(
                     {
                         errors.push(VerifyError::new(
                             "SNAPSHOT_DRIFT",
-                            format!("节点 {mid} 的落库端口角色与重算结果不一致，将以重算为准。"),
+                            format!(
+                                "节点 {mid} 的落库端口角色与拓扑重算结果不一致，时钟同步配置已过期，请重新指定 GM 刷新。"
+                            ),
                             Some(mid.clone()),
                         ));
                     }
@@ -208,7 +212,9 @@ pub async fn verify_time_sync(
                 None => {
                     errors.push(VerifyError::new(
                         "SNAPSHOT_DRIFT",
-                        format!("节点 {mid} 在重算结果里不存在，落库快照已过期。"),
+                        format!(
+                            "节点 {mid} 在拓扑重算结果里不存在，时钟同步配置已过期，请重新指定 GM 刷新。"
+                        ),
                         Some(mid.clone()),
                     ));
                 }
@@ -225,11 +231,13 @@ pub async fn verify_time_sync(
         ));
     }
 
-    // ok 只看 fail 级错误码；告警（漂移/未覆盖/禁用链路悬空）不拦推进。
+    // ok 看 fail 级错误码；告警（未覆盖/禁用链路悬空）不拦推进。
+    // R17：SNAPSHOT_DRIFT 阻断——拓扑改后 timesync 落库快照失效（角色 stale），
+    // 经确认闸放行会让 stale 配置静默推进；拦住强制用户重新 set_gm 刷新。
     let has_fail = errors.iter().any(|e| {
         matches!(
             e.code.as_str(),
-            "GM_NOT_SET" | "GM_DANGLING" | "PORT_OUT_OF_RANGE"
+            "GM_NOT_SET" | "GM_DANGLING" | "PORT_OUT_OF_RANGE" | "SNAPSHOT_DRIFT"
         )
     });
 
@@ -403,6 +411,40 @@ mod tests {
         assert!(codes(&r).contains(&"PORT_OUT_OF_RANGE"));
     }
 
+    /// R17 路径：先 port_count=8 落库合法（节点 1 slave_port=[5]，对应真实链路端口5）→
+    /// 把节点 1 port_count 改小到 4 → slave_port=[5] 越界 → PORT_OUT_OF_RANGE（fail）。
+    /// 链路端口5 让重算也产 slave=[5]，快照与重算一致、不混入 SNAPSHOT_DRIFT 噪音。
+    #[tokio::test]
+    async fn shrinking_port_count_makes_existing_role_out_of_range() {
+        let pool = fresh_pool().await;
+        add_node(&pool, "0", 0, 8).await;
+        add_node(&pool, "1", 1, 8).await;
+        // 节点 1 经端口5 连 GM 的端口0：重算 → 节点1 slave=[5]。
+        add_link(&pool, 0, "0", "1", 0, 5).await;
+        set_domain(&pool, Some("0"), "[]").await;
+        set_node_roles(&pool, "0", "[0]", "[]").await;
+        set_node_roles(&pool, "1", "[]", "[5]").await;
+
+        // port_count=8 时合法（端口5 < 8）。
+        let r_ok = verify_time_sync(&pool, "s1").await.unwrap();
+        assert!(r_ok.ok, "port_count=8 时应放行: {:?}", codes(&r_ok));
+
+        // 把节点 1 端口数改小到 4 → slave_port=[5] 越界。
+        sqlx::query("UPDATE topology_nodes SET port_count = 4 WHERE session_id='s1' AND mid='1'")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let r = verify_time_sync(&pool, "s1").await.unwrap();
+        assert!(!r.ok, "端口数缩小后越界应阻断: {:?}", codes(&r));
+        assert!(codes(&r).contains(&"PORT_OUT_OF_RANGE"));
+        assert!(
+            r.errors
+                .iter()
+                .any(|e| e.code == "PORT_OUT_OF_RANGE" && e.node_ref.as_deref() == Some("1"))
+        );
+    }
+
     /// 未覆盖节点（与 GM 不连通）→ UNCOVERED_NODES 告警，不 fail。
     #[tokio::test]
     async fn uncovered_nodes_warns_but_ok() {
@@ -425,9 +467,9 @@ mod tests {
         );
     }
 
-    /// 落库快照与重算不一致 → SNAPSHOT_DRIFT 告警（不 fail，以重算为权威）。
+    /// R17：落库快照与重算不一致 → SNAPSHOT_DRIFT 阻断（ok=false），拦确认闸逼重设 GM。
     #[tokio::test]
-    async fn snapshot_drift_warns_but_ok() {
+    async fn snapshot_drift_blocks() {
         let pool = fresh_pool().await;
         add_node(&pool, "0", 0, 8).await;
         add_node(&pool, "1", 1, 8).await;
@@ -438,7 +480,7 @@ mod tests {
         set_node_roles(&pool, "1", "[]", "[3]").await;
 
         let r = verify_time_sync(&pool, "s1").await.unwrap();
-        assert!(r.ok, "漂移只告警不 fail: {:?}", codes(&r));
+        assert!(!r.ok, "漂移应阻断（R17）: {:?}", codes(&r));
         assert!(codes(&r).contains(&"SNAPSHOT_DRIFT"));
     }
 

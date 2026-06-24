@@ -627,7 +627,7 @@ export function createTimesyncToolRegistry(): TimesyncMcpToolDefinition[] {
         "port roles are NOT touched. syncPeriod / measurePeriod are powers of two in ms (1..32768); " +
         "meanLinkDelayThresh is a power of two (1..128); offsetThreshold is an integer 0..4095; reportEnable is 0/1. " +
         "Recommended defaults (already applied on set_gm): syncPeriod=128, measurePeriod=1024, reportEnable=1, " +
-        "meanLinkDelayThresh=800 (clamped to a valid power of two by the user before sending), offsetThreshold=1000.",
+        "meanLinkDelayThresh=64, offsetThreshold=1000.",
       inputSchema: setParamsInputSchema(),
       handler: async (args) =>
         callSidecarTool("/db/timesync/set_params", args, {
