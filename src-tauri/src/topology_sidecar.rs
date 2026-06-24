@@ -715,15 +715,11 @@ mod tests {
         .unwrap()
     }
 
-    /// 三表全图快照（节点/链路/refs），用于断言 pre-image == 写前态。
-    async fn dump_three_tables(
+    /// 两表全图快照（节点/链路），用于断言 pre-image == 写前态。
+    async fn dump_topology_tables(
         pool: &sqlx::Pool<sqlx::Sqlite>,
         session_id: &str,
-    ) -> (
-        Vec<(String, f64, f64)>,
-        Vec<(i64, String, String)>,
-        Vec<String>,
-    ) {
+    ) -> (Vec<(String, f64, f64)>, Vec<(i64, String, String)>) {
         let nodes = sqlx::query(
             "SELECT sync_name, x, y FROM topology_nodes WHERE session_id = ? ORDER BY insert_order, sync_name",
         )
@@ -750,15 +746,7 @@ mod tests {
             )
         })
         .collect();
-        let refs = sqlx::query("SELECT ref_json FROM topology_refs WHERE session_id = ?")
-            .bind(session_id)
-            .fetch_all(pool)
-            .await
-            .unwrap()
-            .into_iter()
-            .map(|r| r.get::<String, _>("ref_json"))
-            .collect();
-        (nodes, links, refs)
+        (nodes, links)
     }
 
     /// U3: 非 dry-run apply_operations 后，留下一份 pre-image，
@@ -772,7 +760,7 @@ mod tests {
             // 写前态：一节点。
             sqlx::query("INSERT INTO topology_nodes (session_id, sync_name, x, y, node_type, insert_order) VALUES ('s1','0',1.0,2.0,'switch',0)")
                 .execute(&pool).await.unwrap();
-            let before = dump_three_tables(&pool, "s1").await;
+            let before = dump_topology_tables(&pool, "s1").await;
 
             let (router, token) = build_test_router_with_pool(pool.clone(), buf).await;
             let (status, parsed) = apply_ops(
@@ -806,7 +794,6 @@ mod tests {
                 .collect();
             assert_eq!(pre_nodes, before.0, "pre-image 节点 == 写前节点（含 x/y）");
             assert!(pre["links"].as_array().unwrap().is_empty());
-            assert!(pre["refs"].as_array().unwrap().is_empty());
         });
     }
 
@@ -909,7 +896,7 @@ mod tests {
 
             // 先 initialize 一次建出整图（switchCount=4）。
             initialize_hop_linear(router.clone(), &token, "s1", 4).await;
-            let before = dump_three_tables(&pool, "s1").await;
+            let before = dump_topology_tables(&pool, "s1").await;
             assert!(!before.0.is_empty(), "首次 initialize 应已建出节点");
 
             // 第二次 initialize：pre-image 应等于第一次的整图态。
@@ -976,10 +963,6 @@ mod tests {
             assert!(
                 pre["links"].as_array().unwrap().is_empty(),
                 "首次 initialize pre-image 链路为空"
-            );
-            assert!(
-                pre["refs"].as_array().unwrap().is_empty(),
-                "首次 initialize pre-image refs 为空"
             );
         });
     }
@@ -1187,7 +1170,7 @@ mod tests {
                 ]),
             )
             .await;
-            let before = dump_three_tables(&pool, "s1").await;
+            let before = dump_topology_tables(&pool, "s1").await;
             assert_eq!(before.0.len(), 1, "撤销前应有一个节点");
 
             // 第二笔结构变更：再加一个节点（覆盖式 pre-image = 第一笔后的态）。
@@ -1200,7 +1183,7 @@ mod tests {
                 ]),
             )
             .await;
-            let snapshot_state = dump_three_tables(&pool, "s1").await;
+            let snapshot_state = dump_topology_tables(&pool, "s1").await;
             assert_eq!(snapshot_state.0.len(), 2, "第二笔后应有两个节点");
             // 第二笔 apply = mutationId 2；undo 应推到 3。
             assert_eq!(buf.since("s1", 0).latest, 2);
@@ -1215,7 +1198,7 @@ mod tests {
             assert_eq!(buf.since("s1", 0).latest, 3);
 
             // 盖回后三表 == 第二笔 apply 前态（即 before：节点 0）。
-            let after = dump_three_tables(&pool, "s1").await;
+            let after = dump_topology_tables(&pool, "s1").await;
             assert_eq!(after, before, "undo 盖回到第二笔结构变更前的态");
 
             // inspect 也反映回退态（一个节点）。

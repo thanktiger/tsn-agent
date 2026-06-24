@@ -30,7 +30,6 @@ import {
 } from "./components/workspace-pane";
 import { type WorkspaceToolPanel, WorkspaceTools } from "./components/workspace-tools";
 import { useAgentRunController } from "./hooks/use-agent-run-controller";
-import { useBackfillFailures } from "./hooks/use-backfill-failures";
 import { useSessionRepository } from "./hooks/use-session-repository";
 import { useTopologySnapshot } from "./hooks/use-topology-snapshot";
 import {
@@ -80,10 +79,7 @@ export function App() {
     lastMutationId,
   } = useTopologySnapshot(currentSession.id);
   const [transferNotice, setTransferNotice] = useState<TransferNotice | undefined>();
-  const [retryTargetId, setRetryTargetId] = useState<string | undefined>();
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
-  const [payloadView, setPayloadView] = useState<{ sessionId: string; text: string } | undefined>();
-  const { failures: backfillFailures, refresh: refreshBackfillFailures } = useBackfillFailures();
 
   useEffect(() => {
     setActiveConfigTab("node-detail");
@@ -377,41 +373,6 @@ export function App() {
     }
   }
 
-  async function handleViewBackfillPayload(sessionId: string) {
-    try {
-      const text = await invoke<string>("view_session_payload", { request: { sessionId } });
-      setPayloadView({ sessionId, text });
-    } catch (err) {
-      setTransferNotice({ kind: "error", text: `读取原始数据失败：${String(err)}` });
-    }
-  }
-
-  async function handleRetryBackfill() {
-    const sessionId = retryTargetId;
-    if (!sessionId) {
-      return;
-    }
-    setRetryTargetId(undefined);
-    try {
-      await invoke("retry_backfill", { request: { sessionId } });
-      if (sessionId === currentSession.id) {
-        await refetchTopology();
-      }
-      setTransferNotice({ kind: "success", text: "拓扑已从原始数据重建" });
-      logDiagnostic(diagnosticsRepository, {
-        sessionId,
-        category: "session",
-        message: "重试 backfill 重建",
-        details: { sessionId },
-      });
-    } catch (err) {
-      setTransferNotice({ kind: "error", text: `重建失败：${String(err)}` });
-    } finally {
-      await refreshBackfillFailures();
-      await reloadSessionsList();
-    }
-  }
-
   return (
     <div className="app-shell" aria-busy={isAgentRunning}>
       <header className="brand-header">
@@ -438,19 +399,14 @@ export function App() {
           currentSession={currentSession}
           sessions={sessions}
           diagnosticsRepository={diagnosticsRepository}
-          backfillFailures={backfillFailures}
           transferNotice={transferNotice}
           transferBusy={isAgentRunning}
-          payloadView={payloadView}
           onNewSession={handleNewSession}
           onSelectSession={handleSelectSession}
           onDeleteSession={handleDeleteSession}
           onExportSession={handleExportSession}
           onImportSession={handleImportSession}
-          onViewPayload={(sessionId) => void handleViewBackfillPayload(sessionId)}
-          onRequestRetry={(sessionId) => setRetryTargetId(sessionId)}
           onRevealExport={(path) => void revealExportedFile(path)}
-          onClosePayloadView={() => setPayloadView(undefined)}
         />
         <ChatPane
           scenarioConfig={scenarioConfig}
@@ -480,16 +436,6 @@ export function App() {
           onUndone={handleTopologyUndone}
         />
       </main>
-
-      <ConfirmDialog
-        open={retryTargetId !== undefined}
-        title="重建拓扑"
-        body="将从原始数据重建，该会话现有拓扑数据将被替换（包括对话中做过的增量修改）。"
-        confirmLabel="重建"
-        danger
-        onConfirm={() => void handleRetryBackfill()}
-        onCancel={() => setRetryTargetId(undefined)}
-      />
 
       <ConfirmDialog
         open={deleteConfirmOpen}

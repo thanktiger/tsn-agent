@@ -1,9 +1,9 @@
 //! 单步撤销核心（纯 Rust，不含 push/emit）。
 //!
-//! `snapshot_pre_image` 在结构变更前、调用方已开的事务里，把三表
-//! （topology_nodes / topology_links / topology_refs）序列化成一份 blob，
+//! `snapshot_pre_image` 在结构变更前、调用方已开的事务里，把两表
+//! （topology_nodes / topology_links）序列化成一份 blob，
 //! 按 `(session_id, domain="topology")` 覆盖式写入 `topology_undo_snapshots`。
-//! `restore_pre_image` 自开事务，把 blob 盖回三表并清除 pre-image（撤销后
+//! `restore_pre_image` 自开事务，把 blob 盖回两表并清除 pre-image（撤销后
 //! 无可再撤——R11）。两面入口（Tauri command / sidecar route）共用此核心，
 //! 各自的 push/emit 留在调用点（KTD2）。
 
@@ -12,13 +12,12 @@ use sqlx::{Pool, Row, Sqlite, SqliteConnection};
 
 const UNDO_DOMAIN: &str = "topology";
 
-/// pre-image blob 的整体形状：三表各一段。列清单与 `SESSION_SCOPED_TABLES`
+/// pre-image blob 的整体形状：两表各一段。列清单与 `SESSION_SCOPED_TABLES`
 /// 的 topology_* 条目一一对应，避免漂移。
 #[derive(Debug, Serialize, Deserialize)]
 struct TopologyPreImage {
     nodes: Vec<NodeRow>,
     links: Vec<LinkRow>,
-    refs: Vec<RefRow>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -42,16 +41,20 @@ struct LinkRow {
     styles_json: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-struct RefRow {
-    session_id: String,
-    ref_json: String,
-}
-
 /// serde_json 错误折进 sqlx::Error，保持函数签名为 `Result<_, sqlx::Error>`
 /// （与邻近 DB 函数一致）。
 fn json_err(e: serde_json::Error) -> sqlx::Error {
     sqlx::Error::Protocol(format!("undo blob json error: {e}"))
+}
+
+/// 当前 iso8601 风格时间戳（`@unix-{secs}`），避免引入 chrono 依赖。
+/// 用于 undo 快照 created_at 字段（精度足够：仅排序/显示）。
+fn chrono_like_iso_now() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    format!("@unix-{secs}")
 }
 
 /// 写前快照：读三表、序列化成 blob、覆盖式写入 undo 表。
@@ -74,11 +77,6 @@ pub async fn snapshot_pre_image(
     .bind(session_id)
     .fetch_all(&mut *conn)
     .await?;
-    let ref_rows =
-        sqlx::query(r#"SELECT session_id, ref_json FROM topology_refs WHERE session_id = ?"#)
-            .bind(session_id)
-            .fetch_all(&mut *conn)
-            .await?;
 
     let pre_image = TopologyPreImage {
         nodes: node_rows
@@ -104,13 +102,6 @@ pub async fn snapshot_pre_image(
                 styles_json: r.get("styles_json"),
             })
             .collect(),
-        refs: ref_rows
-            .into_iter()
-            .map(|r| RefRow {
-                session_id: r.get("session_id"),
-                ref_json: r.get("ref_json"),
-            })
-            .collect(),
     };
 
     let blob_json = serde_json::to_string(&pre_image).map_err(json_err)?;
@@ -124,7 +115,7 @@ pub async fn snapshot_pre_image(
     .bind(session_id)
     .bind(UNDO_DOMAIN)
     .bind(&blob_json)
-    .bind(crate::topology_backfill::chrono_like_iso_now())
+    .bind(chrono_like_iso_now())
     .execute(&mut *conn)
     .await?;
 
@@ -152,7 +143,7 @@ pub async fn restore_pre_image(pool: &Pool<Sqlite>, session_id: &str) -> Result<
 
     let pre_image: TopologyPreImage = serde_json::from_str(&blob_json).map_err(json_err)?;
 
-    for table in ["topology_nodes", "topology_links", "topology_refs"] {
+    for table in ["topology_nodes", "topology_links"] {
         sqlx::query(&format!("DELETE FROM {table} WHERE session_id = ?"))
             .bind(session_id)
             .execute(&mut *tx)
@@ -190,14 +181,6 @@ pub async fn restore_pre_image(pool: &Pool<Sqlite>, session_id: &str) -> Result<
         .bind(&link.styles_json)
         .execute(&mut *tx)
         .await?;
-    }
-
-    for ref_row in &pre_image.refs {
-        sqlx::query(r#"INSERT INTO topology_refs (session_id, ref_json) VALUES (?, ?)"#)
-            .bind(&ref_row.session_id)
-            .bind(&ref_row.ref_json)
-            .execute(&mut *tx)
-            .await?;
     }
 
     // 撤销后清除 pre-image：再次 restore 返 false（R11「无可撤销」）。
@@ -239,7 +222,7 @@ mod tests {
         pool
     }
 
-    /// 写一套含 x/y、styles_json、ref_json 的三表样本。
+    /// 写一套含 x/y、styles_json 的两表样本。
     async fn seed_topology(pool: &Pool<Sqlite>) {
         sqlx::query(
             "INSERT INTO topology_nodes (session_id, sync_name, name, x, y, node_type, insert_order) \
@@ -252,12 +235,6 @@ mod tests {
         sqlx::query(
             "INSERT INTO topology_links (session_id, link_seq, name, src_sync_name, dst_sync_name, styles_json) \
              VALUES ('s1', 0, 'l0', '0', '1', '{\"leftLabel\":\"0\",\"rightLabel\":\"1\"}')",
-        )
-        .execute(pool)
-        .await
-        .unwrap();
-        sqlx::query(
-            "INSERT INTO topology_refs (session_id, ref_json) VALUES ('s1', '{\"k\":\"v\"}')",
         )
         .execute(pool)
         .await
@@ -309,16 +286,6 @@ mod tests {
         .collect()
     }
 
-    async fn dump_refs(pool: &Pool<Sqlite>) -> Vec<String> {
-        sqlx::query("SELECT ref_json FROM topology_refs WHERE session_id='s1'")
-            .fetch_all(pool)
-            .await
-            .unwrap()
-            .into_iter()
-            .map(|r| r.get::<String, _>("ref_json"))
-            .collect()
-    }
-
     async fn snapshot(pool: &Pool<Sqlite>) {
         let mut tx = pool.begin().await.unwrap();
         snapshot_pre_image(&mut tx, "s1").await.unwrap();
@@ -326,18 +293,17 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_then_restore_round_trips_all_three_tables() {
+    fn snapshot_then_restore_round_trips_both_tables() {
         tauri::async_runtime::block_on(async {
             let pool = fresh_pool().await;
             seed_topology(&pool).await;
 
             let nodes_before = dump_nodes(&pool).await;
             let links_before = dump_links(&pool).await;
-            let refs_before = dump_refs(&pool).await;
 
             snapshot(&pool).await;
 
-            // 在快照之后改动三表，模拟一次结构变更。
+            // 在快照之后改动两表，模拟一次结构变更。
             sqlx::query("DELETE FROM topology_links WHERE session_id='s1'")
                 .execute(&pool)
                 .await
@@ -346,12 +312,6 @@ mod tests {
                 .execute(&pool)
                 .await
                 .unwrap();
-            sqlx::query(
-                "UPDATE topology_refs SET ref_json='{\"changed\":true}' WHERE session_id='s1'",
-            )
-            .execute(&pool)
-            .await
-            .unwrap();
 
             let restored = restore_pre_image(&pool, "s1").await.unwrap();
             assert!(restored);
@@ -365,11 +325,6 @@ mod tests {
                 dump_links(&pool).await,
                 links_before,
                 "链路还原（含 styles_json）"
-            );
-            assert_eq!(
-                dump_refs(&pool).await,
-                refs_before,
-                "refs 还原（含 ref_json）"
             );
         });
     }
@@ -397,16 +352,14 @@ mod tests {
 
             let nodes_before = dump_nodes(&pool).await;
             let links_before = dump_links(&pool).await;
-            let refs_before = dump_refs(&pool).await;
 
             assert!(
                 !restore_pre_image(&pool, "s1").await.unwrap(),
                 "无 pre-image 返 false"
             );
 
-            assert_eq!(dump_nodes(&pool).await, nodes_before, "三表不动");
-            assert_eq!(dump_links(&pool).await, links_before, "三表不动");
-            assert_eq!(dump_refs(&pool).await, refs_before, "三表不动");
+            assert_eq!(dump_nodes(&pool).await, nodes_before, "两表不动");
+            assert_eq!(dump_links(&pool).await, links_before, "两表不动");
         });
     }
 
@@ -445,29 +398,6 @@ mod tests {
                 dump_links(&pool).await.is_empty(),
                 "盖回最后一次快照（无链路）"
             );
-        });
-    }
-
-    #[test]
-    fn restore_round_trips_refs_when_present() {
-        tauri::async_runtime::block_on(async {
-            let pool = fresh_pool().await;
-            // 只有 refs（模拟 initialize 路径会动 refs）。
-            sqlx::query(
-                "INSERT INTO topology_refs (session_id, ref_json) VALUES ('s1', '{\"a\":1}')",
-            )
-            .execute(&pool)
-            .await
-            .unwrap();
-            snapshot(&pool).await;
-
-            sqlx::query("UPDATE topology_refs SET ref_json='{\"a\":2}' WHERE session_id='s1'")
-                .execute(&pool)
-                .await
-                .unwrap();
-
-            assert!(restore_pre_image(&pool, "s1").await.unwrap());
-            assert_eq!(dump_refs(&pool).await, vec!["{\"a\":1}".to_string()]);
         });
     }
 }

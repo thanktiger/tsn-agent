@@ -305,15 +305,11 @@ mod tests {
                 .await
                 .expect("seed session");
         }
-        // s1：2 节点 1 链路 + 1 个 nodes 行；s2：1 节点（断言不被带出）。
+        // s1：2 节点 1 链路；s2：1 节点（断言不被带出）。
         sqlx::query("INSERT INTO topology_nodes (session_id, sync_name, x, y, insert_order) VALUES ('s1', '0', 0.0, 0.0, 0), ('s1', '1', 1.0, 1.0, 1), ('s2', '9', 9.0, 9.0, 0)")
             .execute(pool).await.expect("seed nodes");
         sqlx::query("INSERT INTO topology_links (session_id, link_seq, src_sync_name, dst_sync_name, styles_json) VALUES ('s1', 0, '0', '1', '{}')")
             .execute(pool).await.expect("seed links");
-        sqlx::query("INSERT INTO nodes (session_id, node_id) VALUES ('s1', 'n0')")
-            .execute(pool)
-            .await
-            .expect("seed legacy node");
     }
 
     async fn open_export(path: &std::path::Path) -> sqlx::Pool<sqlx::Sqlite> {
@@ -363,11 +359,6 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(link_count, 1);
-            let legacy_nodes: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM nodes")
-                .fetch_one(&export_pool)
-                .await
-                .unwrap();
-            assert_eq!(legacy_nodes, 1);
 
             // application_id 正确（import 校验它）。
             let app_id: i64 = sqlx::query_scalar("PRAGMA application_id")

@@ -18,7 +18,7 @@ function isTauriRuntime(): boolean {
 
 export interface UseTopologySnapshotResult {
   snapshot: TopologyRowSnapshot | undefined;
-  /** 命令式刷新：retry_backfill / import 等非 mutation-buffer 写路径后由调用方显式触发。 */
+  /** 命令式刷新：import 等非 mutation-buffer 写路径后由调用方显式触发。 */
   refetch: () => Promise<void>;
   /**
    * 本 session 已观测到的最大 mutationId（拖动写入的陈旧检测基准，R11）。

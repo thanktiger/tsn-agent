@@ -17,7 +17,6 @@ import type { TsnSession } from "../../../sessions/session-repository";
 import { SKILL_CATALOG, type SkillCatalogItem } from "../../../skills/skill-catalog";
 import { DiagnosticsLogView } from "../../../ui/diagnostics/DiagnosticsDrawer";
 import { SkillFilePreview } from "../../../ui/skills/SkillFilePreview";
-import { type BackfillFailureRow, describeBackfillError } from "../../hooks/use-backfill-failures";
 import type { TransferNotice } from "../../session-transfer";
 import { DetailRow, formatTime } from "../shared";
 
@@ -29,19 +28,14 @@ export interface WorkspaceToolsProps {
   currentSession: TsnSession;
   sessions: TsnSession[];
   diagnosticsRepository: DiagnosticLogRepository;
-  backfillFailures: BackfillFailureRow[];
   transferNotice: TransferNotice | undefined;
   transferBusy: boolean;
-  payloadView: { sessionId: string; text: string } | undefined;
   onNewSession: () => void;
   onSelectSession: (session: TsnSession) => void;
   onDeleteSession: () => void;
   onExportSession: () => void;
   onImportSession: () => void;
-  onViewPayload: (sessionId: string) => void;
-  onRequestRetry: (sessionId: string) => void;
   onRevealExport: (path: string) => void;
-  onClosePayloadView: () => void;
 }
 
 export function WorkspaceTools({
@@ -50,19 +44,14 @@ export function WorkspaceTools({
   currentSession,
   sessions,
   diagnosticsRepository,
-  backfillFailures,
   transferNotice,
   transferBusy,
-  payloadView,
   onNewSession,
   onSelectSession,
   onDeleteSession,
   onExportSession,
   onImportSession,
-  onViewPayload,
-  onRequestRetry,
   onRevealExport,
-  onClosePayloadView,
 }: WorkspaceToolsProps) {
   return (
     <>
@@ -78,20 +67,15 @@ export function WorkspaceTools({
           currentSession={currentSession}
           diagnosticsRepository={diagnosticsRepository}
           sessions={sessions}
-          backfillFailures={backfillFailures}
           transferNotice={transferNotice}
           transferBusy={transferBusy}
-          payloadView={payloadView}
           onClose={() => setActivePanel(undefined)}
           onDeleteSession={onDeleteSession}
           onNewSession={onNewSession}
           onSelectSession={onSelectSession}
           onExportSession={onExportSession}
           onImportSession={onImportSession}
-          onViewPayload={onViewPayload}
-          onRequestRetry={onRequestRetry}
           onRevealExport={onRevealExport}
-          onClosePayloadView={onClosePayloadView}
         />
       )}
     </>
@@ -141,39 +125,29 @@ function WorkspaceToolDrawer({
   currentSession,
   diagnosticsRepository,
   sessions,
-  backfillFailures,
   transferNotice,
   transferBusy,
-  payloadView,
   onClose,
   onDeleteSession,
   onNewSession,
   onSelectSession,
   onExportSession,
   onImportSession,
-  onViewPayload,
-  onRequestRetry,
   onRevealExport,
-  onClosePayloadView,
 }: {
   activePanel: WorkspaceToolPanel;
   currentSession: TsnSession;
   diagnosticsRepository: DiagnosticLogRepository;
   sessions: TsnSession[];
-  backfillFailures: BackfillFailureRow[];
   transferNotice: TransferNotice | undefined;
   transferBusy: boolean;
-  payloadView: { sessionId: string; text: string } | undefined;
   onClose: () => void;
   onDeleteSession: () => void;
   onNewSession: () => void;
   onSelectSession: (session: TsnSession) => void;
   onExportSession: () => void;
   onImportSession: () => void;
-  onViewPayload: (sessionId: string) => void;
-  onRequestRetry: (sessionId: string) => void;
   onRevealExport: (path: string) => void;
-  onClosePayloadView: () => void;
 }) {
   return (
     <aside className="workspace-tool-drawer" aria-label={workspacePanelLabel(activePanel)}>
@@ -196,19 +170,14 @@ function WorkspaceToolDrawer({
         <SessionToolPanel
           currentSession={currentSession}
           sessions={sessions}
-          backfillFailures={backfillFailures}
           transferNotice={transferNotice}
           transferBusy={transferBusy}
-          payloadView={payloadView}
           onDeleteSession={onDeleteSession}
           onNewSession={onNewSession}
           onSelectSession={onSelectSession}
           onExportSession={onExportSession}
           onImportSession={onImportSession}
-          onViewPayload={onViewPayload}
-          onRequestRetry={onRequestRetry}
           onRevealExport={onRevealExport}
-          onClosePayloadView={onClosePayloadView}
         />
       )}
       {activePanel === "diagnostics" && (
@@ -240,37 +209,26 @@ function sessionPreview(messages: TsnSession["messages"]): string {
 function SessionToolPanel({
   currentSession,
   sessions,
-  backfillFailures,
   transferNotice,
   transferBusy,
-  payloadView,
   onDeleteSession,
   onNewSession,
   onSelectSession,
   onExportSession,
   onImportSession,
-  onViewPayload,
-  onRequestRetry,
   onRevealExport,
-  onClosePayloadView,
 }: {
   currentSession: TsnSession;
   sessions: TsnSession[];
-  backfillFailures: BackfillFailureRow[];
   transferNotice: TransferNotice | undefined;
   transferBusy: boolean;
-  payloadView: { sessionId: string; text: string } | undefined;
   onDeleteSession: () => void;
   onNewSession: () => void;
   onSelectSession: (session: TsnSession) => void;
   onExportSession: () => void;
   onImportSession: () => void;
-  onViewPayload: (sessionId: string) => void;
-  onRequestRetry: (sessionId: string) => void;
   onRevealExport: (path: string) => void;
-  onClosePayloadView: () => void;
 }) {
-  const failedSessionIds = new Set(backfillFailures.map((failure) => failure.sessionId));
   return (
     <>
       <button className="new-session-button" type="button" onClick={onNewSession}>
@@ -291,17 +249,10 @@ function SessionToolPanel({
               <span className="session-time">{formatTime(session.updatedAt)}</span>
             </div>
             <p className="session-desc">{sessionPreview(session.messages)}</p>
-            {failedSessionIds.has(session.id) ? (
-              <span className="badge failed">
-                <span className="badge-dot" />
-                迁移失败
-              </span>
-            ) : (
-              <span className={session.topologyMutationId ? "badge planned" : "badge draft"}>
-                <span className="badge-dot" />
-                {session.topologyMutationId ? "配置草案" : "空会话"}
-              </span>
-            )}
+            <span className={session.topologyMutationId ? "badge planned" : "badge draft"}>
+              <span className="badge-dot" />
+              {session.topologyMutationId ? "配置草案" : "空会话"}
+            </span>
           </button>
         ))}
       </div>
@@ -346,59 +297,6 @@ function SessionToolPanel({
             </button>
           )}
         </p>
-      )}
-
-      {backfillFailures.length > 0 && (
-        <div className="backfill-failures" role="group" aria-label="待恢复会话">
-          <p className="drawer-kicker">待恢复会话</p>
-          {backfillFailures.map((failure) => (
-            <div className="backfill-failure-item" key={failure.sessionId}>
-              <div className="failure-row1">
-                <span className="failure-desc">{describeBackfillError(failure.errorCode)}</span>
-                <span className="failure-session mono">{failure.sessionId.slice(0, 18)}</span>
-              </div>
-              <div className="failure-actions">
-                <button
-                  className="link-button"
-                  type="button"
-                  onClick={() => onViewPayload(failure.sessionId)}
-                >
-                  查看原始数据
-                </button>
-                <button
-                  className="btn danger"
-                  type="button"
-                  disabled={transferBusy}
-                  title={transferBusy ? "智能助手运行中，暂不可重建" : "从原始数据重建该会话的拓扑"}
-                  onClick={() => onRequestRetry(failure.sessionId)}
-                >
-                  重建
-                </button>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {payloadView && (
-        <div className="payload-view" role="group" aria-label="原始数据预览">
-          <div className="payload-view-header">
-            <span className="mono">{payloadView.sessionId.slice(0, 18)}</span>
-            <div className="failure-actions">
-              <button
-                className="link-button"
-                type="button"
-                onClick={() => void navigator.clipboard?.writeText(payloadView.text)}
-              >
-                复制全部
-              </button>
-              <button className="link-button" type="button" onClick={onClosePayloadView}>
-                关闭
-              </button>
-            </div>
-          </div>
-          <pre className="payload-view-body">{payloadView.text}</pre>
-        </div>
       )}
     </>
   );
