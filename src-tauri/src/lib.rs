@@ -3,6 +3,7 @@ mod db;
 mod eval_command;
 mod inet_bundle;
 mod inet_remote;
+mod inet_sim_bundle;
 mod inet_verify_command;
 mod redaction;
 mod session_export;

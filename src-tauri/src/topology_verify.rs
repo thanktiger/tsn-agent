@@ -64,6 +64,8 @@ pub struct VerifyLink {
     /// 端口配对的结构事实源（KTD1）：两列非 NULL = 配对。不再读 styles_json.leftLabel。
     pub src_port: Option<i64>,
     pub dst_port: Option<i64>,
+    /// 链路速率（Mbps）列；软仿 bundle 取 bitrate（KTD1：speed 也是列、非 styles_json）。
+    pub speed: Option<i64>,
     pub styles_json: String,
 }
 
@@ -371,6 +373,7 @@ mod tests {
             dst_node: dst.into(),
             src_port: Some(0),
             dst_port: Some(0),
+            speed: None,
             styles_json: "{}".into(),
         }
     }
@@ -608,6 +611,7 @@ mod tests {
             dst_node: "1".into(),
             src_port: Some(0),
             dst_port: None, // 一端口列 NULL → 未配对
+            speed: None,
             styles_json: "{}".into(),
         }];
         let r = verify_topology(&nodes, &links);
@@ -630,6 +634,7 @@ mod tests {
                 dst_node: "1".into(),
                 src_port: Some(1),
                 dst_port: Some(0),
+                speed: None,
                 styles_json: r#"{"plane":"A"}"#.into(),
             },
             VerifyLink {
@@ -638,6 +643,7 @@ mod tests {
                 dst_node: "2".into(),
                 src_port: Some(2),
                 dst_port: Some(0),
+                speed: None,
                 styles_json: r#"{"plane":"A"}"#.into(),
             },
         ];

@@ -117,7 +117,7 @@ pub async fn load_and_verify_topology(
     .await
     .map_err(|e| format!("查询节点失败：{e}"))?;
     let link_rows = sqlx::query(
-        "SELECT link_seq, src_node, dst_node, src_port, dst_port, styles_json FROM topology_links WHERE session_id = ? ORDER BY link_seq",
+        "SELECT link_seq, src_node, dst_node, src_port, dst_port, speed, styles_json FROM topology_links WHERE session_id = ? ORDER BY link_seq",
     )
     .bind(session_id)
     .fetch_all(pool)
@@ -140,6 +140,7 @@ pub async fn load_and_verify_topology(
             dst_node: r.get("dst_node"),
             src_port: r.get("src_port"),
             dst_port: r.get("dst_port"),
+            speed: r.get("speed"),
             styles_json: r.get("styles_json"),
         })
         .collect();

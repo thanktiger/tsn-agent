@@ -122,6 +122,7 @@ async fn load_topology_rows(
             dst_node: r.get("dst_node"),
             src_port: None,
             dst_port: None,
+            speed: None,
             styles_json: r.get("styles_json"),
         })
         .collect();
@@ -178,6 +179,7 @@ mod tests {
             dst_node: dst.into(),
             src_port: Some(0),
             dst_port: Some(0),
+            speed: None,
             styles_json: r#"{"speed":1000}"#.into(),
         }
     }
