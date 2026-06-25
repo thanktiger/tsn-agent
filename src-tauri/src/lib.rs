@@ -1,6 +1,7 @@
 mod commands;
 mod db;
 mod diagnostic_store;
+mod eval_command;
 mod inet_bundle;
 mod inet_remote;
 mod inet_verify_command;
@@ -95,6 +96,10 @@ pub fn run() {
             commands::describe_topology_templates,
             session_export::export_session,
             session_export::reveal_in_dir,
+            eval_command::open_eval_dir,
+            eval_command::export_eval_dataset,
+            eval_command::clear_eval_store,
+            eval_command::clear_eval_for_session,
             session_import::import_session,
             topology_mutations_command::get_topology_mutations_since,
             topology_position_command::update_node_position,

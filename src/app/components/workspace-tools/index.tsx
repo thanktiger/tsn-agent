@@ -1,8 +1,8 @@
 import {
+  Database,
   Download,
   FolderOpen,
   Plus,
-  ScrollText,
   Settings,
   Trash2,
   Upload,
@@ -10,24 +10,27 @@ import {
   X,
 } from "lucide-react";
 import { type Dispatch, type SetStateAction, useEffect, useState } from "react";
-import type { DiagnosticLogRepository } from "../../../diagnostics/diagnostic-log-repository";
 import { resolvePlannerBaseUrl } from "../../../planner/planner-contract";
 import { appVersion, type ReleaseNote, releaseNotes } from "../../../release/release-info";
 import type { TsnSession } from "../../../sessions/session-repository";
 import { SKILL_CATALOG, type SkillCatalogItem } from "../../../skills/skill-catalog";
-import { DiagnosticsLogView } from "../../../ui/diagnostics/DiagnosticsDrawer";
 import { SkillFilePreview } from "../../../ui/skills/SkillFilePreview";
+import {
+  clearEvalForSession,
+  clearEvalStore,
+  exportEvalDataset,
+  openEvalDir,
+} from "../../eval-transfer";
 import type { TransferNotice } from "../../session-transfer";
 import { DetailRow, formatTime } from "../shared";
 
-export type WorkspaceToolPanel = "sessions" | "diagnostics" | "skills" | "settings";
+export type WorkspaceToolPanel = "sessions" | "eval" | "skills" | "settings";
 
 export interface WorkspaceToolsProps {
   activePanel: WorkspaceToolPanel | undefined;
   setActivePanel: Dispatch<SetStateAction<WorkspaceToolPanel | undefined>>;
   currentSession: TsnSession;
   sessions: TsnSession[];
-  diagnosticsRepository: DiagnosticLogRepository;
   transferNotice: TransferNotice | undefined;
   transferBusy: boolean;
   onNewSession: () => void;
@@ -43,7 +46,6 @@ export function WorkspaceTools({
   setActivePanel,
   currentSession,
   sessions,
-  diagnosticsRepository,
   transferNotice,
   transferBusy,
   onNewSession,
@@ -65,7 +67,6 @@ export function WorkspaceTools({
         <WorkspaceToolDrawer
           activePanel={activePanel}
           currentSession={currentSession}
-          diagnosticsRepository={diagnosticsRepository}
           sessions={sessions}
           transferNotice={transferNotice}
           transferBusy={transferBusy}
@@ -91,7 +92,7 @@ function WorkspaceToolRail({
 }) {
   const tools: Array<{ id: WorkspaceToolPanel; label: string; icon: typeof FolderOpen }> = [
     { id: "sessions", label: "会话", icon: FolderOpen },
-    { id: "diagnostics", label: "执行日志", icon: ScrollText },
+    { id: "eval", label: "评估采集", icon: Database },
     { id: "skills", label: "Skill", icon: Wrench },
     { id: "settings", label: "设置", icon: Settings },
   ];
@@ -123,7 +124,6 @@ function WorkspaceToolRail({
 function WorkspaceToolDrawer({
   activePanel,
   currentSession,
-  diagnosticsRepository,
   sessions,
   transferNotice,
   transferBusy,
@@ -137,7 +137,6 @@ function WorkspaceToolDrawer({
 }: {
   activePanel: WorkspaceToolPanel;
   currentSession: TsnSession;
-  diagnosticsRepository: DiagnosticLogRepository;
   sessions: TsnSession[];
   transferNotice: TransferNotice | undefined;
   transferBusy: boolean;
@@ -180,9 +179,7 @@ function WorkspaceToolDrawer({
           onRevealExport={onRevealExport}
         />
       )}
-      {activePanel === "diagnostics" && (
-        <DiagnosticsLogView sessionId={currentSession.id} repository={diagnosticsRepository} />
-      )}
+      {activePanel === "eval" && <EvalToolPanel currentSessionId={currentSession.id} />}
       {activePanel === "skills" && <SkillToolPanel />}
       {activePanel === "settings" && (
         <SettingsToolPanel version={appVersion} releases={releaseNotes} />
@@ -299,6 +296,91 @@ function SessionToolPanel({
         </p>
       )}
     </>
+  );
+}
+
+function EvalToolPanel({ currentSessionId }: { currentSessionId: string }) {
+  const [notice, setNotice] = useState<string | undefined>();
+
+  const handle = async (action: () => Promise<string>) => {
+    try {
+      setNotice(await action());
+    } catch (error) {
+      setNotice(`操作失败：${error instanceof Error ? error.message : String(error)}`);
+    }
+  };
+
+  return (
+    <div className="workspace-tool-panel">
+      <p className="tool-panel-summary">
+        每次与大模型的交互都原样保存为 eval 样本（不脱敏、含密钥原文），用于离线评估。 数据存在本机
+        eval 目录，删除会话不会删除它——隐私清除请用下方按钮。
+      </p>
+      <div className="drawer-actions three-up">
+        <button
+          className="btn"
+          type="button"
+          onClick={() =>
+            handle(async () => {
+              await openEvalDir();
+              return "已打开 eval 目录";
+            })
+          }
+        >
+          <FolderOpen size={15} aria-hidden="true" />
+          打开目录
+        </button>
+        <button
+          className="btn"
+          type="button"
+          onClick={() =>
+            handle(async () => {
+              const outcome = await exportEvalDataset();
+              if (outcome.status === "error") {
+                throw new Error(outcome.message);
+              }
+              return outcome.status === "done" ? `已导出到 ${outcome.path}` : "已取消导出";
+            })
+          }
+        >
+          <Download size={15} aria-hidden="true" />
+          导出数据集
+        </button>
+        <button
+          className="btn"
+          type="button"
+          onClick={() =>
+            handle(async () => {
+              await clearEvalForSession(currentSessionId);
+              return "已清除当前会话的 eval 样本";
+            })
+          }
+        >
+          <Trash2 size={15} aria-hidden="true" />
+          清除当前会话
+        </button>
+      </div>
+      <div className="drawer-actions">
+        <button
+          className="btn danger"
+          type="button"
+          onClick={() =>
+            handle(async () => {
+              await clearEvalStore();
+              return "已清空全部 eval 样本";
+            })
+          }
+        >
+          <Trash2 size={15} aria-hidden="true" />
+          清空全部 eval
+        </button>
+      </div>
+      {notice && (
+        <p className="transfer-notice" role="status">
+          <span>{notice}</span>
+        </p>
+      )}
+    </div>
   );
 }
 
@@ -422,7 +504,7 @@ function SettingsToolPanel({ version, releases }: { version: string; releases: R
 function workspacePanelLabel(panel: WorkspaceToolPanel): string {
   const labels: Record<WorkspaceToolPanel, string> = {
     sessions: "会话管理",
-    diagnostics: "执行日志",
+    eval: "评估采集",
     skills: "Skill 能力",
     settings: "工作台设置",
   };
@@ -433,7 +515,7 @@ function workspacePanelLabel(panel: WorkspaceToolPanel): string {
 function workspacePanelKicker(panel: WorkspaceToolPanel): string {
   const labels: Record<WorkspaceToolPanel, string> = {
     sessions: "Sessions",
-    diagnostics: "Diagnostics",
+    eval: "Eval",
     skills: "Skills",
     settings: "Settings",
   };

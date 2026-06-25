@@ -1,23 +1,8 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
-import { BrowserDiagnosticLogRepository } from "../../../diagnostics/diagnostic-log-repository";
 import { createEmptySession } from "../../../sessions/session-repository";
 import { WorkspaceTools, type WorkspaceToolsProps } from "./index";
-
-function createMemoryStorage(): Storage {
-  const values = new Map<string, string>();
-  return {
-    get length() {
-      return values.size;
-    },
-    clear: () => values.clear(),
-    getItem: (key: string) => values.get(key) ?? null,
-    key: (index: number) => [...values.keys()][index] ?? null,
-    removeItem: (key: string) => values.delete(key),
-    setItem: (key: string, value: string) => values.set(key, value),
-  };
-}
 
 function baseProps(overrides: Partial<WorkspaceToolsProps> = {}): WorkspaceToolsProps {
   const session = createEmptySession();
@@ -26,7 +11,6 @@ function baseProps(overrides: Partial<WorkspaceToolsProps> = {}): WorkspaceTools
     setActivePanel: vi.fn(),
     currentSession: session,
     sessions: [session],
-    diagnosticsRepository: new BrowserDiagnosticLogRepository(createMemoryStorage()),
     onNewSession: vi.fn(),
     onSelectSession: vi.fn(),
     onDeleteSession: vi.fn(),

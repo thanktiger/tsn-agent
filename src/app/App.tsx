@@ -495,7 +495,6 @@ export function App() {
           setActivePanel={setActiveWorkspacePanel}
           currentSession={currentSession}
           sessions={sessions}
-          diagnosticsRepository={diagnosticsRepository}
           transferNotice={transferNotice}
           transferBusy={isAgentRunning}
           onNewSession={handleNewSession}
