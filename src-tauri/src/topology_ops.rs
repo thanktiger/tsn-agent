@@ -246,11 +246,15 @@ pub async fn apply_op(
                     a.link_seq, a.src_node, a.dst_node
                 )));
             }
+            // 端口/速率从 styles_json 的 leftLabel/rightLabel/speed 解析进独立列——
+            // 与 initialize 路径同源（compute_clock_tree 读这些列分配时钟角色；漏填则
+            // 新增节点的链路端口为 NULL，进不了时钟树）。
+            let (src_port, dst_port, speed) = crate::db::parse_link_ports_and_speed(&a.styles_json);
             // 三态写入：同 node.add，冲突时读回只比对请求提供的字段。
             let res = sqlx::query(
                 r#"INSERT INTO topology_links
-                   (session_id, link_seq, name, src_node, dst_node, styles_json)
-                   VALUES (?, ?, ?, ?, ?, ?)
+                   (session_id, link_seq, name, src_node, dst_node, src_port, dst_port, speed, styles_json)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(session_id, link_seq) DO NOTHING"#,
             )
             .bind(session_id)
@@ -258,6 +262,9 @@ pub async fn apply_op(
             .bind(&a.name)
             .bind(&a.src_node)
             .bind(&a.dst_node)
+            .bind(src_port)
+            .bind(dst_port)
+            .bind(speed)
             .bind(&a.styles_json)
             .execute(&mut *tx)
             .await
@@ -379,6 +386,65 @@ mod tests {
         sqlx::query("INSERT INTO sessions (id, title, created_at, updated_at, payload) VALUES ('s1', 't', 'now', 'now', '{}')")
             .execute(&pool).await.unwrap();
         pool
+    }
+
+    // 回归：增量 link.add 必须像 initialize 一样把 styles_json 的 leftLabel/rightLabel/speed
+    // 解析进独立列 src_port/dst_port/speed——否则 compute_clock_tree 读到 NULL，新增节点
+    // 进不了时钟树（真机 bug：拓扑阶段加 ES-5 后时钟树无法纳入）。
+    #[test]
+    fn link_add_populates_port_columns_from_styles_json() {
+        tauri::async_runtime::block_on(async {
+            let pool = fresh_pool().await;
+            let mut tx = pool.begin().await.unwrap();
+            for mid in ["0", "1"] {
+                apply_op(
+                    &mut tx,
+                    "s1",
+                    &TopologyOp::NodeAdd(NodeAddArgs {
+                        name: None,
+                        mid: mid.into(),
+                        x: 0.0,
+                        y: 0.0,
+                        node_type: None,
+                        insert_order: 0,
+                    }),
+                )
+                .await
+                .unwrap();
+            }
+            apply_op(
+                &mut tx,
+                "s1",
+                &TopologyOp::LinkAdd(LinkAddArgs {
+                    link_seq: 0,
+                    name: None,
+                    src_node: "0".into(),
+                    dst_node: "1".into(),
+                    styles_json: r#"{"leftLabel":"P2","rightLabel":"P3","speed":1000}"#.into(),
+                }),
+            )
+            .await
+            .unwrap();
+            tx.commit().await.unwrap();
+
+            let row = sqlx::query(
+                "SELECT src_port, dst_port, speed FROM topology_links WHERE session_id='s1' AND link_seq=0",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(
+                row.get::<Option<i64>, _>("src_port"),
+                Some(2),
+                "leftLabel P2 → src_port 2"
+            );
+            assert_eq!(
+                row.get::<Option<i64>, _>("dst_port"),
+                Some(3),
+                "rightLabel P3 → dst_port 3"
+            );
+            assert_eq!(row.get::<Option<i64>, _>("speed"), Some(1000));
+        });
     }
 
     #[test]
