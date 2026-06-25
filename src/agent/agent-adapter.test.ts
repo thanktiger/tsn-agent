@@ -57,11 +57,6 @@ function mockTauriCommands(
       return options.verifyTimeSync ?? { ok: true, caliber: "timesync_structural", errors: [] };
     }
 
-    if (command === "verify_inet") {
-      // verify_inet 已不在拓扑确认链路触发（INET 挪到流量规划）；保留 mock 默认仅为「未被调用」断言兜底。
-      return { ok: true, caliber: "loadability_only", errors: [] };
-    }
-
     if (command === "run_claude_agent") {
       if (options.claudeError !== undefined) {
         throw options.claudeError;
@@ -461,9 +456,6 @@ describe("runTsnAgent", () => {
     expect(result.verification?.ok).toBe(false);
     expect(result.assistantText).toContain("孤立节点");
     expect(result.assistantText).toContain("确认并继续");
-    // 结构失败 → 短路、不进 INET 闸。
-    const inetCalls = invokeMock.mock.calls.filter(([command]) => command === "verify_inet");
-    expect(inetCalls).toHaveLength(0);
   });
 
   it("U4: normal verify failure relays Rust messageZh verbatim (TS does not re-author per-error text)", async () => {
@@ -535,11 +527,9 @@ describe("runTsnAgent", () => {
     // 通过即静默推进：不再单独弹「结构没问题」（结构反馈由 agent 操作拓扑时经 MCP validate 给出）。
     expect(result.assistantText).not.toContain("结构没问题");
     expect(result.verification).toBeUndefined();
-    // 仍走结构校验兜底硬拦，但不再调 verify_inet（INET 已挪到流量规划阶段）。
+    // 仍走结构校验兜底硬拦。
     const verifyCalls = invokeMock.mock.calls.filter(([command]) => command === "verify_topology");
     expect(verifyCalls.length).toBeGreaterThanOrEqual(1);
-    const inetCalls = invokeMock.mock.calls.filter(([command]) => command === "verify_inet");
-    expect(inetCalls).toHaveLength(0);
   });
 
   it("does NOT verify a rollback-confirm (pendingStageChange present)", async () => {
@@ -561,9 +551,9 @@ describe("runTsnAgent", () => {
       session: sessionWithWorkflow(rollbackWorkflow),
     });
 
-    // 回退确认不调任何过关闸（结构 + INET 都不触发）。
+    // 回退确认不调结构过关闸。
     const verifyCalls = invokeMock.mock.calls.filter(
-      ([command]) => command === "verify_topology" || command === "verify_inet",
+      ([command]) => command === "verify_topology",
     );
     expect(verifyCalls).toHaveLength(0);
   });

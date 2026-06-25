@@ -47,15 +47,7 @@ impl RemoteConfig {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct RemoteRunOutcome {
-    /// inet 退出码（None = 未取到，按不可达处理）。
-    pub exit_code: Option<i32>,
-    /// 脱敏 + 截断后的输出尾部，供错误文案。
-    pub output_tail: String,
-}
-
-/// 远端执行失败分类——驱动 U3/U4「连不上(inet_unreachable)」vs「跑不起来(inet_load_failed)」分文案。
+/// 远端执行失败分类——驱动「连不上(inet_unreachable)」vs「跑不起来(inet_load_failed)」分文案。
 #[derive(Debug)]
 pub enum RemoteError {
     /// 连不上 / 超时 / 传输失败 / 找不到 ssh —— 环境问题，非拓扑错。
@@ -74,13 +66,6 @@ pub struct SimRunOutcome {
 }
 
 pub trait RemoteRunner {
-    /// 把 bundle 发到远端、跑 inet、收退出码与输出、清理。
-    fn run_bundle(
-        &self,
-        bundle: &InetBundle,
-        cfg: &RemoteConfig,
-    ) -> Result<RemoteRunOutcome, RemoteError>;
-
     /// 软仿（U3）：scp bundle → 跑 inet → 跑 opp_scavetool 导出 timeChanged CSV → cat 回传 → 清理。
     /// `scavetool_filter` 是 `opp_scavetool export -f` 的过滤表达式（由调用方构造、本函数 shell-quote）。
     fn run_sim_fetch_csv(
@@ -203,118 +188,6 @@ fn tail(s: &str, max: usize) -> String {
 pub struct SshRunner;
 
 impl RemoteRunner for SshRunner {
-    fn run_bundle(
-        &self,
-        bundle: &InetBundle,
-        cfg: &RemoteConfig,
-    ) -> Result<RemoteRunOutcome, RemoteError> {
-        let ssh = resolve_remote_bin("ssh", "TSN_AGENT_SSH_PATH");
-        let scp = resolve_remote_bin("scp", "TSN_AGENT_SCP_PATH");
-
-        let dir_name = gen_run_dir_name();
-        if !is_safe_run_dir_name(&dir_name) {
-            return Err(RemoteError::Unreachable("run 目录名生成异常".into()));
-        }
-        let remote_dir = format!("{}/{}", cfg.remote_base_dir, dir_name);
-
-        // 本地落盘 bundle（独立临时目录）。
-        let local_dir = std::env::temp_dir().join(format!("tsn-inet-{dir_name}"));
-        let gen_dir = local_dir.join("tsnagent").join("generated");
-        let write = || -> io::Result<()> {
-            std::fs::create_dir_all(&gen_dir)?;
-            std::fs::write(gen_dir.join("network.ned"), &bundle.network_ned)?;
-            std::fs::write(local_dir.join("omnetpp.ini"), &bundle.omnetpp_ini)?;
-            std::fs::write(local_dir.join("manifest.json"), &bundle.manifest_json)?;
-            Ok(())
-        };
-        if let Err(e) = write() {
-            return Err(RemoteError::Unreachable(format!("本地写 bundle 失败：{e}")));
-        }
-
-        let cleanup_local = || {
-            let _ = std::fs::remove_dir_all(&local_dir);
-        };
-
-        // 传输步骤（mkdir/scp）：spawn 失败、超时、或远端非零退出都归为「连不上」（环境问题）。
-        let transport = |cmd: Command, what: &str| -> Result<(), RemoteError> {
-            match run_with_timeout(cmd, cfg.timeout) {
-                Ok(o) if o.status.success() => Ok(()),
-                Ok(o) => Err(RemoteError::Unreachable(format!(
-                    "{what}失败（退出码 {}）：{}",
-                    o.status
-                        .code()
-                        .map(|c| c.to_string())
-                        .unwrap_or_else(|| "未知".into()),
-                    redact_remote(&String::from_utf8_lossy(&o.stderr), cfg)
-                ))),
-                Err(e) => Err(RemoteError::Unreachable(format!(
-                    "{what}失败：{}",
-                    redact_remote(&e.to_string(), cfg)
-                ))),
-            }
-        };
-
-        // 1) 远端建目录。
-        let mkdir_cmd = format!("mkdir -p {}", sh_squote(&remote_dir));
-        if let Err(e) = transport(
-            make_cmd(&ssh, build_ssh_argv(cfg, &mkdir_cmd)),
-            "连远端 / 建目录",
-        ) {
-            cleanup_local();
-            return Err(e);
-        }
-        // 2) scp 传内容。
-        let local_src = format!("{}/.", local_dir.display());
-        if let Err(e) = transport(
-            make_cmd(&scp, build_scp_argv(cfg, &local_src, &remote_dir)),
-            "传输 bundle",
-        ) {
-            let _ = run_with_timeout(
-                make_cmd(&ssh, build_ssh_argv(cfg, &remote_cleanup_cmd(&remote_dir))),
-                cfg.timeout,
-            );
-            cleanup_local();
-            return Err(e);
-        }
-        // 3) 跑 inet。
-        let run_res = run_with_timeout(
-            make_cmd(&ssh, build_ssh_argv(cfg, &remote_run_cmd(cfg, &remote_dir))),
-            cfg.timeout,
-        );
-        // 4) best-effort 清理远端。
-        let _ = run_with_timeout(
-            make_cmd(&ssh, build_ssh_argv(cfg, &remote_cleanup_cmd(&remote_dir))),
-            cfg.timeout,
-        );
-        cleanup_local();
-
-        match run_res {
-            Ok(output) => {
-                let code = output.status.code();
-                let mut combined = String::from_utf8_lossy(&output.stdout).to_string();
-                combined.push_str(&String::from_utf8_lossy(&output.stderr));
-                let redacted = redact_remote(&combined, cfg);
-                // ssh 对自身传输失败（连不上 / 认证 / host key 未登记）保留退出码 255；
-                // inet 真加载失败是 1..254。255 或拿不到退出码 → 判「连不上」，不诬陷拓扑。
-                if code == Some(255) || code.is_none() {
-                    return Err(RemoteError::Unreachable(format!(
-                        "连不上远端 INET（ssh 退出码 {}）：{}",
-                        code.map(|c| c.to_string()).unwrap_or_else(|| "未知".into()),
-                        tail(&redacted, 2000)
-                    )));
-                }
-                Ok(RemoteRunOutcome {
-                    exit_code: code,
-                    output_tail: tail(&redacted, 2000),
-                })
-            }
-            Err(e) => Err(RemoteError::Unreachable(format!(
-                "远端运行 inet 失败：{}",
-                redact_remote(&e.to_string(), cfg)
-            ))),
-        }
-    }
-
     fn run_sim_fetch_csv(
         &self,
         bundle: &InetBundle,

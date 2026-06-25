@@ -13,8 +13,6 @@ use serde::Serialize;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 pub const CALIBER_STRUCTURAL_ONLY: &str = "structural_only";
-/// 第二批 INET 加载冒烟口径：能加载运行 ≠ 时延/调度已验。与上面并列、口径常量集中一处（KTD5）。
-pub const CALIBER_LOADABILITY_ONLY: &str = "loadability_only";
 
 const NODE_TYPE_SWITCH: &str = "switch";
 const NODE_TYPE_END_SYSTEM: &str = "endSystem";
