@@ -174,9 +174,10 @@ pub async fn compute_clock_tree(
     for (mid, incidences) in &adjacency {
         for inc in incidences {
             if let Some(port) = inc.local_port
-                && !tree_ports.contains(&(mid.clone(), port)) {
-                    passive.get_mut(mid).unwrap().insert(port);
-                }
+                && !tree_ports.contains(&(mid.clone(), port))
+            {
+                passive.get_mut(mid).unwrap().insert(port);
+            }
         }
     }
     // 禁用链路两端端口补 passive（端点须在节点集内）。
@@ -190,13 +191,15 @@ pub async fn compute_clock_tree(
         let src_port: Option<i64> = row.get("src_port");
         let dst_port: Option<i64> = row.get("dst_port");
         if let (Some(set), Some(port)) = (passive.get_mut(&src), src_port)
-            && !tree_ports.contains(&(src.clone(), port)) {
-                set.insert(port);
-            }
+            && !tree_ports.contains(&(src.clone(), port))
+        {
+            set.insert(port);
+        }
         if let (Some(set), Some(port)) = (passive.get_mut(&dst), dst_port)
-            && !tree_ports.contains(&(dst.clone(), port)) {
-                set.insert(port);
-            }
+            && !tree_ports.contains(&(dst.clone(), port))
+        {
+            set.insert(port);
+        }
     }
 
     // 组装输出，按 mid 数值序排列（与 tie-break 一致）。
