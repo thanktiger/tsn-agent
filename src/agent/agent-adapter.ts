@@ -348,6 +348,8 @@ export async function runTsnAgent(
       workflow: effectiveWorkflow,
       assistantText: buildAgentFailureText(error, effectiveIntent),
       mode: "claude",
+      // 终止塑形据此区分「失败/被杀」与「竞速里已自然成功」：仅失败态才允许标已终止。
+      runFailed: true,
     };
   } finally {
     unlisten?.();

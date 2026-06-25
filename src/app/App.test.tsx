@@ -672,6 +672,8 @@ describe("App", () => {
       workflow: topologyWaitingWorkflow(),
       assistantText: "本轮请求失败：智能助手运行时异常退出。",
       mode: "claude",
+      // 真实 adapter catch 路径带的失败标志；终止塑形据此与「竞速里已成功」区分。
+      runFailed: true,
     };
   }
 
@@ -750,10 +752,32 @@ describe("App", () => {
     await act(async () => {
       terminateHandlerRef.current?.();
     });
-    // killed:false → 不置终止标志 → 失败态 result 仍按失败塑形。
+    // killed:false → 不置终止标志（轻提示经 transferNotice 走会话抽屉，默认视图外，不在此断言）。
+    // 失败态 result 仍按失败塑形。
     run.resolveRun(failureRunResult());
 
     await waitFor(() => expect(screen.getByText(/本轮请求失败/)).toBeInTheDocument());
+    expect(screen.queryByText(/已终止/)).not.toBeInTheDocument();
+  });
+
+  it("keeps a raced-past success (killed:true but run already succeeded) — not mislabeled 已终止", async () => {
+    const user = userEvent.setup();
+    // cancel 报 killed:true，但本轮 run 在竞速里已自然成功（runFailed 缺省）。
+    invokeMock.mockResolvedValue({ killed: true });
+    const run = arrangeControllableRun(["生成中"]);
+    render(<App />);
+
+    await typeDefaultIntent(user);
+    await user.click(screen.getByRole("button", { name: "生成规划草案" }));
+    await waitFor(() => expect(screen.getByText("生成中")).toBeInTheDocument());
+
+    await act(async () => {
+      terminateHandlerRef.current?.();
+    });
+    // 成功态 result（无 runFailed）→ runFailed 闸门挡住误标，走正常成功塑形。
+    run.resolveRun(topologyAgentResult());
+
+    await waitFor(() => expect(screen.getByText(/已根据本轮需求生成拓扑草案/)).toBeInTheDocument());
     expect(screen.queryByText(/已终止/)).not.toBeInTheDocument();
   });
 
@@ -792,7 +816,7 @@ describe("App", () => {
     expect(screen.queryByText(/已终止/)).not.toBeInTheDocument();
   });
 
-  it("ignores late chunks after the run is terminated (U2 settled guard)", async () => {
+  it("drops in-flight chunks once terminate succeeds, before shaping (U2 cancelRequestedRef guard)", async () => {
     const user = userEvent.setup();
     invokeMock.mockResolvedValue({ killed: true });
     const run = arrangeControllableRun(["部分内容"]);
@@ -802,16 +826,17 @@ describe("App", () => {
     await user.click(screen.getByRole("button", { name: "生成规划草案" }));
     await waitFor(() => expect(screen.getByText("部分内容")).toBeInTheDocument());
 
+    // 终止生效（cancelRequestedRef 置位）后、塑形前——这正是 SIGKILL 后 late chunk
+    // 的危险窗口：守卫必须在此刻就丢弃在途 chunk，不让它追加进 streamedText。
     await act(async () => {
-      terminateHandlerRef.current?.();
+      await terminateHandlerRef.current?.();
+    });
+    await act(async () => {
+      run.lateChunk("不该出现的尾巴");
     });
     run.resolveRun(failureRunResult());
     await waitFor(() => expect(screen.getByText(/已终止/)).toBeInTheDocument());
 
-    // SIGKILL 后在途 chunk 到达：不得污染已定型的「已终止」消息。
-    await act(async () => {
-      run.lateChunk("不该出现的尾巴");
-    });
     expect(screen.queryByText(/不该出现的尾巴/)).not.toBeInTheDocument();
   });
 

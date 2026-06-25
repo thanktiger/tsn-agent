@@ -160,8 +160,6 @@ export function App() {
     // 本轮 runId：编排层生成并留存，传给 runTsnAgent（前后端同一 runId），终止时据此 cancel。
     const runId = createRunId();
     activeRunIdRef.current = runId;
-    // 已塑形「已终止」消息后置位，丢弃 SIGKILL 后仍在途的 late chunk（避免覆盖终止消息）。
-    let settled = false;
 
     setInput((value) => (value.trim() === trimmedInput ? "" : value));
     agentRun.startRun();
@@ -191,8 +189,10 @@ export function App() {
         session: contextSession,
         diagnostics: diagnosticsRepository,
         onChunk: (chunk) => {
-          // 终止塑形后到达的在途 chunk 不得覆盖已定型的「已终止」消息。
-          if (settled) {
+          // 终止成功（cancelRequestedRef 已置）后到达的在途 chunk 一律丢弃，避免覆盖
+          // 即将定型的「已终止」消息。守 cancelRequestedRef 而非塑形后才置的局部标志，
+          // 把守卫提前到「终止生效」的瞬间，关掉 unlisten 与塑形之间的 late-chunk 窗口。
+          if (cancelRequestedRef.current) {
             return;
           }
           streamedText += chunk;
@@ -227,10 +227,12 @@ export function App() {
       });
       const completedAt = new Date().toISOString();
 
-      // 终止分支（KTD3）：用户已真终止（cancel 返回 killed:true）→ 保留已流式产出 + 标「已终止」，
-      // 丢弃 result.events（不让 event-agent-failed 混进事件流）、不消费 buildAgentFailureText。
-      if (cancelRequestedRef.current) {
-        settled = true;
+      // 终止分支（KTD3）：用户已真终止（cancel 返回 killed:true）「且」本轮确实失败
+      // （runFailed）→ 保留已流式产出 + 标「已终止」，丢弃 result.events（不让
+      // event-agent-failed 混进事件流）、不消费 buildAgentFailureText。
+      // runFailed 闸门挡住竞速：cancel 在 worker 已自然成功（结果含已落库 topologyMutationId）
+      // 后才到达时，result.runFailed 为假 → 走下方正常分支，保住拓扑指针不被误丢。
+      if (cancelRequestedRef.current && result.runFailed) {
         const redacted = redactProviderNamesForDisplay(streamedText);
         const terminatedContent = redacted ? `${redacted}\n\n_（已终止）_` : "_（本轮推理已终止）_";
         const latestTerminatedSession =
@@ -361,7 +363,11 @@ export function App() {
   // 真崩溃同瞬 / run 已自然收尾这几个误标窗口；killed:false 给一句轻提示、不置脏标志。
   const handleTerminateRun = useCallback(async () => {
     const runId = activeRunIdRef.current;
-    if (!isAgentRunning || !runId) {
+    // 守 activeRunIdRef（同步写、永远最新）而非 isAgentRunning（state，闭包快照可能
+    // 停留在 startRun 前的旧帧 → 误判没在跑而提前 return）。deps 空，回调引用稳定。
+    // 已终止过本轮（cancelRequestedRef 真）直接 no-op：挡住双击向已清空 registry 发第二次
+    // cancel 而触发 killed:false 误导提示。
+    if (!runId || cancelRequestedRef.current) {
       return;
     }
 
@@ -375,7 +381,7 @@ export function App() {
     } catch {
       // invoke 自身失败：不留脏标志，照常等本轮结束。
     }
-  }, [isAgentRunning]);
+  }, []);
 
   async function handleNewSession() {
     await createNewSession();

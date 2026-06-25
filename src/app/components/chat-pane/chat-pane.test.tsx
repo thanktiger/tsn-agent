@@ -21,6 +21,7 @@ function baseProps(overrides: Partial<ChatPaneProps> = {}): ChatPaneProps {
     onInputChange: vi.fn(),
     onSubmit: vi.fn(),
     onConfirm: vi.fn(),
+    onTerminate: vi.fn(),
     ...overrides,
   };
 }

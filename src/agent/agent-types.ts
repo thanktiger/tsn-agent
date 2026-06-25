@@ -53,6 +53,12 @@ export interface TsnAgentResult {
   assistantText: string;
   mode: "claude" | "local" | "unavailable";
   claudeSessionId?: string;
+  /**
+   * 本轮 run 未正常完成（invoke reject 走 catch 兜底）。终止塑形据此判定：仅当用户
+   * 终止「且」本轮确实失败才标「已终止」——避免 cancel 与自然成功竞速时把已完成
+   * （拓扑可能已落库）的结果误标终止并丢弃 topologyMutationId。
+   */
+  runFailed?: boolean;
   /** sidecar apply_operations 写入 P0 表后的 mutationId；UI 据此感知拓扑已更新。 */
   topologyMutationId?: number;
   /** Plan 2026-06-09-003：本轮工具调用记录，挂到 assistant 消息渲染成卡片。 */

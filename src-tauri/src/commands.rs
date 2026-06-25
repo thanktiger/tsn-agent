@@ -83,6 +83,26 @@ impl Drop for AgentWorkerRegistration<'_> {
     }
 }
 
+/// cancel 命令内核：按 runId 比对，命中则在锁内 `take()` 取出 worker、**释锁后**再强杀，
+/// 避免持 registry 锁跨 Windows `taskkill` 的阻塞 `.output()` 调用而阻塞 spawn/去注册。
+/// 命中返回 true，否则 false（幂等）。命令与单测共用此内核，避免测试复刻锁逻辑。
+fn do_cancel(registry: &AgentWorkerRegistry, run_id: &str) -> bool {
+    let worker = {
+        let mut slot = registry.0.lock().expect("registry mutex");
+        match slot.as_ref() {
+            Some(w) if w.run_id == run_id => slot.take(),
+            _ => None,
+        }
+    };
+    match worker {
+        Some(worker) => {
+            kill_worker_process_group(&worker);
+            true
+        }
+        None => false,
+    }
+}
+
 /// 按 runId 终止当前正在跑的 worker：匹配则强杀进程组并去注册，返回 `killed:true`；
 /// 无运行 / runId 不匹配 / run 已自然收尾 → `killed:false`（幂等、非错误）。
 /// 只发信号不 `wait()`（KTD2，zombie 回收由阻塞循环负责）。
@@ -91,15 +111,9 @@ pub async fn cancel_claude_agent(
     registry: tauri::State<'_, AgentWorkerRegistry>,
     run_id: String,
 ) -> Result<CancelOutcome, String> {
-    let mut slot = registry.0.lock().expect("registry mutex");
-    if let Some(worker) = slot.as_ref()
-        && worker.run_id == run_id
-    {
-        kill_worker_process_group(worker);
-        slot.take();
-        return Ok(CancelOutcome { killed: true });
-    }
-    Ok(CancelOutcome { killed: false })
+    Ok(CancelOutcome {
+        killed: do_cancel(&registry, &run_id),
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -375,16 +389,19 @@ fn run_claude_agent_blocking(
                 break;
             }
             Ok(None) if started_at.elapsed() > CLAUDE_BRIDGE_SYNC_TIMEOUT => {
-                // 复用单一强杀 helper：worker + SDK 拉起的 MCP child 一并端掉，
-                // 避免孤儿进程继续持有 sidecar 的 DB_RPC_TOKEN（审计 P1#3）。
-                kill_worker_process_group(&ActiveWorker {
-                    run_id: run_id.clone(),
-                    #[cfg(unix)]
-                    pgid: worker_pgid,
-                    #[cfg(windows)]
-                    pid: child.id(),
-                });
+                // 超时强杀：先在锁下 take 去注册（与 reap 分支对称），避免 child.wait()
+                // 期间同 runId 的 cancel 命中残留死 pgid 而返回 spurious killed:true；
+                // 再用取出的句柄复用单一强杀 helper（worker + MCP child 一并端掉，
+                // 避免孤儿进程继续持有 sidecar 的 DB_RPC_TOKEN，审计 P1#3）。
+                let timed_out_worker = registry.0.lock().expect("registry mutex").take();
+                if let Some(worker) = timed_out_worker.as_ref() {
+                    kill_worker_process_group(worker);
+                }
                 let _ = child.wait();
+                // SIGKILL 关闭管道 FD → reader 线程很快 EOF 退出；join 回收（与正常退出
+                // 路径对称），避免与下一轮 spawn 的 reader 线程并存。
+                let _ = stdout_thread.join();
+                let _ = stderr_thread.join();
                 log_worker_event(
                     &app,
                     app_session_id.as_deref(),
@@ -1172,18 +1189,7 @@ mod tests {
         let registry = AgentWorkerRegistry::default();
         register(&registry, "run-cancel", pgid);
 
-        let killed = {
-            let mut slot = registry.0.lock().expect("registry mutex");
-            if let Some(worker) = slot.as_ref()
-                && worker.run_id == "run-cancel"
-            {
-                kill_worker_process_group(worker);
-                slot.take();
-                true
-            } else {
-                false
-            }
-        };
+        let killed = do_cancel(&registry, "run-cancel");
         let _ = child.wait();
 
         assert!(killed, "matching runId must report killed");
@@ -1207,20 +1213,13 @@ mod tests {
         let registry = AgentWorkerRegistry::default();
         register(&registry, "run-real", pgid);
 
-        let killed = {
-            let mut slot = registry.0.lock().expect("registry mutex");
-            if let Some(worker) = slot.as_ref()
-                && worker.run_id == "run-WRONG"
-            {
-                kill_worker_process_group(worker);
-                slot.take();
-                true
-            } else {
-                false
-            }
-        };
+        let killed = do_cancel(&registry, "run-WRONG");
 
         assert!(!killed, "mismatched runId must report not killed");
+        assert!(
+            registry.0.lock().expect("registry mutex").is_some(),
+            "mismatched cancel must leave the registered worker in place"
+        );
         assert_eq!(
             unsafe { libc::kill(member_pid, 0) },
             0,
@@ -1237,18 +1236,7 @@ mod tests {
     #[test]
     fn cancel_empty_registry_is_idempotent_false() {
         let registry = AgentWorkerRegistry::default();
-        let killed = {
-            let mut slot = registry.0.lock().expect("registry mutex");
-            if let Some(worker) = slot.as_ref()
-                && worker.run_id == "anything"
-            {
-                kill_worker_process_group(worker);
-                slot.take();
-                true
-            } else {
-                false
-            }
-        };
+        let killed = do_cancel(&registry, "anything");
         assert!(!killed, "empty registry cancel must report not killed");
         assert!(registry.0.lock().expect("registry mutex").is_none());
     }
