@@ -202,12 +202,15 @@ export function ChatPane({
             id="intent"
             aria-label="输入你的 TSN 需求"
             value={input}
-            // 推理态复用 placeholder 显示运行状态（首次指引后 placeholder 即闲置）；
-            // 输入框为空时可见，用户开始打字则让位给输入内容（「终止」按钮仍指示运行中）。
+            // placeholder 三态：①推理中显示运行状态（含秒数，「终止」按钮另作运行指示）；
+            // ②本会话还没发过需求 → 显示「例如：…」指引（仅教首次如何描述拓扑）；
+            // ③已发过首条需求后即闲置，不再复述指引。
             placeholder={
               isAgentRunning && agentRunPhase
                 ? `${getAgentRunStatusMessage(agentRunPhase)} · 已运行 ${agentRunElapsedSeconds ?? 0} 秒`
-                : `例如：${scenarioConfig.exampleIntent}`
+                : messages.some((message) => message.role === "user")
+                  ? ""
+                  : `例如：${scenarioConfig.exampleIntent}`
             }
             onChange={(event) => onInputChange(event.target.value)}
             onKeyDown={(event) => {
