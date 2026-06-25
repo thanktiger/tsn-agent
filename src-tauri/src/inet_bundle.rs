@@ -17,13 +17,8 @@ const NODE_TYPE_SERVER: &str = "server";
 const DEFAULT_DATARATE_MBPS: u32 = 1000;
 const MAX_DATARATE_MBPS: f64 = 100_000.0;
 
-/// 序列化产物：三个文件的内容（路径由调用方按 bundle 布局放置）。
-#[derive(Debug, Clone)]
-pub struct InetBundle {
-    pub network_ned: String,
-    pub omnetpp_ini: String,
-    pub manifest_json: String,
-}
+/// 序列化产物：三文件内容。结构定义已移到 inet_remote（执行器侧），本模块（将随 U4 删）复用之。
+pub use crate::inet_remote::InetBundle;
 
 struct MappedNode {
     ned_name: String,

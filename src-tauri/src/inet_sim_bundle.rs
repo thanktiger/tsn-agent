@@ -30,7 +30,7 @@ const NOMINAL_TICK_LENGTH: &str = "10ns";
 const LINK_LENGTH: &str = "10m";
 const SEED_SET: u32 = 0;
 
-pub use crate::inet_bundle::InetBundle;
+pub use crate::inet_remote::InetBundle;
 
 /// 覆盖表单（R4）：振荡器类型 / 漂移幅度 / sim 时长。缺省走 R3(a) 固定默认。
 #[derive(Debug, Clone, Default)]

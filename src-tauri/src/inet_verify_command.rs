@@ -236,6 +236,14 @@ mod tests {
                 Err(RemoteError::Unreachable(m)) => Err(RemoteError::Unreachable(m.clone())),
             }
         }
+        fn run_sim_fetch_csv(
+            &self,
+            _b: &InetBundle,
+            _c: &RemoteConfig,
+            _f: &str,
+        ) -> Result<crate::inet_remote::SimRunOutcome, RemoteError> {
+            unreachable!("loadability stub 不跑软仿")
+        }
     }
 
     #[test]
