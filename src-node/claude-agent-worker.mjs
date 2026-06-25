@@ -520,6 +520,12 @@ export function buildAllowedToolsForStage(stageRunnerInput, hasTopologyMcpConfig
     // server，故同样门控 hasTopologyMcpConfig（server 没注册就别白名单它们）。timesync 写库
     // 走 sidecar、前端靠查库渲染，不经 stageResult 对账，但 stage 门控仍防跨阶段误写。
     ...(hasTopologyMcpConfig && stage === "time-sync" ? TIMESYNC_MCP_ALLOWED_TOOLS : []),
+    // time-sync 阶段额外放行只读的 topology_inspect：设 GM/配置时钟同步要先读拓扑
+    // 把节点名（如 ES-1）解析成 mid。只读工具跨阶段安全（门控本意是挡拓扑写工具
+    // apply_operations/initialize，不是挡读）。
+    ...(hasTopologyMcpConfig && stage === "time-sync"
+      ? ["mcp__tsn_topology__topology_inspect"]
+      : []),
     // U6：撤销工具只在拓扑阶段开放（不像 request_stage_change 全阶段）——本期只撤 topology，
     // 在时间同步 / 流量规划阶段撤销会错误回退拓扑。撤销 in-process 不依赖拓扑 stdio server，
     // 故只门控 stage（不门控 hasTopologyMcpConfig）。time-sync 阶段撤销走 timesync.undo 工具。

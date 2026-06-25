@@ -616,6 +616,8 @@ describe("claude-agent-worker", () => {
     for (const tool of TIMESYNC_MCP_ALLOWED_TOOLS) {
       expect(timeSyncStage).toContain(tool);
     }
+    // time-sync 阶段：放行只读 topology_inspect（设 GM 要把节点名解析成 mid）。
+    expect(timeSyncStage).toContain("mcp__tsn_topology__topology_inspect");
     // time-sync 阶段：不放行拓扑写工具（initialize/apply 越阶段会让工程静默分叉）。
     expect(timeSyncStage).not.toContain("mcp__tsn_topology__topology_apply_operations");
     expect(timeSyncStage).not.toContain("mcp__tsn_topology__topology_initialize");
