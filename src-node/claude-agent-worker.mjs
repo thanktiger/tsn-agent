@@ -188,13 +188,10 @@ export async function runClaude(userPrompt, options = {}, queryFn = query) {
     stageResultPath,
     resolvedOptions.stageRunnerInput,
   );
-  const {
-    systemPrompt,
-    skillContent,
-    skillReadWarning,
-    scenarioReference,
-    scenarioReferenceWarning,
-  } = await buildSystemPromptForStage(resolvedOptions.stageRunnerInput, skillRoot);
+  const { systemPrompt, skillContent } = await buildSystemPromptForStage(
+    resolvedOptions.stageRunnerInput,
+    skillRoot,
+  );
   const finalPrompt = buildPrompt(
     userPrompt,
     resolvedOptions.conversationContext,
@@ -238,28 +235,6 @@ export async function runClaude(userPrompt, options = {}, queryFn = query) {
       : {}),
     systemPrompt,
   };
-  const auditLog = await createAgentRunAuditLog({
-    auditDir: resolvedOptions.auditDir,
-    appSessionId: resolvedOptions.appSessionId,
-    runId: resolvedOptions.runId,
-    cwd,
-    skillRoot,
-    userPrompt,
-    prompt: finalPrompt,
-    conversationContext: resolvedOptions.conversationContext,
-    stageRunnerInput: resolvedOptions.stageRunnerInput,
-    stageRunnerInputPath,
-    stageResultPath,
-    skillOutputDir,
-    sdkOptions,
-    scenarioReference,
-  });
-  if (skillReadWarning) {
-    recordAuditTimeline(auditLog, skillReadWarning);
-  }
-  if (scenarioReferenceWarning) {
-    recordAuditTimeline(auditLog, scenarioReferenceWarning);
-  }
 
   // Plan 2026-06-25-002 U3/U4：eval 捕获——版本指纹、原生 output blocks 累加器、
   // apply/validate 弱标签。input.system + output.* 为 raw（不脱敏）；input.messages
@@ -314,13 +289,11 @@ export async function runClaude(userPrompt, options = {}, queryFn = query) {
     }
   };
 
-  const currentPromptRunId = "initial";
   const handleSdkMessage = (message) => {
     if (message.type === "system" && message.session_id) {
       sessionId = message.session_id;
       if (sessionId !== emittedSessionId) {
         emittedSessionId = sessionId;
-        recordAuditTimeline(auditLog, { type: "sdk_session", sessionId });
         resolvedOptions.onEvent?.({ event: "session", sessionId });
       }
     }
@@ -370,20 +343,12 @@ export async function runClaude(userPrompt, options = {}, queryFn = query) {
 
     if (message.type === "result") {
       sessionId = message.session_id ?? sessionId;
-      recordAuditTimeline(auditLog, { type: "sdk_result", sessionId });
 
-      let resultText = "";
       if (message.structured_output?.assistantText) {
         assistantText = message.structured_output.assistantText;
-        resultText = assistantText;
       } else if (typeof message.result === "string") {
         assistantText = parseAssistantText(message.result);
-        resultText = assistantText;
       }
-      recordAuditPromptResult(auditLog, currentPromptRunId, {
-        sessionId,
-        resultText,
-      });
     }
   };
   const captureTopologyStageResults = (message) => {
@@ -427,18 +392,16 @@ export async function runClaude(userPrompt, options = {}, queryFn = query) {
     }
 
     emittedText.push(text);
-    recordAuditTimeline(auditLog, { type: "assistant_chunk", text });
     resolvedOptions.onEvent?.({ event: "chunk", text });
   };
-  // Plan 2026-06-09-003 KTD5：trace 仅入 audit，不再发 chunk，也不再 prepend 进
-  // assistantText —— 工具调用改由结构化卡片承载。
+  // U8：审计已删，trace 不再落盘；保留 emitOperationTrace 仅做 key 去重（工具卡片
+  // 由结构化 onToolCall 承载）。
   const emitOperationTrace = (trace) => {
     if (!trace?.text || !trace.key || operationTraceKeys.has(trace.key)) {
       return;
     }
 
     operationTraceKeys.add(trace.key);
-    recordAuditToolTrace(auditLog, trace);
   };
   const collectToolCalls = (message) => {
     for (const entry of extractToolCallEvents(message, toolUseNamesById)) {
@@ -500,13 +463,6 @@ export async function runClaude(userPrompt, options = {}, queryFn = query) {
 
     if (hasRecoverableStageResult(stageResults)) {
       const recoveredText = buildRecoveredStageResultAssistantText(stageResults);
-      const auditPath = await finalizeAgentRunAudit(auditLog, {
-        assistantText: recoveredText,
-        sessionId,
-        stageResults,
-        error,
-        recovered: true,
-      });
       await finalizeEval(recoveredText);
 
       return {
@@ -514,16 +470,9 @@ export async function runClaude(userPrompt, options = {}, queryFn = query) {
         sessionId,
         stageResults,
         toolCalls: [...toolCallsById.values()],
-        ...(auditPath ? { auditPath } : {}),
       };
     }
 
-    await finalizeAgentRunAudit(auditLog, {
-      assistantText,
-      sessionId,
-      stageResults,
-      error,
-    });
     await finalizeEval(assistantText);
     throw error;
   }
@@ -543,22 +492,11 @@ export async function runClaude(userPrompt, options = {}, queryFn = query) {
 
   if (!assistantText.trim()) {
     const error = new Error("Claude returned no assistantText");
-    await finalizeAgentRunAudit(auditLog, {
-      assistantText,
-      sessionId,
-      stageResults: finalStageResults,
-      error,
-    });
     await finalizeEval(assistantText);
     throw error;
   }
 
   const finalAssistantText = assistantText.trim();
-  const auditPath = await finalizeAgentRunAudit(auditLog, {
-    assistantText: finalAssistantText,
-    sessionId,
-    stageResults: finalStageResults,
-  });
   await finalizeEval(finalAssistantText);
 
   return {
@@ -566,7 +504,6 @@ export async function runClaude(userPrompt, options = {}, queryFn = query) {
     sessionId,
     stageResults: finalStageResults,
     toolCalls: [...toolCallsById.values()],
-    ...(auditPath ? { auditPath } : {}),
   };
 }
 
@@ -836,158 +773,6 @@ async function writeStageRunnerInputFile(stageResultPath, stageRunnerInput) {
   return inputPath;
 }
 
-async function createAgentRunAuditLog(input) {
-  if (typeof input.auditDir !== "string" || !input.auditDir.trim()) {
-    return undefined;
-  }
-
-  const createdAt = new Date().toISOString();
-  const appSessionId = safePathSegment(input.appSessionId ?? "no-session");
-  const runId = safePathSegment(input.runId ?? `agent-run-${Date.now()}`);
-  const sessionDir = join(input.auditDir, appSessionId);
-  const auditPath = join(sessionDir, `${timestampForFile(createdAt)}-${runId}.json`);
-  const latestPath = join(sessionDir, "latest.json");
-  await mkdir(sessionDir, { recursive: true });
-
-  return {
-    path: auditPath,
-    latestPath,
-    data: {
-      schemaVersion: "tsn-agent.agent-run-audit.v1",
-      createdAt,
-      completedAt: undefined,
-      status: "running",
-      appSessionId: input.appSessionId ?? null,
-      runId: input.runId ?? null,
-      summary: buildAuditSummary({
-        status: "running",
-        userPrompt: input.userPrompt,
-        stageRunnerInput: input.stageRunnerInput,
-        stageRunnerInputPath: input.stageRunnerInputPath,
-        prompt: input.prompt,
-        conversationContext: input.conversationContext,
-      }),
-      cwd: input.cwd,
-      // skill 指引实际读取根（真机排查「agent 用的指引对不对」直接看此字段）。
-      skillRoot: input.skillRoot ?? null,
-      // 场景 reference 注入结果（requested/resolved/fallback，R6 审计）。
-      scenarioReference: input.scenarioReference ?? null,
-      prompt: redactSecrets(input.prompt),
-      userPrompt: redactSecrets(input.userPrompt),
-      conversationContext:
-        typeof input.conversationContext === "string"
-          ? redactSecrets(input.conversationContext)
-          : null,
-      stageRunnerInput: redactJsonValue(input.stageRunnerInput ?? null),
-      stageRunnerInputPath: input.stageRunnerInputPath ?? null,
-      promptRuns: [
-        {
-          id: "initial",
-          kind: "initial",
-          createdAt,
-          promptSummary: summarizePromptForAudit(input.prompt),
-          prompt: redactSecrets(input.prompt),
-          resultText: "",
-          sessionId: null,
-        },
-      ],
-      stageResultPath: input.stageResultPath,
-      skillOutputDir: input.skillOutputDir,
-      sdkOptions: summarizeSdkOptionsForAudit(input.sdkOptions),
-      timeline: [],
-      toolCalls: [],
-      operationTraceLines: [],
-      result: null,
-    },
-  };
-}
-
-function recordAuditPromptResult(auditLog, promptRunId, result) {
-  if (!auditLog || !promptRunId) {
-    return;
-  }
-
-  const promptRun = auditLog.data.promptRuns.find((candidate) => candidate.id === promptRunId);
-  if (!promptRun) {
-    return;
-  }
-
-  promptRun.completedAt = new Date().toISOString();
-  promptRun.resultText = redactSecrets(result.resultText ?? "");
-  promptRun.sessionId = result.sessionId ?? null;
-}
-
-function recordAuditTimeline(auditLog, event) {
-  if (!auditLog) {
-    return;
-  }
-
-  auditLog.data.timeline.push(
-    redactJsonValue({
-      at: new Date().toISOString(),
-      ...event,
-    }),
-  );
-}
-
-function recordAuditToolTrace(auditLog, trace) {
-  if (!auditLog?.data || !trace?.text) {
-    return;
-  }
-
-  const text = redactSecrets(trace.text);
-  auditLog.data.operationTraceLines.push(text);
-  auditLog.data.toolCalls.push({
-    at: new Date().toISOString(),
-    key: trace.key,
-    kind: classifyToolTrace(text),
-    text,
-  });
-}
-
-async function finalizeAgentRunAudit(auditLog, output) {
-  if (!auditLog) {
-    return undefined;
-  }
-
-  const completedAt = new Date().toISOString();
-  const errorMessage = output.error ? normalizeError(output.error) : undefined;
-  auditLog.data.completedAt = completedAt;
-  auditLog.data.status = errorMessage && !output.recovered ? "error" : "success";
-  auditLog.data.sdkSessionId = output.sessionId ?? null;
-  auditLog.data.result = {
-    assistantText: redactSecrets(output.assistantText ?? ""),
-    stageResults: redactJsonValue(output.stageResults ?? []),
-    recovered: Boolean(output.recovered),
-    error: errorMessage,
-  };
-  auditLog.data.summary = buildAuditSummary({
-    status: auditLog.data.status,
-    userPrompt: auditLog.data.userPrompt,
-    stageRunnerInput: auditLog.data.stageRunnerInput,
-    stageRunnerInputPath: auditLog.data.stageRunnerInputPath,
-    prompt: auditLog.data.prompt,
-    conversationContext: auditLog.data.conversationContext,
-    completedAt,
-    sdkSessionId: auditLog.data.sdkSessionId,
-    stageResults: output.stageResults ?? [],
-    toolCallCount: auditLog.data.toolCalls.length,
-    promptRunCount: auditLog.data.promptRuns.length,
-    recovered: Boolean(output.recovered),
-    error: errorMessage,
-  });
-
-  const serialized = `${JSON.stringify(auditLog.data, null, 2)}\n`;
-
-  try {
-    await writeFile(auditLog.path, serialized, "utf8");
-    await writeFile(auditLog.latestPath, serialized, "utf8");
-    return auditLog.path;
-  } catch {
-    return undefined;
-  }
-}
-
 // Plan 2026-06-25-002 U3/U4：把一条 raw eval 记录 append 到注入的 eval/ 目录（JSONL）。
 // 未注入 evalDir（dev/test）或写盘失败均降级——不阻断本轮 agent（R5）。文件首建设 0600。
 async function writeEvalRecord(input) {
@@ -1075,177 +860,6 @@ function normalizeEvalLabel(result) {
     caliber: caliber ?? "structural_only",
     errors: Array.isArray(verification.errors) ? verification.errors : [],
   };
-}
-
-function summarizeSdkOptionsForAudit(options) {
-  return {
-    cwd: options.cwd,
-    settingSources: options.settingSources,
-    permissionMode: options.permissionMode,
-    tools: options.tools,
-    allowedTools: options.allowedTools,
-    disallowedTools: options.disallowedTools,
-    skills: options.skills,
-    mcpServers: options.mcpServers
-      ? Object.fromEntries(
-          Object.entries(options.mcpServers).map(([name, config]) => [
-            name,
-            {
-              type: config.type,
-              command: basename(config.command ?? ""),
-              argCount: Array.isArray(config.args) ? config.args.length : 0,
-              alwaysLoad: config.alwaysLoad === true,
-            },
-          ]),
-        )
-      : undefined,
-    maxTurns: options.maxTurns,
-    includePartialMessages: options.includePartialMessages,
-    hasResumeSession: typeof options.resume === "string" && options.resume.length > 0,
-    systemPrompt: redactSecrets(options.systemPrompt ?? ""),
-    env: {
-      TSN_AGENT_STAGE_RESULT_PATH: options.env?.TSN_AGENT_STAGE_RESULT_PATH,
-      TSN_AGENT_SKILL_OUTPUT_DIR: options.env?.TSN_AGENT_SKILL_OUTPUT_DIR,
-      TSN_AGENT_STAGE_RUNNER_INPUT_PATH: options.env?.TSN_AGENT_STAGE_RUNNER_INPUT_PATH,
-    },
-  };
-}
-
-function buildAuditSummary(input) {
-  const stage =
-    isRecord(input.stageRunnerInput) && typeof input.stageRunnerInput.stage === "string"
-      ? input.stageRunnerInput.stage
-      : undefined;
-  const stageResultSummaries = Array.isArray(input.stageResults)
-    ? input.stageResults.filter(isRecord).map((result) => ({
-        stage: result.stage,
-        schemaVersion: result.schemaVersion,
-        producer: summarizeProducerForAudit(result.producer),
-        skillName: result.skillName,
-        status: result.status,
-        summary:
-          typeof result.summary === "string" ? truncateForAudit(result.summary, 220) : undefined,
-      }))
-    : [];
-
-  return redactJsonValue({
-    status: input.status,
-    stage,
-    userPromptPreview: truncateForAudit(input.userPrompt, 220),
-    prompt: summarizePromptForAudit(input.prompt),
-    context: summarizeContextForAudit(input.conversationContext),
-    stageRunnerInputPath: input.stageRunnerInputPath ?? null,
-    stageResults: stageResultSummaries,
-    promptRunCount: input.promptRunCount ?? 1,
-    toolCallCount: input.toolCallCount ?? 0,
-    recovered: Boolean(input.recovered),
-    sdkSessionId: input.sdkSessionId ?? null,
-    completedAt: input.completedAt,
-    error: input.error ? truncateForAudit(input.error, 220) : undefined,
-  });
-}
-
-function summarizeProducerForAudit(producer) {
-  if (!isRecord(producer)) {
-    return undefined;
-  }
-
-  return {
-    type: typeof producer.type === "string" ? producer.type : undefined,
-    name: typeof producer.name === "string" ? producer.name : undefined,
-    tool: typeof producer.tool === "string" ? producer.tool : undefined,
-  };
-}
-
-function summarizePromptForAudit(prompt) {
-  const source = typeof prompt === "string" ? prompt : "";
-
-  return {
-    charCount: source.length,
-    lineCount: source ? source.split("\n").length : 0,
-    hasInlineStageRunnerInputJson: source.includes('"userIntent"') || source.includes('"project"'),
-    usesStageRunnerInputPath:
-      source.includes("TSN_AGENT_STAGE_RUNNER_INPUT_PATH") ||
-      source.includes("stage-runner-input.json"),
-    preview: truncateForAudit(source.replace(/\s+/g, " ").trim(), 320),
-  };
-}
-
-function summarizeContextForAudit(context) {
-  if (typeof context !== "string" || !context.trim()) {
-    return {
-      charCount: 0,
-      includesLocalCandidate: false,
-      recentMessageLines: 0,
-    };
-  }
-
-  return {
-    charCount: context.length,
-    includesLocalCandidate: context.includes("本地预解析候选"),
-    recentMessageLines: extractContextSection(context, "最近对话：", "工程状态：")
-      .split("\n")
-      .filter((line) => line.trim()).length,
-    preview: truncateForAudit(context.replace(/\s+/g, " ").trim(), 260),
-  };
-}
-
-function extractContextSection(source, startMarker, endMarker) {
-  const start = source.indexOf(startMarker);
-  if (start === -1) {
-    return "";
-  }
-
-  const contentStart = start + startMarker.length;
-  const end = source.indexOf(endMarker, contentStart);
-  return source.slice(contentStart, end === -1 ? undefined : end).trim();
-}
-
-function truncateForAudit(value, maxLength) {
-  const text = String(value ?? "");
-  return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text;
-}
-
-function redactJsonValue(value) {
-  try {
-    return JSON.parse(redactSecrets(JSON.stringify(value)));
-  } catch {
-    return redactSecrets(String(value ?? ""));
-  }
-}
-
-function safePathSegment(value) {
-  const sanitized = String(value ?? "unknown")
-    .trim()
-    .replace(/[^A-Za-z0-9._-]+/g, "_")
-    .replace(/^_+|_+$/g, "")
-    .slice(0, 120);
-
-  return sanitized || "unknown";
-}
-
-function timestampForFile(value) {
-  return value.replace(/[:.]/g, "-");
-}
-
-function classifyToolTrace(text) {
-  if (text.startsWith("[Skill]")) {
-    return "skill";
-  }
-
-  if (text.startsWith("[文件]")) {
-    return "file";
-  }
-
-  if (text.startsWith("[工具结果]")) {
-    return "tool_result";
-  }
-
-  if (text.startsWith("[阶段结果]")) {
-    return "stage_result";
-  }
-
-  return "tool_use";
 }
 
 async function readStageResults(stageResultPath, onTrace) {
@@ -2017,7 +1631,6 @@ export async function runWorker(rawInput) {
     stageRunnerInput: isRecord(input.stageRunnerInput) ? input.stageRunnerInput : undefined,
     appSessionId: typeof input.appSessionId === "string" ? input.appSessionId : undefined,
     runId: typeof input.runId === "string" ? input.runId : undefined,
-    auditDir: typeof input.auditDir === "string" ? input.auditDir : undefined,
     evalDir: typeof input.evalDir === "string" ? input.evalDir : undefined,
     skillRoot: typeof input.skillRoot === "string" ? input.skillRoot : undefined,
     claudeBinaryPath:

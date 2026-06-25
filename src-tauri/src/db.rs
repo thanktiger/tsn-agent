@@ -492,7 +492,7 @@ pub const SESSION_SCOPED_TABLES: &[(&str, &[&str])] = &[
 
 /// Plan v3 U_R5：lazy migration。旧 v1 db 含 `diagnostic_logs` 表 + 索引；
 /// 升级到 v3 时一次性 `DROP TABLE IF EXISTS`，数据直接丢弃（脱敏摘要，
-/// 不属用户数据，参考 KTD）。新写入 jsonl 由 `log_file_writer` 负责。
+/// 不属用户数据，参考 KTD）。执行日志模块已于 U8（2026-06-25）整体删除。
 pub const DROP_DIAGNOSTIC_LOGS_SQL: &str = r#"
     DROP INDEX IF EXISTS idx_diagnostic_logs_session_created_at;
     DROP INDEX IF EXISTS idx_diagnostic_logs_session_category;

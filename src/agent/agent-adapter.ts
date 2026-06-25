@@ -42,7 +42,6 @@ interface ClaudeAgentResponse {
   sessionId?: string;
   stageResults?: unknown[];
   toolCalls?: unknown[];
-  auditPath?: string;
 }
 
 interface ClaudeAgentEvent {

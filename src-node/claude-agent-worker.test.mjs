@@ -379,71 +379,6 @@ describe("claude-agent-worker", () => {
     expect(prompt.split("<<<SCENARIO_REFERENCE>>>")[1]).toContain("[REF-GENERIC] 通用指引");
   });
 
-  it("records scenarioReference and degradation events in the audit log", async () => {
-    const auditDir = await mkdtemp(join(tmpdir(), "tsn-agent-scenario-audit-"));
-    const { rootDir, referenceDir } = await makeScenarioSkillRoot({
-      scenarios: { "generic-tsn": "[REF-GENERIC] 通用指引" },
-    });
-    const query = async function* () {
-      yield { type: "result", structured_output: { assistantText: "ok" } };
-    };
-
-    // 未知场景 → fallback generic-tsn：审计头字段 + timeline info 事件。
-    const result = await runClaude(
-      "我需要4个交换机",
-      {
-        cwd: "/tmp/project",
-        skillRoot: rootDir,
-        auditDir,
-        appSessionId: "scenario-audit",
-        runId: "run-scenario-audit",
-        stageRunnerInput: { userIntent: "x", stage: "topology", scenarioConfigId: "industrial" },
-      },
-      query,
-    );
-    const audit = JSON.parse(await readFile(result.auditPath, "utf8"));
-    expect(audit.scenarioReference).toMatchObject({
-      requestedScenario: "industrial",
-      resolvedScenario: "generic-tsn",
-      referencePath: join(referenceDir, "generic-tsn.md"),
-      fallback: true,
-    });
-    expect(audit.timeline).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          type: "skill_reference_fallback",
-          requestedScenario: "industrial",
-        }),
-      ]),
-    );
-
-    // reference 全缺 → 仅索引：timeline warn 事件带失败原因。
-    const { rootDir: emptyRoot } = await makeScenarioSkillRoot();
-    const result2 = await runClaude(
-      "我需要4个交换机",
-      {
-        cwd: "/tmp/project",
-        skillRoot: emptyRoot,
-        auditDir,
-        appSessionId: "scenario-audit",
-        runId: "run-scenario-audit-2",
-        stageRunnerInput: {
-          userIntent: "x",
-          stage: "topology",
-          scenarioConfigId: "aerospace-onboard",
-        },
-      },
-      query,
-    );
-    const audit2 = JSON.parse(await readFile(result2.auditPath, "utf8"));
-    expect(audit2.scenarioReference).toMatchObject({ resolvedScenario: null, fallback: false });
-    const unavailable = audit2.timeline.find(
-      (event) => event.type === "skill_reference_unavailable",
-    );
-    expect(unavailable).toBeDefined();
-    expect(unavailable.errors.length).toBeGreaterThan(0);
-  });
-
   it("does not synthesize a topology stage result from assistant-authored topology JSON without an MCP tool call", () => {
     // 机制层 AE3：agent 在 assistantText 里输出整份拓扑 JSON、不调任何 MCP 工具，
     // trusted-signal 提取器只认 MCP tool_result 的 mutationId → 返回空。
@@ -863,7 +798,6 @@ describe("claude-agent-worker", () => {
 
   it("does not run a topology runner repair turn when no trusted topology result is returned", async () => {
     const events = [];
-    const auditDir = await mkdtemp(join(tmpdir(), "tsn-agent-repair-audit-test-"));
     let callCount = 0;
     const query = async function* (input) {
       callCount += 1;
@@ -883,7 +817,6 @@ describe("claude-agent-worker", () => {
           stage: "topology",
           scenarioConfigId: "generic-tsn",
         },
-        auditDir,
         appSessionId: "session-repair",
         runId: "agent-run-repair",
         onEvent: (event) => events.push(event),
@@ -892,19 +825,10 @@ describe("claude-agent-worker", () => {
     );
 
     const streamed = events.map((event) => event.text ?? "").join("");
-    const audit = JSON.parse(await readFile(result.auditPath, "utf8"));
     expect(callCount).toBe(1);
     expect(streamed).not.toContain("tsn-stage-runner --stage topology");
     expect(result.assistantText).toContain("拓扑已生成");
     expect(result.stageResults).toEqual([]);
-    expect(audit.stageRunnerInputPath).toContain("stage-runner-input.json");
-    expect(audit.promptRuns).toEqual([
-      expect.objectContaining({
-        id: "initial",
-        kind: "initial",
-        resultText: "拓扑已生成",
-      }),
-    ]);
   });
 
   it("does not repair invalid topology stage result files through the topology runner", async () => {
@@ -1319,124 +1243,6 @@ describe("claude-agent-worker", () => {
 
     const record = JSON.parse((await readFile(join(evalDir, "eval.jsonl"), "utf8")).trim());
     expect(record.label).toBeNull();
-  });
-
-  it("writes a per-session audit log with prompt, result, and tool traces", async () => {
-    const auditDir = await mkdtemp(join(tmpdir(), "tsn-agent-audit-test-"));
-    const query = async function* (_input) {
-      yield { type: "system", session_id: "sdk-session-audit" };
-      yield {
-        type: "assistant",
-        session_id: "sdk-session-audit",
-        message: {
-          content: [
-            {
-              type: "tool_use",
-              id: "toolu-audit",
-              name: "mcp__tsn_topology__topology_describe_templates",
-              input: {
-                responseMode: "summary",
-              },
-            },
-          ],
-        },
-      };
-      yield {
-        type: "user",
-        session_id: "sdk-session-audit",
-        message: {
-          content: [
-            {
-              type: "tool_result",
-              tool_use_id: "toolu-audit",
-              content: JSON.stringify({
-                ok: true,
-                summary: {
-                  templates: [],
-                },
-                warnings: [],
-                metadata: {
-                  responseMode: "summary",
-                  summaryOnly: true,
-                },
-              }),
-            },
-          ],
-        },
-      };
-      yield { type: "result", session_id: "sdk-session-audit", result: "拓扑已生成" };
-    };
-
-    const result = await runClaude(
-      "我需要4个交换机",
-      {
-        auditDir,
-        appSessionId: "session/audit:1",
-        runId: "agent-run-audit",
-        skillRoot: "/tmp/tsn-agent-audit-skill-root",
-        stageRunnerInput: {
-          userIntent: "我需要4个交换机",
-          stage: "topology",
-          scenarioConfigId: "generic-tsn",
-        },
-      },
-      query,
-    );
-    const auditRaw = await readFile(result.auditPath, "utf8");
-    const audit = JSON.parse(auditRaw);
-    const latestRaw = await readFile(join(auditDir, "session_audit_1", "latest.json"), "utf8");
-
-    expect(result.auditPath).toContain("session_audit_1");
-    expect(audit.schemaVersion).toBe("tsn-agent.agent-run-audit.v1");
-    expect(audit.appSessionId).toBe("session/audit:1");
-    expect(audit.runId).toBe("agent-run-audit");
-    // skill 指引实际读取根进审计（真机排查同源问题的依据）。
-    expect(audit.skillRoot).toBe("/tmp/tsn-agent-audit-skill-root");
-    expect(audit.summary).toMatchObject({
-      status: "success",
-      stage: "topology",
-      userPromptPreview: "我需要4个交换机",
-      stageRunnerInputPath: expect.stringContaining("stage-runner-input.json"),
-      promptRunCount: 1,
-      recovered: false,
-    });
-    expect(audit.summary.prompt).toMatchObject({
-      usesStageRunnerInputPath: true,
-      hasInlineStageRunnerInputJson: false,
-    });
-    expect(audit.summary.context.includesLocalCandidate).toBe(false);
-    expect(audit.prompt).toContain("用户原始需求：");
-    expect(audit.prompt).toContain("我需要4个交换机");
-    expect(audit.promptRuns).toEqual([
-      expect.objectContaining({
-        id: "initial",
-        kind: "initial",
-        promptSummary: expect.objectContaining({
-          usesStageRunnerInputPath: true,
-          hasInlineStageRunnerInputJson: false,
-        }),
-        prompt: expect.stringContaining("我需要4个交换机"),
-        resultText: expect.stringContaining("拓扑已生成"),
-      }),
-    ]);
-    expect(audit.sdkOptions.allowedTools).toEqual([
-      "Skill",
-      "Read",
-      REQUEST_STAGE_CHANGE_TOOL_NAME,
-      ...TOPOLOGY_MCP_ALLOWED_TOOLS,
-      UNDO_TOOL_NAME,
-    ]);
-    expect(audit.sdkOptions.skills).toEqual(["tsn-topology", "tsn-time-sync", "tsn-flow-planning"]);
-    expect(audit.toolCalls.map((call) => call.text).join("\n")).toContain(
-      "[工具] mcp__tsn_topology__topology_describe_templates",
-    );
-    expect(audit.toolCalls.map((call) => call.text).join("\n")).toContain(
-      "[工具结果] mcp__tsn_topology__topology_describe_templates 已返回",
-    );
-    expect(audit.result.assistantText).toContain("拓扑已生成");
-    expect(audit.sdkSessionId).toBe("sdk-session-audit");
-    expect(JSON.parse(latestRaw).runId).toBe("agent-run-audit");
-    expect(JSON.parse(latestRaw).summary.stageRunnerInputPath).toContain("stage-runner-input.json");
   });
 
   it("does not synthesize a topology stage result when the SDK stops at the turn limit", async () => {

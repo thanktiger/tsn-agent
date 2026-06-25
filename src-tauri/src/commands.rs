@@ -135,7 +135,6 @@ pub struct ClaudeAgentResponse {
     stage_results: Vec<serde_json::Value>,
     // Plan 2026-06-09-003：结构化工具调用记录，前端富化成卡片。与 stage_results 同构透传。
     tool_calls: Vec<serde_json::Value>,
-    audit_path: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -147,7 +146,6 @@ struct ClaudeWorkerResponse {
     stage_results: Vec<serde_json::Value>,
     #[serde(default)]
     tool_calls: Vec<serde_json::Value>,
-    audit_path: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -165,7 +163,6 @@ struct ClaudeWorkerEvent {
     // Plan 2026-06-10-001 U2：流式工具事件整体透传，Rust 不拆字段（契约客户端无关）。
     #[serde(default)]
     tool_call: Option<serde_json::Value>,
-    audit_path: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -208,7 +205,6 @@ fn run_claude_agent_blocking(
     let cwd = repo_root_from_worker(&worker_path);
     let run_id = request.run_id.clone().unwrap_or_else(create_run_id);
     let app_session_id = request.app_session_id.clone();
-    let audit_dir = agent_audit_dir(&app).map(strip_verbatim_prefix);
     let eval_dir = eval_store_dir(&app).map(strip_verbatim_prefix);
     // 打包态：随 app 分发的 claude binary 路径（dev 态 None → SDK 默认用 node_modules 平台包）。
     let claude_binary_path = find_claude_binary(Some(&app));
@@ -243,7 +239,7 @@ fn run_claude_agent_blocking(
             "hasResumeSession": request.resume_session_id.is_some(),
             "promptChars": prompt_chars,
             "contextChars": context_chars,
-            "auditDir": audit_dir.as_ref().map(|path| path.display().to_string()),
+            "evalDir": eval_dir.as_ref().map(|path| path.display().to_string()),
             "skillRoot": skill_root.as_ref().map(|path| path.display().to_string()),
         }),
     );
@@ -281,7 +277,6 @@ fn run_claude_agent_blocking(
         "cwd": cwd,
         "runId": run_id,
         "appSessionId": request.app_session_id,
-        "auditDir": audit_dir,
         "evalDir": eval_dir,
         "skillRoot": skill_root,
         "claudeBinaryPath": claude_binary_path,
@@ -482,7 +477,6 @@ fn run_claude_agent_blocking(
             "assistantChars": final_response.assistant_text.chars().count(),
             "stdoutLines": stdout_lines.len(),
             "stderrLines": stderr_lines.len(),
-            "auditPath": final_response.audit_path,
         }),
     );
 
@@ -508,7 +502,6 @@ fn parse_worker_output(stdout: &str) -> Result<ClaudeAgentResponse, String> {
         session_id: parsed.session_id,
         stage_results: parsed.stage_results,
         tool_calls: parsed.tool_calls,
-        audit_path: parsed.audit_path,
     })
 }
 
@@ -646,7 +639,6 @@ fn handle_worker_line(
                 session_id: parsed.session_id,
                 stage_results: parsed.stage_results,
                 tool_calls: parsed.tool_calls,
-                audit_path: parsed.audit_path,
             });
         }
         _ => {}
@@ -655,15 +647,8 @@ fn handle_worker_line(
     Ok(())
 }
 
-fn agent_audit_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
-    app.path()
-        .app_data_dir()
-        .ok()
-        .map(|path| path.join("agent-runs"))
-}
-
-/// Plan 2026-06-25-002 U4：raw eval store 目录。放 app-config 下 `eval/`——与 sessions.db、
-/// logs/ 同源（非 iCloud/Dropbox/TimeMachine 默认同步目录，KTD6），独立于会话生命周期、
+/// Plan 2026-06-25-002 U4：raw eval store 目录。放 app-config 下 `eval/`——与 sessions.db
+/// 同源（非 iCloud/Dropbox/TimeMachine 默认同步目录，KTD6），独立于会话生命周期、
 /// 排除在既有 session 导出之外（见 session_export）。
 pub fn eval_store_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
     app.path()
