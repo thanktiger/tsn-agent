@@ -531,6 +531,23 @@ mod tests {
     }
 
     #[test]
+    fn inet_host_config_uses_camelcase_inet_path() {
+        // 前端 get/set_inet_host_config 读 inetPath（camelCase），非 inet_path。
+        let cfg = InetHostConfig {
+            host: "h".into(),
+            user: "u".into(),
+            inet_path: "/opt/inet".into(),
+        };
+        let v: serde_json::Value = serde_json::to_value(&cfg).unwrap();
+        assert!(v.get("inetPath").is_some(), "inetPath camelCase");
+        assert!(v.get("inet_path").is_none());
+        // 回程：前端发 camelCase → 反序列化回结构。
+        let back: InetHostConfig =
+            serde_json::from_str(r#"{"host":"h2","user":"u2","inetPath":"/i"}"#).unwrap();
+        assert_eq!(back.inet_path, "/i");
+    }
+
+    #[test]
     fn host_user_validation_rejects_injection_chars() {
         assert!(is_valid_host_or_user("100.104.38.106"));
         assert!(is_valid_host_or_user("zhang"));

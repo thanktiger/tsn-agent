@@ -678,6 +678,59 @@ mod tests {
         assert!(resolve_remote_config(&pool).await.is_err());
     }
 
+    // ---------- serde 契约：命令外壳的请求/响应字段名（camelCase）↔ 前端 TS ----------
+
+    #[test]
+    fn run_timesync_sim_request_deserializes_camelcase() {
+        // 前端 invoke("run_timesync_sim", { request: {...} }) 的内层形态。
+        let req: RunTimesyncSimRequest = serde_json::from_str(
+            r#"{"sessionId":"s1","oscillator":"Constant","driftPpm":50,"simTimeS":2.5}"#,
+        )
+        .unwrap();
+        assert_eq!(req.session_id, "s1");
+        assert_eq!(req.oscillator.as_deref(), Some("Constant"));
+        assert_eq!(req.drift_ppm, Some(50.0));
+        assert_eq!(req.sim_time_s, Some(2.5));
+        // 覆盖参数全省略仍合法（走后端默认）。
+        let bare: RunTimesyncSimRequest = serde_json::from_str(r#"{"sessionId":"s2"}"#).unwrap();
+        assert_eq!(bare.session_id, "s2");
+        assert!(bare.oscillator.is_none() && bare.drift_ppm.is_none() && bare.sim_time_s.is_none());
+    }
+
+    #[test]
+    fn sim_result_serializes_camelcase_for_frontend() {
+        let result = SimResult {
+            caliber: "timesync_simulated".into(),
+            status: "converged".into(),
+            per_node: vec![PerNodeOffset {
+                mid: "sw2".into(),
+                max_offset_ns: 1.0,
+                mean_offset_ns: 0.5,
+                converged: true,
+                within_threshold: true,
+            }],
+            overall: "1 个收敛 / 0 个未收敛".into(),
+            message: None,
+        };
+        let v: serde_json::Value = serde_json::to_value(&result).unwrap();
+        // 顶层 + 逐节点字段名必须是前端读的 camelCase。
+        assert!(v.get("caliber").is_some() && v.get("status").is_some());
+        assert!(v.get("perNode").is_some(), "perNode camelCase");
+        assert!(v.get("per_node").is_none(), "不应是 snake_case");
+        let node = &v["perNode"][0];
+        for key in [
+            "mid",
+            "maxOffsetNs",
+            "meanOffsetNs",
+            "converged",
+            "withinThreshold",
+        ] {
+            assert!(node.get(key).is_some(), "缺 perNode.{key}: {node}");
+        }
+        // message=None → skip_serializing_if 省略该键。
+        assert!(v.get("message").is_none(), "None message 应省略");
+    }
+
     #[test]
     fn parse_csv_extracts_timechanged_series() {
         let csv = "run,module,name,vectime,vecvalue\n\

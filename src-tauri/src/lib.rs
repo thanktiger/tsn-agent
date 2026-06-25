@@ -1,3 +1,4 @@
+mod backend_e2e;
 mod commands;
 mod db;
 mod eval_command;
