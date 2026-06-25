@@ -607,28 +607,6 @@ export function WorkspacePane({
             {undoConfirming ? "确认撤销?" : "撤销"}
           </button>
         </div>
-        {showClockTree && hasTopology && (
-          <div className="clock-tree-bar" role="group" aria-label="时钟同步">
-            <span className="clock-tree-title mono">时钟同步树</span>
-            <span className="clock-tree-gm">
-              {clockTreeInfo?.gmLabel ? (
-                <>
-                  主时钟 <strong>{clockTreeInfo.gmLabel}</strong>
-                </>
-              ) : (
-                "未指定时钟主节点（GM）"
-              )}
-            </span>
-            {clockTreeInfo && clockTreeInfo.disabledCount > 0 && (
-              <span className="clock-tree-meta mono">禁用链路 {clockTreeInfo.disabledCount}</span>
-            )}
-            {clockTreeInfo && clockTreeInfo.uncovered.length > 0 && (
-              <span className="clock-tree-warn" role="status">
-                未覆盖：{clockTreeInfo.uncovered.join("、")}
-              </span>
-            )}
-          </div>
-        )}
         {saveFailed && (
           <div className="transfer-notice error tsn-position-notice" role="alert">
             位置保存失败，已恢复
@@ -684,6 +662,28 @@ export function WorkspacePane({
             </div>
           )}
         </div>
+        {showClockTree && hasTopology && (
+          <div className="clock-tree-bar" role="group" aria-label="时钟同步">
+            <span className="clock-tree-title mono">时钟同步树</span>
+            <span className="clock-tree-gm">
+              {clockTreeInfo?.gmLabel ? (
+                <>
+                  主时钟 <strong>{clockTreeInfo.gmLabel}</strong>
+                </>
+              ) : (
+                "未指定时钟主节点（GM）"
+              )}
+            </span>
+            {clockTreeInfo && clockTreeInfo.disabledCount > 0 && (
+              <span className="clock-tree-meta mono">禁用链路 {clockTreeInfo.disabledCount}</span>
+            )}
+            {clockTreeInfo && clockTreeInfo.uncovered.length > 0 && (
+              <span className="clock-tree-warn" role="status">
+                未覆盖：{clockTreeInfo.uncovered.join("、")}
+              </span>
+            )}
+          </div>
+        )}
       </div>
 
       {/* 详情面板默认隐藏，点击节点/链路打开（流功能后续在此承载）。 */}
