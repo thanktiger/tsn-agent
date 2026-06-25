@@ -172,9 +172,6 @@ import type { TimesyncNodeRole, TimesyncSnapshot } from "../../../sessions/times
 /** time-sync 阶段画布注入到 React Flow 节点 data 的时钟树角色（拓扑阶段为 undefined）。 */
 export interface TsnNodeTimesync {
   role: TimesyncNodeRole;
-  masterCount: number;
-  slaveCount: number;
-  isGm: boolean;
 }
 
 /**

@@ -30,7 +30,6 @@ import {
   type TsnNodeKind,
   type TsnNodeTimesync,
   timesyncEdgeDecoration,
-  timesyncRoleBadge,
   topologySnapshotToReactFlow,
 } from "./topology-flow";
 import { TsnFloatingEdge } from "./tsn-floating-edge";
@@ -202,12 +201,7 @@ export function WorkspacePane({
       ...flow,
       nodes: flow.nodes.map((node) => {
         const summary = timesyncRoleForNode(timesyncSnapshot, node.id);
-        const timesync: TsnNodeTimesync = {
-          role: summary.role,
-          masterCount: summary.masterCount,
-          slaveCount: summary.slaveCount,
-          isGm: summary.role === "gm",
-        };
+        const timesync: TsnNodeTimesync = { role: summary.role };
         return { ...node, data: { ...node.data, timesync } };
       }),
       edges: flow.edges.map((edge) => {
@@ -832,19 +826,7 @@ function TsnTopologyNode({ data }: NodeProps) {
       <Handle id="t" type="target" position={Position.Top} />
       <span className="tsn-node-type mono">{NODE_KIND_BADGE[nodeType]}</span>
       <strong>{nodeData.label}</strong>
-      {timesync ? (
-        <small
-          className="mono tsn-node-role"
-          title={`时钟角色 ${timesyncRoleBadge(timesync.role)}`}
-        >
-          {timesyncRoleBadge(timesync.role)}
-          {timesync.role === "synced" || timesync.role === "gm"
-            ? `·M${timesync.masterCount}/S${timesync.slaveCount}`
-            : ""}
-        </small>
-      ) : (
-        <small className="mono">节点 {nodeData.mid}</small>
-      )}
+      <small className="mono">节点 {nodeData.mid}</small>
     </div>
   );
 }

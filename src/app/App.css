@@ -2014,11 +2014,6 @@ textarea:focus-visible {
   background: #fef2f2;
 }
 
-.tsn-node-role {
-  color: var(--text-secondary, #475569) !important;
-  font-weight: 600;
-}
-
 .tsn-node.timesync-gm .tsn-node-type {
   background: #16a34a;
 }
