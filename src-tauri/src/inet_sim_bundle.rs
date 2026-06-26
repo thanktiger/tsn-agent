@@ -341,6 +341,11 @@ fn build_ini(
     // clock + gptp 子模块（否则节点无 clock → 不录 timeChanged → scavetool 导出 0 行 →
     // 取数解析失败）。与 INET gptp showcase 同款（`*.*.hasTimeSynchronization = true`）。
     ini.push_str("*.*.hasTimeSynchronization = true\n");
+    // 真机校正（2026-06-26）：gPTP 的 pdelay 测量要求以太网 PHY 用流式收发器，它才发
+    // receptionStarted/transmissionStarted 时序信号；默认 packet 收发器不发 → 运行时报
+    // “must emit receptionStarted signal”。与 INET gptp showcase 同款。
+    ini.push_str("**.transmitter.typename = \"StreamingTransmitter\"\n");
+    ini.push_str("**.receiver.typename = \"DestreamingReceiver\"\n");
 
     // 振荡器：每节点挂时钟振荡器（漂移驱动偏差）。
     match overrides.oscillator {
@@ -528,6 +533,9 @@ mod tests {
         assert!(ini.contains("simtime-resolution = fs"));
         // 真机校正：必须启用时间同步以实例化各节点 clock（否则不录 timeChanged）。
         assert!(ini.contains("*.*.hasTimeSynchronization = true"));
+        // 真机校正：gPTP pdelay 需流式收发器发 receptionStarted 信号。
+        assert!(ini.contains("**.transmitter.typename = \"StreamingTransmitter\""));
+        assert!(ini.contains("**.receiver.typename = \"DestreamingReceiver\""));
         assert!(ini.contains("seed-set = 0"));
         assert!(ini.contains("RandomDriftOscillator"));
         // 真机校正：RandomDriftOscillator 的 changeInterval 必填（无默认会停下等输入）。

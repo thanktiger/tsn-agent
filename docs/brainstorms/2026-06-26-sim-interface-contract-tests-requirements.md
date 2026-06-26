@@ -62,6 +62,7 @@
 - 在内网、tsn-sim 可达时，`npm run test:sim` 全绿。
 - tsn-sim 出一版改了某响应形状/枚举/版本号 → 本套件 fail，并能指向漂移点（schema 不符 或 版本哨兵）。
 - `task_validate` 的好/坏配置 fixtures 按预期精确断 verdict + issues。
+- schema 首次落地时对真机 5 端点各跑通一次 parse（R8）；反向自测证明 schema 会**拒绝**一个故意漂移的响应（R2 的「牙齿」）。
 - 套件完全独立：不在主 `vitest run` 里、不在 tauri 构建里、`npm run test:sim` 单独可跑。
 - 服务不可达时清晰报错/跳过，不假绿。
 
