@@ -308,7 +308,7 @@ function SimResultArea({
           <tbody>
             {result.perNode.map((node) => (
               <tr key={node.mid}>
-                <td>{node.mid}</td>
+                <td title={node.mid}>{shortNodeName(node.mid)}</td>
                 <td>{node.maxOffsetNs.toFixed(1)} ns</td>
                 <td>{node.meanOffsetNs.toFixed(1)} ns</td>
                 <td>
@@ -354,20 +354,34 @@ function SimResultArea({
   );
 }
 
+// 区分度优先的定性调色板（Okabe–Ito 色盲友好系，去掉过浅的黄）。
 const CHART_COLORS = [
-  "#3b82f6",
-  "#ef4444",
-  "#10b981",
-  "#f59e0b",
-  "#8b5cf6",
-  "#ec4899",
-  "#14b8a6",
-  "#a3a3a3",
+  "#0072B2",
+  "#E69F00",
+  "#009E73",
+  "#D55E00",
+  "#CC79A7",
+  "#56B4E9",
+  "#8C564B",
+  "#5D3FD3",
 ];
+
+/** 收敛阈值（ns），镜像后端 CONVERGENCE_THRESHOLD_NS=1000（1µs）。 */
+const CONVERGENCE_THRESHOLD_NS = 1000;
+
+/** 取模块短名：`TsnAgentTimesyncNetwork.sw1.clock` → `sw1`（去网络前缀与 .clock 后缀）。 */
+function shortNodeName(mid: string): string {
+  const parts = mid.split(".");
+  if (parts.length >= 2 && parts[parts.length - 1] === "clock") {
+    return parts[parts.length - 2];
+  }
+  return parts[parts.length - 1] ?? mid;
+}
 
 /**
  * 从节点偏差随仿真时间的抖动曲线（零依赖 SVG）：x=仿真时间 ms，y=相对 GM 偏差 ns（带符号）。
- * 每从节点一条折线 + 0 基线 + 图例。数据来自后端 perNode[].samples（已降采样封顶）。
+ * 每从节点一条折线 + 0 基线 + ±1µs 收敛阈值带；y 轴按稳态分位裁剪（瞬态尖峰溢出截断），
+ * 否则启动瞬态会把稳态压成贴底窄带。数据来自后端 perNode[].samples（已降采样封顶）。
  */
 function OffsetChart({ perNode }: { perNode: PerNodeOffset[] }) {
   const nodes = perNode.filter((n) => n.samples.length > 0);
@@ -385,29 +399,36 @@ function OffsetChart({ perNode }: { perNode: PerNodeOffset[] }) {
   const ph = H - mt - mb;
 
   let tMax = 0;
-  let yMin = 0;
-  let yMax = 0;
+  let rawAbsMax = 0;
+  const absVals: number[] = [];
   for (const n of nodes) {
     for (const s of n.samples) {
       if (s.tMs > tMax) tMax = s.tMs;
-      if (s.offsetNs < yMin) yMin = s.offsetNs;
-      if (s.offsetNs > yMax) yMax = s.offsetNs;
+      const a = Math.abs(s.offsetNs);
+      absVals.push(a);
+      if (a > rawAbsMax) rawAbsMax = a;
     }
   }
-  // 防 0 区间：上下各留一点边距，避免除零和线贴边。
-  if (yMax === yMin) {
-    yMax += 1;
-    yMin -= 1;
-  }
+  // y 轴裁剪：取 |offset| 的 95 分位（×1.3 余量）与阈值的较大者作对称上界，
+  // 让启动瞬态的大锯齿溢出截断，稳态抖动才看得清。
+  absVals.sort((a, b) => a - b);
+  const p95 = absVals[Math.floor(absVals.length * 0.95)] ?? 0;
+  const yBound = Math.max(CONVERGENCE_THRESHOLD_NS * 1.3, p95 * 1.3, 1);
+  const clipped = rawAbsMax > yBound;
+
   const tSpan = tMax > 0 ? tMax : 1;
-  const ySpan = yMax - yMin;
   const xAt = (t: number) => ml + (t / tSpan) * pw;
-  const yAt = (v: number) => mt + (1 - (v - yMin) / ySpan) * ph;
+  const yAt = (v: number) => mt + (1 - (v + yBound) / (2 * yBound)) * ph;
   const baseline = yAt(0);
+  const bandTop = yAt(CONVERGENCE_THRESHOLD_NS);
+  const bandBottom = yAt(-CONVERGENCE_THRESHOLD_NS);
 
   return (
     <figure className="sim-chart">
-      <figcaption>从节点偏差随仿真时间（相对 GM）</figcaption>
+      <figcaption>
+        从节点偏差随仿真时间（相对 GM）
+        {clipped && <span className="sim-chart-note">（启动瞬态尖峰超出范围已截断）</span>}
+      </figcaption>
       <svg
         viewBox={`0 0 ${W} ${H}`}
         className="sim-chart-svg"
@@ -415,43 +436,63 @@ function OffsetChart({ perNode }: { perNode: PerNodeOffset[] }) {
         aria-label="从节点偏差随仿真时间抖动曲线"
         preserveAspectRatio="xMidYMid meet"
       >
+        <title>从节点偏差随仿真时间抖动曲线</title>
+        <clipPath id="sim-chart-plot">
+          <rect x={ml} y={mt} width={pw} height={ph} />
+        </clipPath>
+        {/* ±1µs 收敛阈值带 */}
+        <rect
+          x={ml}
+          y={bandTop}
+          width={pw}
+          height={bandBottom - bandTop}
+          className="sim-chart-threshold-band"
+        />
         {/* 坐标框 + 0 基线 */}
         <line x1={ml} y1={mt} x2={ml} y2={mt + ph} className="sim-chart-axis" />
         <line x1={ml} y1={mt + ph} x2={ml + pw} y2={mt + ph} className="sim-chart-axis" />
         <line x1={ml} y1={baseline} x2={ml + pw} y2={baseline} className="sim-chart-baseline" />
-        {/* y 轴上下界 + x 轴末点标注 */}
+        {/* y 轴上下界 + 0 + x 轴末点标注 + 阈值标注 */}
         <text x={ml - 6} y={mt + 4} className="sim-chart-tick" textAnchor="end">
-          {yMax.toFixed(1)} ns
+          {yBound.toFixed(0)} ns
+        </text>
+        <text x={ml - 6} y={baseline + 4} className="sim-chart-tick" textAnchor="end">
+          0
         </text>
         <text x={ml - 6} y={mt + ph} className="sim-chart-tick" textAnchor="end">
-          {yMin.toFixed(1)} ns
+          -{yBound.toFixed(0)} ns
+        </text>
+        <text x={ml + pw} y={bandTop - 3} className="sim-chart-tick" textAnchor="end">
+          ±1µs 阈值
         </text>
         <text x={ml + pw} y={mt + ph + 18} className="sim-chart-tick" textAnchor="end">
-          {tMax.toFixed(0)} ms
+          {(tMax / 1000).toFixed(tMax >= 1000 ? 0 : 2)} s
         </text>
         <text x={ml} y={mt + ph + 18} className="sim-chart-tick" textAnchor="start">
           0
         </text>
-        {/* 各从节点折线 */}
-        {nodes.map((n, i) => (
-          <polyline
-            key={n.mid}
-            className="sim-chart-line"
-            fill="none"
-            stroke={CHART_COLORS[i % CHART_COLORS.length]}
-            points={n.samples.map((s) => `${xAt(s.tMs)},${yAt(s.offsetNs)}`).join(" ")}
-          />
-        ))}
+        {/* 各从节点折线（裁剪到绘图区，溢出尖峰被截断） */}
+        <g clipPath="url(#sim-chart-plot)">
+          {nodes.map((n, i) => (
+            <polyline
+              key={n.mid}
+              className="sim-chart-line"
+              fill="none"
+              stroke={CHART_COLORS[i % CHART_COLORS.length]}
+              points={n.samples.map((s) => `${xAt(s.tMs)},${yAt(s.offsetNs)}`).join(" ")}
+            />
+          ))}
+        </g>
       </svg>
       <ul className="sim-chart-legend">
         {nodes.map((n, i) => (
-          <li key={n.mid}>
+          <li key={n.mid} title={n.mid}>
             <span
               className="sim-chart-swatch"
               style={{ background: CHART_COLORS[i % CHART_COLORS.length] }}
               aria-hidden="true"
             />
-            {n.mid}
+            {shortNodeName(n.mid)}
           </li>
         ))}
       </ul>

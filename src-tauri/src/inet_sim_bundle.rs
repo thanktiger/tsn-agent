@@ -25,7 +25,7 @@ const MAX_DATARATE_MBPS: f64 = 100_000.0;
 
 /// R3(a) 固定默认（不暴露）：取自 INET clockdrift showcase。
 const DEFAULT_DRIFT_PPM: f64 = 100.0;
-const DEFAULT_SIM_TIME_S: f64 = 1.0;
+const DEFAULT_SIM_TIME_S: f64 = 60.0;
 const NOMINAL_TICK_LENGTH: &str = "10ns";
 /// RandomDriftOscillator 必填项：漂移率更新间隔（取自 INET gptp showcase）。
 const RANDOM_CHANGE_INTERVAL: &str = "12.5ms";

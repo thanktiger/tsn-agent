@@ -11,7 +11,7 @@ function convergedResult(): SimResult {
     overall: "2 个从节点全部收敛",
     perNode: [
       {
-        mid: "1",
+        mid: "TsnAgentTimesyncNetwork.sw1.clock",
         maxOffsetNs: 12.3,
         meanOffsetNs: 5.1,
         converged: true,
@@ -23,7 +23,7 @@ function convergedResult(): SimResult {
         ],
       },
       {
-        mid: "2",
+        mid: "TsnAgentTimesyncNetwork.es2.clock",
         maxOffsetNs: 30.7,
         meanOffsetNs: 9.9,
         converged: true,
@@ -144,15 +144,19 @@ describe("TimeSyncPanel 运行/结果（U11）", () => {
     expect(within(table).getByText("12.3 ns")).toBeInTheDocument();
   });
 
-  it("收敛结果在表下渲染抖动曲线（每从节点一条线 + 图例）", () => {
+  it("收敛结果在表下渲染抖动曲线（每从节点一条线 + 阈值带 + 短名图例）", () => {
     render(
       <TimeSyncPanel {...baseProps({ simState: { status: "done", result: convergedResult() } })} />,
     );
     const chart = screen.getByRole("img", { name: "从节点偏差随仿真时间抖动曲线" });
     expect(chart).toBeInTheDocument();
     expect(chart.querySelectorAll("polyline.sim-chart-line")).toHaveLength(2);
-    // 图例含两个从节点。
-    expect(screen.getByText("从节点偏差随仿真时间（相对 GM）")).toBeInTheDocument();
+    // ±1µs 收敛阈值带。
+    expect(chart.querySelector("rect.sim-chart-threshold-band")).not.toBeNull();
+    // 图例与表格用短名（sw1/es2，各出现在表格+图例），完整模块路径只放 title 不进文本。
+    expect(screen.getAllByText("sw1").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText("es2").length).toBeGreaterThanOrEqual(1);
+    expect(screen.queryByText("TsnAgentTimesyncNetwork.sw1.clock")).not.toBeInTheDocument();
   });
 
   it("空结果不渲染全绿（显示 message、无表格）", () => {

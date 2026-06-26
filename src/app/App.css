@@ -2232,6 +2232,19 @@ textarea:focus-visible {
   stroke-dasharray: 4 3;
 }
 
+.sim-chart-threshold-band {
+  fill: rgba(16, 185, 129, 0.08);
+  stroke: rgba(16, 185, 129, 0.35);
+  stroke-width: 1;
+  stroke-dasharray: 4 3;
+}
+
+.sim-chart-note {
+  margin-left: 6px;
+  color: #b45309;
+  font-size: 11px;
+}
+
 .sim-chart-tick {
   fill: #64748b;
   font-size: 11px;
