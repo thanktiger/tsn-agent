@@ -22,7 +22,10 @@ import {
   type TopologyRowSnapshot,
 } from "../../../sessions/topology-snapshot";
 import { DetailRow, Stat } from "../shared";
-import { TimeSyncPanel } from "./time-sync-panel";
+import { TimeSyncPanel, type TimesyncSubTab } from "./time-sync-panel";
+
+export type { TimesyncSubTab };
+
 import type { SimUiState } from "./timesync-sim";
 import {
   classifyTimesyncEdge,
@@ -53,7 +56,7 @@ export type ConfigTabId = "node-props" | "time-sync";
 
 const CONFIG_TABS: Array<{ id: ConfigTabId; label: string }> = [
   { id: "node-props", label: "节点属性" },
-  { id: "time-sync", label: "时钟同步" },
+  { id: "time-sync", label: "时间同步" },
 ];
 
 const nodeTypes = {
@@ -161,6 +164,9 @@ export interface WorkspacePaneProps {
   /** U11：App 级软仿运行态。 */
   simState: SimUiState;
   onSimStateChange: (state: SimUiState) => void;
+  /** 时间同步子 tab 选择（App 级，随会话重置；reveal 可强制落 soft-sim）。 */
+  activeTimesyncSubTab: TimesyncSubTab;
+  onSelectTimesyncSubTab: (tab: TimesyncSubTab) => void;
   /** U10：底部 handle 条切换弹出框显隐。 */
   onToggleConfigPanel: () => void;
   onSelectConfigTab: (tab: ConfigTabId) => void;
@@ -186,6 +192,8 @@ export function WorkspacePane({
   sessionId,
   simState,
   onSimStateChange,
+  activeTimesyncSubTab,
+  onSelectTimesyncSubTab,
   onToggleConfigPanel,
   onSelectConfigTab,
   onNodeSelect,
@@ -750,6 +758,8 @@ export function WorkspacePane({
                 sessionId={sessionId}
                 simState={simState}
                 onSimStateChange={onSimStateChange}
+                activeSubTab={activeTimesyncSubTab}
+                onSelectSubTab={onSelectTimesyncSubTab}
               />
             )}
           </div>

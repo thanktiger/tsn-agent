@@ -18,7 +18,12 @@ import { isEmptyTopologySnapshot } from "../sessions/topology-snapshot";
 import { ConfirmDialog } from "../ui/confirm-dialog";
 import { redactProviderNamesForDisplay } from "../ui/display-redaction";
 import { ChatPane } from "./components/chat-pane";
-import { type ConfigTabId, type SimUiState, WorkspacePane } from "./components/workspace-pane";
+import {
+  type ConfigTabId,
+  type SimUiState,
+  type TimesyncSubTab,
+  WorkspacePane,
+} from "./components/workspace-pane";
 import { type WorkspaceToolPanel, WorkspaceTools } from "./components/workspace-tools";
 import { useAgentRunController } from "./hooks/use-agent-run-controller";
 import { useSessionRepository } from "./hooks/use-session-repository";
@@ -64,6 +69,8 @@ export function App() {
   // U10：弹出框显隐由独立 expand 驱动（与选中解耦）；面板可在无选中节点时打开。
   const [configPanelExpanded, setConfigPanelExpanded] = useState(false);
   const [activeConfigTab, setActiveConfigTab] = useState<ConfigTabId>("node-props");
+  // 时间同步子 tab（软件仿真/硬件部署，平级）。App 级以便 reveal 强制落 soft-sim；随会话重置。
+  const [activeTimesyncSubTab, setActiveTimesyncSubTab] = useState<TimesyncSubTab>("soft-sim");
   const [selectedNodeId, setSelectedNodeId] = useState<string | undefined>();
   // U11：软仿运行态持于 App 级（非 tab 组件内）——切 tab 不取消命令、切回按 simStatus 恢复。
   const [simState, setSimState] = useState<SimUiState>({ status: "idle" });
@@ -86,6 +93,7 @@ export function App() {
   useEffect(() => {
     setConfigPanelExpanded(false);
     setActiveConfigTab("node-props");
+    setActiveTimesyncSubTab("soft-sim");
     setSelectedNodeId(undefined);
     setSimState({ status: "idle" });
   }, [currentSession.id]);
@@ -469,6 +477,8 @@ export function App() {
           sessionId={currentSession.id}
           simState={simState}
           onSimStateChange={setSimState}
+          activeTimesyncSubTab={activeTimesyncSubTab}
+          onSelectTimesyncSubTab={setActiveTimesyncSubTab}
           onToggleConfigPanel={() => setConfigPanelExpanded((value) => !value)}
           onSelectConfigTab={setActiveConfigTab}
           onNodeSelect={handleNodeSelect}

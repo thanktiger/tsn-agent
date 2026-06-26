@@ -197,6 +197,8 @@ function baseProps(overrides: Partial<WorkspacePaneProps> = {}): WorkspacePanePr
     sessionId: "s1",
     simState: { status: "idle" },
     onSimStateChange: vi.fn(),
+    activeTimesyncSubTab: "soft-sim",
+    onSelectTimesyncSubTab: vi.fn(),
     onToggleConfigPanel: vi.fn(),
     onSelectConfigTab: vi.fn(),
     onNodeSelect: vi.fn(),
@@ -254,7 +256,7 @@ describe("WorkspacePane", () => {
         })}
       />,
     );
-    await user.click(screen.getByRole("tab", { name: "时钟同步" }));
+    await user.click(screen.getByRole("tab", { name: "时间同步" }));
     expect(onSelectConfigTab).toHaveBeenCalledWith("time-sync");
   });
 });

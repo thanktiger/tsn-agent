@@ -12,11 +12,15 @@ import {
 } from "./timesync-sim";
 
 /**
- * U11/U12/U13：时钟同步 tab 内容——软/硬仿按钮 + 门控 + 运行态 + 结果表 + 覆盖表单 + 解释。
+ * 时间同步 tab 内容——两个平级子 tab：软件仿真（软仿按钮 + 门控 + 运行态 + 结果表/曲线 + 覆盖表单 + 解释）
+ * 与硬件部署（本期占位空态）。子 tab 选择由 App 级 state 驱动（reveal 可强制落 soft-sim、随会话重置）。
  *
- * 运行态（simState）持于 App 级、经 props 透传：切 tab 不取消命令、切回按 status 恢复。
- * 覆盖表单展开/填值是组件内独立 intent（doc-review 决定：跨软仿运行保留、仅会话切换重置）。
+ * 运行态（simState）持于 App 级、经 props 透传：切 tab/子 tab 不取消命令、切回按 status 恢复。
+ * 覆盖表单展开/填值是组件内独立 intent（跨软仿运行保留、仅会话切换重置——靠 key={sessionId} 重挂）。
  */
+
+/** 时间同步面板内的平级子 tab（boss 定平级，无 gating）。单一定义，index.tsx 复用。 */
+export type TimesyncSubTab = "soft-sim" | "hard-deploy";
 
 export interface TimeSyncPanelProps {
   /** 当前阶段是否 time-sync。 */
@@ -26,13 +30,19 @@ export interface TimeSyncPanelProps {
   sessionId: string;
   simState: SimUiState;
   onSimStateChange: (state: SimUiState) => void;
+  /** 平级子 tab：软件仿真 / 硬件部署。 */
+  activeSubTab: TimesyncSubTab;
+  onSelectSubTab: (tab: TimesyncSubTab) => void;
   /** 软仿写通道（测试注入替身）。 */
   runTimesyncSim?: (sessionId: string, overrides: SimOverrideForm) => Promise<SimResult>;
   /** 解释通道（测试注入替身）。 */
   explainSim?: (prompt: string) => Promise<string>;
 }
 
-const HARD_SIM_PLACEHOLDER = "待接入真实硬件";
+const TIMESYNC_SUBTABS: Array<{ id: TimesyncSubTab; label: string }> = [
+  { id: "soft-sim", label: "软件仿真" },
+  { id: "hard-deploy", label: "硬件部署" },
+];
 
 export function TimeSyncPanel({
   inTimeSyncStage,
@@ -40,13 +50,14 @@ export function TimeSyncPanel({
   sessionId,
   simState,
   onSimStateChange,
+  activeSubTab,
+  onSelectSubTab,
   runTimesyncSim = invokeRunTimesyncSim,
   explainSim = invokeSimExplain,
 }: TimeSyncPanelProps) {
   // U12：覆盖表单状态（默认收起，跨软仿运行保留）。
   const [formExpanded, setFormExpanded] = useState(false);
   const [form, setForm] = useState<SimOverrideForm>({});
-  const [hardSimNotice, setHardSimNotice] = useState(false);
   // U13：解释态。
   const [explainState, setExplainState] = useState<
     { status: "idle" } | { status: "running" } | { status: "done"; text: string }
@@ -76,7 +87,6 @@ export function TimeSyncPanel({
     softSimInflight.current = true;
     // 运行前定格当前会话：await 期间用户切走时，迟到结果不得落进新会话的状态。
     const runSessionId = sessionId;
-    setHardSimNotice(false);
     setExplainState({ status: "idle" });
     setExplainFailed(false);
     onSimStateChange({ status: "running" });
@@ -129,49 +139,95 @@ export function TimeSyncPanel({
       className="detail-panel time-sync-panel"
       id="config-panel-time-sync"
       role="tabpanel"
-      aria-label="时钟同步"
+      aria-label="时间同步"
     >
-      <div className="panel-heading">
-        <div>
-          <h2>时钟同步软仿</h2>
-          <p>把当前拓扑 + 时钟树组装成 INET gPTP 软仿，远端跑完取回各节点相对 GM 的收敛偏差。</p>
-        </div>
+      <div className="sim-subtabs" role="tablist" aria-label="时间同步阶段">
+        {TIMESYNC_SUBTABS.map((tab) => (
+          <button
+            key={tab.id}
+            type="button"
+            role="tab"
+            id={`timesync-subtab-${tab.id}`}
+            aria-selected={activeSubTab === tab.id}
+            aria-controls={`timesync-subpanel-${tab.id}`}
+            className={activeSubTab === tab.id ? "sim-subtab active" : "sim-subtab"}
+            onClick={() => onSelectSubTab(tab.id)}
+          >
+            {tab.label}
+          </button>
+        ))}
       </div>
 
-      <div className="sim-actions" role="group" aria-label="仿真操作">
-        <button
-          type="button"
-          className="btn primary"
-          disabled={softSimDisabled}
-          title={softSimTooltip}
-          onClick={() => void handleSoftSim()}
+      {activeSubTab === "soft-sim" && (
+        <div
+          className="sim-subpanel"
+          role="tabpanel"
+          id="timesync-subpanel-soft-sim"
+          aria-labelledby="timesync-subtab-soft-sim"
         >
-          {running ? "软仿运行中…" : "软仿"}
-        </button>
-        <button type="button" className="btn" onClick={() => setHardSimNotice(true)}>
-          硬仿
-        </button>
-      </div>
-      {hardSimNotice && (
-        <p className="sim-hint mono" role="status">
-          {HARD_SIM_PLACEHOLDER}
-        </p>
+          <div className="panel-heading">
+            <div>
+              <h2>软件仿真</h2>
+              <p>
+                把当前拓扑 + 时钟树组装成 INET gPTP 软仿，远端跑完取回各节点相对 GM 的收敛偏差。
+              </p>
+            </div>
+          </div>
+
+          <div className="sim-actions" role="group" aria-label="仿真操作">
+            <button
+              type="button"
+              className="btn primary"
+              disabled={softSimDisabled}
+              title={softSimTooltip}
+              onClick={() => void handleSoftSim()}
+            >
+              {running ? "软仿运行中…" : "软仿"}
+            </button>
+          </div>
+
+          <SimOverrideRegion
+            expanded={formExpanded}
+            form={form}
+            onToggle={() => setFormExpanded((value) => !value)}
+            onChange={setForm}
+          />
+
+          <SimResultArea
+            simState={simState}
+            explainState={explainState}
+            explainFailed={explainFailed}
+            onExplain={handleExplain}
+          />
+        </div>
       )}
 
-      <SimOverrideRegion
-        expanded={formExpanded}
-        form={form}
-        onToggle={() => setFormExpanded((value) => !value)}
-        onChange={setForm}
-      />
-
-      <SimResultArea
-        simState={simState}
-        explainState={explainState}
-        explainFailed={explainFailed}
-        onExplain={handleExplain}
-      />
+      {activeSubTab === "hard-deploy" && (
+        <div
+          className="sim-subpanel"
+          role="tabpanel"
+          id="timesync-subpanel-hard-deploy"
+          aria-labelledby="timesync-subtab-hard-deploy"
+        >
+          <HardDeployEmptyState onGoSoftSim={() => onSelectSubTab("soft-sim")} />
+        </div>
+      )}
     </section>
+  );
+}
+
+/** U3：硬件部署子 tab 占位空态——本期不可用，引导去软件仿真。视觉权重弱化（非主功能）。 */
+function HardDeployEmptyState({ onGoSoftSim }: { onGoSoftSim: () => void }) {
+  return (
+    <div className="hard-deploy-empty">
+      <h2>硬件部署</h2>
+      <p className="hard-deploy-empty__note">
+        把验证过的时钟同步配置下发到真实硬件。该能力本期尚未接入，先用软件仿真验证收敛。
+      </p>
+      <button type="button" className="btn" onClick={onGoSoftSim}>
+        先用软件仿真验证
+      </button>
+    </div>
   );
 }
 
