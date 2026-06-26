@@ -552,9 +552,7 @@ describe("runTsnAgent", () => {
     });
 
     // 回退确认不调结构过关闸。
-    const verifyCalls = invokeMock.mock.calls.filter(
-      ([command]) => command === "verify_topology",
-    );
+    const verifyCalls = invokeMock.mock.calls.filter(([command]) => command === "verify_topology");
     expect(verifyCalls).toHaveLength(0);
   });
 
