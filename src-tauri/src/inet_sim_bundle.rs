@@ -391,6 +391,20 @@ fn build_ini(
             .filter_map(|p| eth_name(port_eth, &t.mid, *p))
             .map(|e| format!("\"{e}\""))
             .collect();
+        // gptpNodeType 显式按时钟树角色（INET 不允许 BRIDGE_NODE 缺 master 口）。双平面冗余里
+        // 冗余平面的交换机会成生成树叶子（只有 slave 口、无 master 口）→ 归 SLAVE_NODE，
+        // 它仍同步自身 clock 并录 timeChanged，只是不向下转发。
+        let gptp_node_type = if m.ned_name == gm_ned {
+            "MASTER_NODE"
+        } else if master_eths.is_empty() {
+            "SLAVE_NODE"
+        } else {
+            "BRIDGE_NODE"
+        };
+        ini.push_str(&format!(
+            "*.{}.gptp.gptpNodeType = \"{gptp_node_type}\"\n",
+            m.ned_name
+        ));
         ini.push_str(&format!(
             "*.{}.gptp.masterPorts = [{}]\n",
             m.ned_name,
@@ -526,6 +540,19 @@ mod tests {
         // sw0 master 端口 2 → eth0；slave 端口 5 → eth1。
         assert!(ini.contains("*.sw1.gptp.masterPorts = [\"eth0\"]"), "{ini}");
         assert!(ini.contains("*.sw1.gptp.slavePort = \"eth1\""), "{ini}");
+        // gptpNodeType 按角色：GM=MASTER、有 master+slave=BRIDGE、只有 slave=SLAVE。
+        assert!(
+            ini.contains("*.es1.gptp.gptpNodeType = \"MASTER_NODE\""),
+            "{ini}"
+        );
+        assert!(
+            ini.contains("*.sw1.gptp.gptpNodeType = \"BRIDGE_NODE\""),
+            "{ini}"
+        );
+        assert!(
+            ini.contains("*.es2.gptp.gptpNodeType = \"SLAVE_NODE\""),
+            "{ini}"
+        );
     }
 
     #[test]
