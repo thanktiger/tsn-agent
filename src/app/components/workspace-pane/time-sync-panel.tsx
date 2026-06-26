@@ -1,22 +1,29 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   buildSimExplainPrompt,
+  FALLBACK_SIM_DEFAULTS,
   hasNonConvergedNode,
+  invokeGetSimDefaults,
   invokeRunTimesyncSim,
   invokeSimExplain,
   isFullyConverged,
   type PerNodeOffset,
+  type SimDefaults,
   type SimOverrideForm,
   type SimResult,
   type SimUiState,
 } from "./timesync-sim";
 
 /**
- * U11/U12/U13：时钟同步 tab 内容——软/硬仿按钮 + 门控 + 运行态 + 结果表 + 覆盖表单 + 解释。
+ * 时间同步 tab 内容——两个平级子 tab：软件仿真（软仿按钮 + 门控 + 运行态 + 结果表/曲线 + 覆盖表单 + 解释）
+ * 与硬件部署（本期占位空态）。子 tab 选择由 App 级 state 驱动（reveal 可强制落 soft-sim、随会话重置）。
  *
- * 运行态（simState）持于 App 级、经 props 透传：切 tab 不取消命令、切回按 status 恢复。
- * 覆盖表单展开/填值是组件内独立 intent（doc-review 决定：跨软仿运行保留、仅会话切换重置）。
+ * 运行态（simState）持于 App 级、经 props 透传：切 tab/子 tab 不取消命令、切回按 status 恢复。
+ * 覆盖表单展开/填值是组件内独立 intent（跨软仿运行保留、仅会话切换重置——靠 key={sessionId} 重挂）。
  */
+
+/** 时间同步面板内的平级子 tab（boss 定平级，无 gating）。单一定义，index.tsx 复用。 */
+export type TimesyncSubTab = "soft-sim" | "hard-deploy";
 
 export interface TimeSyncPanelProps {
   /** 当前阶段是否 time-sync。 */
@@ -26,13 +33,21 @@ export interface TimeSyncPanelProps {
   sessionId: string;
   simState: SimUiState;
   onSimStateChange: (state: SimUiState) => void;
+  /** 平级子 tab：软件仿真 / 硬件部署。 */
+  activeSubTab: TimesyncSubTab;
+  onSelectSubTab: (tab: TimesyncSubTab) => void;
   /** 软仿写通道（测试注入替身）。 */
   runTimesyncSim?: (sessionId: string, overrides: SimOverrideForm) => Promise<SimResult>;
   /** 解释通道（测试注入替身）。 */
   explainSim?: (prompt: string) => Promise<string>;
+  /** U6：默认值读通道（测试注入替身）。 */
+  getSimDefaults?: () => Promise<SimDefaults>;
 }
 
-const HARD_SIM_PLACEHOLDER = "待接入真实硬件";
+const TIMESYNC_SUBTABS: Array<{ id: TimesyncSubTab; label: string }> = [
+  { id: "soft-sim", label: "软件仿真" },
+  { id: "hard-deploy", label: "硬件部署" },
+];
 
 export function TimeSyncPanel({
   inTimeSyncStage,
@@ -40,13 +55,31 @@ export function TimeSyncPanel({
   sessionId,
   simState,
   onSimStateChange,
+  activeSubTab,
+  onSelectSubTab,
   runTimesyncSim = invokeRunTimesyncSim,
   explainSim = invokeSimExplain,
+  getSimDefaults = invokeGetSimDefaults,
 }: TimeSyncPanelProps) {
-  // U12：覆盖表单状态（默认收起，跨软仿运行保留）。
+  // U12：覆盖表单状态（默认收起，跨软仿运行保留）。form 只存「用户覆盖」（在哪个键=已覆盖）；
+  // 显示/预填用 form.x ?? defaults.x，提交也只发 form（不填走后端默认，保持原语义）。
   const [formExpanded, setFormExpanded] = useState(false);
   const [form, setForm] = useState<SimOverrideForm>({});
-  const [hardSimNotice, setHardSimNotice] = useState(false);
+  // U6：软仿覆盖参数默认值（后端单一事实源）。undefined=加载中；取数失败回退兜底常量。
+  const [defaults, setDefaults] = useState<SimDefaults | undefined>();
+  useEffect(() => {
+    let alive = true;
+    getSimDefaults()
+      .then((d) => {
+        if (alive) setDefaults(d);
+      })
+      .catch(() => {
+        if (alive) setDefaults(FALLBACK_SIM_DEFAULTS);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [getSimDefaults]);
   // U13：解释态。
   const [explainState, setExplainState] = useState<
     { status: "idle" } | { status: "running" } | { status: "done"; text: string }
@@ -76,7 +109,6 @@ export function TimeSyncPanel({
     softSimInflight.current = true;
     // 运行前定格当前会话：await 期间用户切走时，迟到结果不得落进新会话的状态。
     const runSessionId = sessionId;
-    setHardSimNotice(false);
     setExplainState({ status: "idle" });
     setExplainFailed(false);
     onSimStateChange({ status: "running" });
@@ -129,64 +161,129 @@ export function TimeSyncPanel({
       className="detail-panel time-sync-panel"
       id="config-panel-time-sync"
       role="tabpanel"
-      aria-label="时钟同步"
+      aria-label="时间同步"
     >
-      <div className="panel-heading">
-        <div>
-          <h2>时钟同步软仿</h2>
-          <p>把当前拓扑 + 时钟树组装成 INET gPTP 软仿，远端跑完取回各节点相对 GM 的收敛偏差。</p>
-        </div>
+      <div className="sim-subtabs" role="tablist" aria-label="时间同步阶段">
+        {TIMESYNC_SUBTABS.map((tab) => (
+          <button
+            key={tab.id}
+            type="button"
+            role="tab"
+            id={`timesync-subtab-${tab.id}`}
+            aria-selected={activeSubTab === tab.id}
+            aria-controls={`timesync-subpanel-${tab.id}`}
+            className={activeSubTab === tab.id ? "sim-subtab active" : "sim-subtab"}
+            onClick={() => onSelectSubTab(tab.id)}
+          >
+            {tab.label}
+          </button>
+        ))}
       </div>
 
-      <div className="sim-actions" role="group" aria-label="仿真操作">
-        <button
-          type="button"
-          className="btn primary"
-          disabled={softSimDisabled}
-          title={softSimTooltip}
-          onClick={() => void handleSoftSim()}
+      {activeSubTab === "soft-sim" && (
+        <div
+          className="sim-subpanel"
+          role="tabpanel"
+          id="timesync-subpanel-soft-sim"
+          aria-labelledby="timesync-subtab-soft-sim"
         >
-          {running ? "软仿运行中…" : "软仿"}
-        </button>
-        <button type="button" className="btn" onClick={() => setHardSimNotice(true)}>
-          硬仿
-        </button>
-      </div>
-      {hardSimNotice && (
-        <p className="sim-hint mono" role="status">
-          {HARD_SIM_PLACEHOLDER}
-        </p>
+          <div className="panel-heading">
+            <div>
+              <h2>软件仿真</h2>
+              <p>
+                把当前拓扑 + 时钟树组装成 INET gPTP 软仿，远端跑完取回各节点相对 GM 的收敛偏差。
+              </p>
+            </div>
+          </div>
+
+          <div className="sim-actions" role="group" aria-label="仿真操作">
+            <button
+              type="button"
+              className="btn primary"
+              disabled={softSimDisabled}
+              title={softSimTooltip}
+              onClick={() => void handleSoftSim()}
+            >
+              {running ? "软仿运行中…" : "软仿"}
+            </button>
+          </div>
+
+          <SimOverrideRegion
+            expanded={formExpanded}
+            form={form}
+            defaults={defaults}
+            onToggle={() => setFormExpanded((value) => !value)}
+            onChange={setForm}
+          />
+
+          <SimResultArea
+            simState={simState}
+            explainState={explainState}
+            explainFailed={explainFailed}
+            onExplain={handleExplain}
+          />
+        </div>
       )}
 
-      <SimOverrideRegion
-        expanded={formExpanded}
-        form={form}
-        onToggle={() => setFormExpanded((value) => !value)}
-        onChange={setForm}
-      />
-
-      <SimResultArea
-        simState={simState}
-        explainState={explainState}
-        explainFailed={explainFailed}
-        onExplain={handleExplain}
-      />
+      {activeSubTab === "hard-deploy" && (
+        <div
+          className="sim-subpanel"
+          role="tabpanel"
+          id="timesync-subpanel-hard-deploy"
+          aria-labelledby="timesync-subtab-hard-deploy"
+        >
+          <HardDeployEmptyState onGoSoftSim={() => onSelectSubTab("soft-sim")} />
+        </div>
+      )}
     </section>
   );
 }
 
-/** U12：软仿覆盖表单（3 参数，默认收起）。 */
+/** U3：硬件部署子 tab 占位空态——本期不可用，引导去软件仿真。视觉权重弱化（非主功能）。 */
+function HardDeployEmptyState({ onGoSoftSim }: { onGoSoftSim: () => void }) {
+  return (
+    <div className="hard-deploy-empty">
+      <h2>硬件部署</h2>
+      <p className="hard-deploy-empty__note">
+        把验证过的时钟同步配置下发到真实硬件。该能力本期尚未接入，先用软件仿真验证收敛。
+      </p>
+      <button type="button" className="btn" onClick={onGoSoftSim}>
+        先用软件仿真验证
+      </button>
+    </div>
+  );
+}
+
+/**
+ * U12/U6：软仿覆盖表单（3 参数，默认收起）。折叠 header 显示生效默认摘要（值来自后端单一事实源），
+ * 展开后字段预填实值；form 只存「用户覆盖」的键——「已覆盖」按键是否存在判定（非值比较），
+ * 提交也只发 form（不填走后端默认，保持原语义）。defaults 未到（加载中）暂用兜底常量显示。
+ */
 function SimOverrideRegion({
   expanded,
   form,
+  defaults,
   onToggle,
   onChange,
 }: {
   expanded: boolean;
   form: SimOverrideForm;
+  defaults: SimDefaults | undefined;
   onToggle: () => void;
   onChange: (form: SimOverrideForm) => void;
 }) {
+  const eff = defaults ?? FALLBACK_SIM_DEFAULTS;
+  const oscOverridden = form.oscillator !== undefined;
+  const driftOverridden = form.driftPpm !== undefined;
+  const simOverridden = form.simTimeS !== undefined;
+  const anyOverridden = oscOverridden || driftOverridden || simOverridden;
+  const tag = (overridden: boolean) => (overridden ? "（已覆盖）" : "");
+  const summary =
+    `振荡器 ${form.oscillator ?? eff.oscillator}${tag(oscOverridden)}` +
+    ` · 漂移 ${form.driftPpm ?? eff.driftPpm}ppm${tag(driftOverridden)}` +
+    ` · 时长 ${form.simTimeS ?? eff.simTimeS}s${tag(simOverridden)}` +
+    `${anyOverridden ? "" : " · 默认"}`;
+
   return (
     <div className="sim-override">
       <button
@@ -195,25 +292,18 @@ function SimOverrideRegion({
         aria-expanded={expanded}
         onClick={onToggle}
       >
-        {expanded ? "▾" : "▸"} 覆盖参数（不填走默认）
+        {expanded ? "▾" : "▸"} 覆盖参数 · <span className="sim-override-summary">{summary}</span>
       </button>
       {expanded && (
         <div className="sim-override-fields" role="group" aria-label="软仿覆盖参数">
           <label className="sim-field">
             <span>振荡器类型</span>
             <select
-              value={form.oscillator ?? ""}
+              value={form.oscillator ?? eff.oscillator}
               onChange={(event) =>
-                onChange({
-                  ...form,
-                  oscillator:
-                    event.target.value === ""
-                      ? undefined
-                      : (event.target.value as "Constant" | "Random"),
-                })
+                onChange({ ...form, oscillator: event.target.value as "Constant" | "Random" })
               }
             >
-              <option value="">默认</option>
               <option value="Constant">Constant</option>
               <option value="Random">Random</option>
             </select>
@@ -223,7 +313,7 @@ function SimOverrideRegion({
             <input
               type="number"
               inputMode="decimal"
-              value={form.driftPpm ?? ""}
+              value={form.driftPpm ?? eff.driftPpm}
               onChange={(event) =>
                 onChange({
                   ...form,
@@ -237,7 +327,7 @@ function SimOverrideRegion({
             <input
               type="number"
               inputMode="decimal"
-              value={form.simTimeS ?? ""}
+              value={form.simTimeS ?? eff.simTimeS}
               onChange={(event) =>
                 onChange({
                   ...form,
@@ -366,8 +456,10 @@ const CHART_COLORS = [
   "#5D3FD3",
 ];
 
-/** 收敛阈值（ns），镜像后端 CONVERGENCE_THRESHOLD_NS=1000（1µs）。 */
-const CONVERGENCE_THRESHOLD_NS = 1000;
+/** 阈值标签格式化：整 µs 显示 µs，否则 ns（如 1000→±1µs、500→±500ns）。 */
+function formatThreshold(ns: number): string {
+  return ns % 1000 === 0 ? `±${ns / 1000}µs` : `±${ns}ns`;
+}
 
 /** 取模块短名：`TsnAgentTimesyncNetwork.sw1.clock` → `sw1`（去网络前缀与 .clock 后缀）。 */
 function shortNodeName(mid: string): string {
@@ -409,26 +501,30 @@ function OffsetChart({ perNode }: { perNode: PerNodeOffset[] }) {
       if (a > rawAbsMax) rawAbsMax = a;
     }
   }
+  // U7：阈值取自各节点 thresholdNs。统一时画带、用实际值标注；不一致则不画统一带（表格逐节点判定）。
+  const thresholdValues = nodes.map((n) => n.thresholdNs);
+  const uniformThreshold = thresholdValues.every((t) => t === thresholdValues[0])
+    ? thresholdValues[0]
+    : null;
   // y 轴定界自适应（取 |offset| 的 95 分位 ×1.3 裁掉启动瞬态作数据界）：
-  // - 数据接近阈值（≥1/3）→ 把 ±1µs 阈值纳入视图，显示参考带（如 Random 稳态几百 ns）；
-  // - 数据远小于阈值（如 Constant 偏差才几十 ns）→ 贴合数据，否则会被 ±1µs 带压成贴底直线，
-  //   阈值改顶部标注。
+  // - 数据接近阈值（≥1/3）→ 把阈值纳入视图，显示参考带（如 Random 稳态几百 ns）；
+  // - 数据远小于阈值（如 Constant 偏差才几十 ns）→ 贴合数据，否则会被阈值带压成贴底直线，阈值改顶部标注。
   absVals.sort((a, b) => a - b);
   const p95 = absVals[Math.floor(absVals.length * 0.95)] ?? 0;
   const dataBound = Math.max(p95 * 1.3, 1);
   const yBound =
-    dataBound >= CONVERGENCE_THRESHOLD_NS / 3
-      ? Math.max(dataBound, CONVERGENCE_THRESHOLD_NS * 1.15)
+    uniformThreshold !== null && dataBound >= uniformThreshold / 3
+      ? Math.max(dataBound, uniformThreshold * 1.15)
       : dataBound;
   const clipped = rawAbsMax > yBound;
-  const thresholdInView = CONVERGENCE_THRESHOLD_NS <= yBound;
+  const thresholdInView = uniformThreshold !== null && uniformThreshold <= yBound;
 
   const tSpan = tMax > 0 ? tMax : 1;
   const xAt = (t: number) => ml + (t / tSpan) * pw;
   const yAt = (v: number) => mt + (1 - (v + yBound) / (2 * yBound)) * ph;
   const baseline = yAt(0);
-  const bandTop = yAt(CONVERGENCE_THRESHOLD_NS);
-  const bandBottom = yAt(-CONVERGENCE_THRESHOLD_NS);
+  const bandTop = yAt(uniformThreshold ?? 0);
+  const bandBottom = yAt(-(uniformThreshold ?? 0));
 
   return (
     <figure className="sim-chart">
@@ -471,13 +567,19 @@ function OffsetChart({ perNode }: { perNode: PerNodeOffset[] }) {
         <text x={ml - 6} y={mt + ph} className="sim-chart-tick" textAnchor="end">
           -{yBound.toFixed(0)} ns
         </text>
-        {thresholdInView ? (
+        {uniformThreshold !== null && thresholdInView && (
           <text x={ml + pw} y={bandTop - 3} className="sim-chart-tick" textAnchor="end">
-            ±1µs 阈值
+            {formatThreshold(uniformThreshold)} 阈值
           </text>
-        ) : (
+        )}
+        {uniformThreshold !== null && !thresholdInView && (
           <text x={ml + pw} y={mt + 11} className="sim-chart-tick" textAnchor="end">
-            ↑ ±1µs 阈值（远高于此范围，全部在内）
+            ↑ {formatThreshold(uniformThreshold)} 阈值（远高于此范围，全部在内）
+          </text>
+        )}
+        {uniformThreshold === null && (
+          <text x={ml + pw} y={mt + 11} className="sim-chart-tick" textAnchor="end">
+            各节点阈值不一（见表格参考线）
           </text>
         )}
         <text x={ml + pw} y={mt + ph + 18} className="sim-chart-tick" textAnchor="end">

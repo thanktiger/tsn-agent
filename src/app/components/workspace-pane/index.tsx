@@ -22,7 +22,7 @@ import {
   type TopologyRowSnapshot,
 } from "../../../sessions/topology-snapshot";
 import { DetailRow, Stat } from "../shared";
-import { TimeSyncPanel } from "./time-sync-panel";
+import { TimeSyncPanel, type TimesyncSubTab } from "./time-sync-panel";
 import type { SimUiState } from "./timesync-sim";
 import {
   classifyTimesyncEdge,
@@ -36,6 +36,7 @@ import {
 } from "./topology-flow";
 import { TsnFloatingEdge } from "./tsn-floating-edge";
 
+export type { TimesyncSubTab } from "./time-sync-panel";
 export type { SimUiState } from "./timesync-sim";
 export type { TimesyncEdgeKind, TsnEdgeData, TsnNodeKind } from "./topology-flow";
 export {
@@ -53,7 +54,7 @@ export type ConfigTabId = "node-props" | "time-sync";
 
 const CONFIG_TABS: Array<{ id: ConfigTabId; label: string }> = [
   { id: "node-props", label: "节点属性" },
-  { id: "time-sync", label: "时钟同步" },
+  { id: "time-sync", label: "时间同步" },
 ];
 
 const nodeTypes = {
@@ -161,6 +162,11 @@ export interface WorkspacePaneProps {
   /** U11：App 级软仿运行态。 */
   simState: SimUiState;
   onSimStateChange: (state: SimUiState) => void;
+  /** 时间同步子 tab 选择（App 级，随会话重置；reveal 可强制落 soft-sim）。 */
+  activeTimesyncSubTab: TimesyncSubTab;
+  onSelectTimesyncSubTab: (tab: TimesyncSubTab) => void;
+  /** U4：set_gm 揭示在「面板已开但用户在别 tab」时给时间同步 tab 挂的脉冲 badge。 */
+  timesyncTabHasBadge: boolean;
   /** U10：底部 handle 条切换弹出框显隐。 */
   onToggleConfigPanel: () => void;
   onSelectConfigTab: (tab: ConfigTabId) => void;
@@ -186,6 +192,9 @@ export function WorkspacePane({
   sessionId,
   simState,
   onSimStateChange,
+  activeTimesyncSubTab,
+  onSelectTimesyncSubTab,
+  timesyncTabHasBadge,
   onToggleConfigPanel,
   onSelectConfigTab,
   onNodeSelect,
@@ -693,6 +702,9 @@ export function WorkspacePane({
                 onClick={() => onSelectConfigTab(tab.id)}
               >
                 {tab.label}
+                {tab.id === "time-sync" && timesyncTabHasBadge && (
+                  <span className="config-tab-badge" role="img" aria-label="有新内容" />
+                )}
               </button>
             ))}
             <div className="config-spacer" />
@@ -750,6 +762,8 @@ export function WorkspacePane({
                 sessionId={sessionId}
                 simState={simState}
                 onSimStateChange={onSimStateChange}
+                activeSubTab={activeTimesyncSubTab}
+                onSelectSubTab={onSelectTimesyncSubTab}
               />
             )}
           </div>

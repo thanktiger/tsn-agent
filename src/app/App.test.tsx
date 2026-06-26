@@ -619,7 +619,7 @@ describe("App", () => {
     // 点链路无响应：链路选中已移除，不再出现「链路详情」tab。
     await user.click(screen.getByRole("button", { name: "选择链路 link-1" }));
     expect(screen.queryByRole("tab", { name: "链路详情" })).not.toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: "时钟同步" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "时间同步" })).toBeInTheDocument();
   });
 
   it("creates and deletes sessions with confirmation while the drawer stays open", async () => {

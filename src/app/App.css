@@ -2121,6 +2121,68 @@ textarea:focus-visible {
 }
 
 /* U11/U12/U13：时钟同步软仿面板。 */
+/* 时间同步内的平级子 tab（软件仿真/硬件部署）。flex 而非 grid：WebKit 下 grid+overflow
+   auto 行会 row collapse 塌 0 高（踩过两次）。子 tab 内容用 flex 列、align-self/content:start
+   防嵌套 stretch 跳变。 */
+.sim-subtabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+  margin-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.sim-subtab {
+  flex: 0 0 auto;
+  padding: 7px 14px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
+  background: transparent;
+  transition:
+    color 0.15s,
+    border-color 0.15s;
+}
+
+.sim-subtab:hover {
+  color: var(--text-primary);
+}
+
+.sim-subtab.active {
+  border-bottom-color: var(--accent);
+  color: var(--accent);
+}
+
+.sim-subpanel {
+  display: flex;
+  flex-direction: column;
+  align-self: start;
+  overflow: visible;
+}
+
+.hard-deploy-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 18px 4px;
+}
+
+.hard-deploy-empty h2 {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 14px;
+}
+
+.hard-deploy-empty__note {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 .sim-actions {
   display: flex;
   gap: 8px;
@@ -2334,6 +2396,28 @@ textarea:focus-visible {
 .config-tab.active {
   border-bottom-color: var(--accent);
   color: var(--accent);
+}
+
+/* U4：set_gm 揭示在时间同步 tab 上的脉冲 badge（不抢焦点的「有新内容」提示）。 */
+.config-tab-badge {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-left: 5px;
+  border-radius: 50%;
+  background: var(--accent);
+  vertical-align: middle;
+  animation: config-tab-badge-pulse 1s ease-in-out infinite;
+}
+
+@keyframes config-tab-badge-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.4;
+  }
 }
 
 .config-tab:disabled {

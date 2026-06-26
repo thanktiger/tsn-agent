@@ -16,6 +16,7 @@ function convergedResult(): SimResult {
         meanOffsetNs: 5.1,
         converged: true,
         withinThreshold: true,
+        thresholdNs: 1000,
         samples: [
           { tMs: 0, offsetNs: 12.3 },
           { tMs: 500, offsetNs: 2.1 },
@@ -28,6 +29,7 @@ function convergedResult(): SimResult {
         meanOffsetNs: 9.9,
         converged: true,
         withinThreshold: true,
+        thresholdNs: 1000,
         samples: [
           { tMs: 0, offsetNs: -30.7 },
           { tMs: 500, offsetNs: -4.0 },
@@ -50,6 +52,7 @@ function partlyConvergedResult(): SimResult {
         meanOffsetNs: 5.1,
         converged: true,
         withinThreshold: true,
+        thresholdNs: 1000,
         samples: [{ tMs: 0, offsetNs: 12.3 }],
       },
       {
@@ -58,6 +61,7 @@ function partlyConvergedResult(): SimResult {
         meanOffsetNs: 8000,
         converged: false,
         withinThreshold: false,
+        thresholdNs: 1000,
         samples: [{ tMs: 0, offsetNs: 9000 }],
       },
     ],
@@ -81,8 +85,15 @@ function baseProps(overrides: Partial<TimeSyncPanelProps> = {}): TimeSyncPanelPr
     sessionId: "s1",
     simState: { status: "idle" },
     onSimStateChange: vi.fn(),
+    activeSubTab: "soft-sim",
+    onSelectSubTab: vi.fn(),
     runTimesyncSim: vi.fn(async () => convergedResult()),
     explainSim: vi.fn(async () => "解释内容"),
+    getSimDefaults: vi.fn(async () => ({
+      oscillator: "Random" as const,
+      driftPpm: 100,
+      simTimeS: 60,
+    })),
     ...overrides,
   };
 }
@@ -182,6 +193,7 @@ describe("TimeSyncPanel 运行/结果（U11）", () => {
           meanOffsetNs: 120,
           converged: true,
           withinThreshold: true,
+          thresholdNs: 1000,
           samples: [
             { tMs: 0, offsetNs: 600 },
             { tMs: 30000, offsetNs: -500 },
@@ -197,6 +209,64 @@ describe("TimeSyncPanel 运行/结果（U11）", () => {
     expect(screen.getByText("±1µs 阈值")).toBeInTheDocument();
   });
 
+  it("阈值带按各节点实际阈值标注（统一 500ns → ±500ns 阈值）(U7)", () => {
+    const result: SimResult = {
+      caliber: "timesync_simulated",
+      status: "converged",
+      overall: "1 个从节点收敛",
+      perNode: [
+        {
+          mid: "net.sw1.clock",
+          maxOffsetNs: 300,
+          meanOffsetNs: 80,
+          converged: true,
+          withinThreshold: true,
+          thresholdNs: 500,
+          samples: [
+            { tMs: 0, offsetNs: 300 },
+            { tMs: 30000, offsetNs: -250 },
+            { tMs: 60000, offsetNs: 200 },
+          ],
+        },
+      ],
+    };
+    render(<TimeSyncPanel {...baseProps({ simState: { status: "done", result } })} />);
+    expect(screen.getByText("±500ns 阈值")).toBeInTheDocument();
+    expect(screen.queryByText("±1µs 阈值")).not.toBeInTheDocument();
+  });
+
+  it("各节点阈值不一致 → 不画统一带，提示看表格 (U7)", () => {
+    const result: SimResult = {
+      caliber: "timesync_simulated",
+      status: "converged",
+      overall: "2 个从节点收敛",
+      perNode: [
+        {
+          mid: "net.sw1.clock",
+          maxOffsetNs: 200,
+          meanOffsetNs: 50,
+          converged: true,
+          withinThreshold: true,
+          thresholdNs: 500,
+          samples: [{ tMs: 0, offsetNs: 200 }],
+        },
+        {
+          mid: "net.es2.clock",
+          maxOffsetNs: 300,
+          meanOffsetNs: 60,
+          converged: true,
+          withinThreshold: true,
+          thresholdNs: 1000,
+          samples: [{ tMs: 0, offsetNs: 300 }],
+        },
+      ],
+    };
+    render(<TimeSyncPanel {...baseProps({ simState: { status: "done", result } })} />);
+    const chart = screen.getByRole("img", { name: "从节点偏差随仿真时间抖动曲线" });
+    expect(chart.querySelector("rect.sim-chart-threshold-band")).toBeNull();
+    expect(screen.getByText(/各节点阈值不一/)).toBeInTheDocument();
+  });
+
   it("空结果不渲染全绿（显示 message、无表格）", () => {
     render(
       <TimeSyncPanel {...baseProps({ simState: { status: "done", result: emptyResult() } })} />,
@@ -205,12 +275,31 @@ describe("TimeSyncPanel 运行/结果（U11）", () => {
     expect(screen.getByLabelText("软仿总判定")).toHaveClass("warn");
     expect(screen.getByText(/0 行 timeChanged/)).toBeInTheDocument();
   });
+});
 
-  it("硬仿点击 → 占位提示", async () => {
-    const user = userEvent.setup();
+describe("TimeSyncPanel 子 tab（软件仿真/硬件部署，平级）", () => {
+  it("默认软件仿真子 tab：软仿按钮可见，无并排硬仿按钮", () => {
     render(<TimeSyncPanel {...baseProps()} />);
-    await user.click(screen.getByRole("button", { name: "硬仿" }));
-    expect(screen.getByText("待接入真实硬件")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "软仿" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "硬仿" })).not.toBeInTheDocument();
+  });
+
+  it("点硬件部署子 tab → onSelectSubTab('hard-deploy')", async () => {
+    const user = userEvent.setup();
+    const onSelectSubTab = vi.fn();
+    render(<TimeSyncPanel {...baseProps({ onSelectSubTab })} />);
+    await user.click(screen.getByRole("tab", { name: "硬件部署" }));
+    expect(onSelectSubTab).toHaveBeenCalledWith("hard-deploy");
+  });
+
+  it("硬件部署子 tab：占位空态 + 回软仿按钮", async () => {
+    const user = userEvent.setup();
+    const onSelectSubTab = vi.fn();
+    render(<TimeSyncPanel {...baseProps({ activeSubTab: "hard-deploy", onSelectSubTab })} />);
+    expect(screen.getByText(/本期尚未接入/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "软仿" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "先用软件仿真验证" }));
+    expect(onSelectSubTab).toHaveBeenCalledWith("soft-sim");
   });
 });
 
@@ -242,6 +331,45 @@ describe("TimeSyncPanel 覆盖表单（U12）", () => {
     render(<TimeSyncPanel {...baseProps({ runTimesyncSim })} />);
     await user.click(screen.getByRole("button", { name: "软仿" }));
     await waitFor(() => expect(runTimesyncSim).toHaveBeenCalledWith("s1", {}));
+  });
+});
+
+describe("TimeSyncPanel 覆盖参数默认值可见（U6）", () => {
+  it("折叠 header 显示后端生效默认摘要，未编辑不标已覆盖", async () => {
+    render(<TimeSyncPanel {...baseProps()} />);
+    await waitFor(() =>
+      expect(screen.getByText(/振荡器 Random · 漂移 100ppm · 时长 60s · 默认/)).toBeInTheDocument(),
+    );
+    expect(screen.queryByText(/已覆盖/)).not.toBeInTheDocument();
+  });
+
+  it("展开预填实值；编辑某项 → 该项标「已覆盖」、提交只发被改项", async () => {
+    const user = userEvent.setup();
+    const runTimesyncSim = vi.fn(async () => convergedResult());
+    render(<TimeSyncPanel {...baseProps({ runTimesyncSim })} />);
+    await waitFor(() => expect(screen.getByText(/振荡器 Random/)).toBeInTheDocument());
+    await user.click(screen.getByRole("button", { name: /覆盖参数/ }));
+    // 预填实值：漂移输入框初值为默认 100。
+    expect(screen.getByLabelText("漂移幅度（ppm）")).toHaveValue(100);
+    fireEvent.change(screen.getByLabelText("漂移幅度（ppm）"), { target: { value: "250" } });
+    expect(screen.getByText(/漂移 250ppm（已覆盖）/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "软仿" }));
+    await waitFor(() => expect(runTimesyncSim).toHaveBeenCalledWith("s1", { driftPpm: 250 }));
+  });
+
+  it("get_sim_defaults 失败 → 静默回退兜底默认，不报错", async () => {
+    render(
+      <TimeSyncPanel
+        {...baseProps({
+          getSimDefaults: vi.fn(async () => {
+            throw new Error("boom");
+          }),
+        })}
+      />,
+    );
+    await waitFor(() =>
+      expect(screen.getByText(/振荡器 Random · 漂移 100ppm · 时长 60s · 默认/)).toBeInTheDocument(),
+    );
   });
 });
 

@@ -17,7 +17,8 @@ use crate::inet_remote::{
     is_valid_host_or_user,
 };
 use crate::inet_sim_bundle::{
-    OscillatorKind, SimNodeTiming, SimOverrides, build_timesync_sim_bundle,
+    DEFAULT_DRIFT_PPM, DEFAULT_SIM_TIME_S, OscillatorKind, SimNodeTiming, SimOverrides,
+    build_timesync_sim_bundle,
 };
 
 const CALIBER_TIMESYNC_SIMULATED: &str = "timesync_simulated";
@@ -143,6 +144,37 @@ pub async fn set_inet_host_config(
     Ok(())
 }
 
+// ---------- U5/U6：软仿覆盖参数默认值（单一事实源在后端，前端读用于摘要/预填）----------
+
+/// 软仿覆盖参数的生效默认值（前端折叠摘要 + 展开预填读此源，不在前端另写常量）。
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SimDefaults {
+    /// 振荡器默认类型字符串（"Constant" / "Random"），与前端 SimOverrideForm.oscillator 对齐。
+    pub oscillator: String,
+    pub drift_ppm: f64,
+    pub sim_time_s: f64,
+}
+
+/// 软仿默认值取自 inet_sim_bundle 的固定常量，与软仿生成时的兜底同源（U6 KTD2）。
+pub fn sim_defaults() -> SimDefaults {
+    let oscillator = match OscillatorKind::default() {
+        OscillatorKind::Constant => "Constant",
+        OscillatorKind::Random => "Random",
+    };
+    SimDefaults {
+        oscillator: oscillator.to_string(),
+        drift_ppm: DEFAULT_DRIFT_PPM,
+        sim_time_s: DEFAULT_SIM_TIME_S,
+    }
+}
+
+/// 纯读命令：把软仿覆盖参数默认值暴露给前端（无副作用、不碰库、不触发重算）。
+#[tauri::command]
+pub fn get_sim_defaults() -> SimDefaults {
+    sim_defaults()
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunTimesyncSimRequest {
@@ -167,6 +199,8 @@ pub struct PerNodeOffset {
     pub converged: bool,
     /// 是否在该节点 offset_threshold 参考线内（无阈值则 true，仅作参考非质量判定）。
     pub within_threshold: bool,
+    /// 该节点生效的收敛阈值（纳秒）——逐节点 offset_threshold，缺省回退全局兜底。前端图表带/表格按此显示。
+    pub threshold_ns: f64,
     /// 完整 offset(t) 抖动轨迹（相对 GM，降采样封顶），供前端画收敛曲线。
     pub samples: Vec<OffsetSample>,
 }
@@ -457,7 +491,34 @@ pub async fn run_timesync_sim_inner<R: RemoteRunner>(
         }
     };
 
-    classify_and_compute(outcome, &sim_bundle.gm_ned_name, &gm_mid, &timing)
+    // U7：构造 ned 名 → 阈值(ns) 映射——把逐节点 offset_threshold（按 mid keyed）经 bundle 的
+    // mid→ned 映射桥接到 series（按 ned 名 keyed）。缺省节点不入表，classify 回退全局兜底。
+    let thresholds: std::collections::BTreeMap<String, f64> = timing
+        .iter()
+        .filter_map(|t| {
+            let ned = sim_bundle.node_ned_names.get(&t.mid)?;
+            let threshold = t.offset_threshold_ns?;
+            Some((ned.clone(), threshold as f64))
+        })
+        .collect();
+
+    classify_and_compute(
+        outcome,
+        &sim_bundle.gm_ned_name,
+        &gm_mid,
+        &timing,
+        &thresholds,
+    )
+}
+
+/// 从 timeChanged series 的 module 路径提取 ned 名：`...Network.sw1.clock` → `sw1`（取 .clock 前一段）。
+fn series_ned_name(module: &str) -> Option<&str> {
+    let mut parts = module.rsplit('.');
+    let last = parts.next()?;
+    if last != "clock" {
+        return None;
+    }
+    parts.next()
 }
 
 fn unreachable_result(msg: &str) -> SimResult {
@@ -477,6 +538,7 @@ fn classify_and_compute(
     gm_ned: &str,
     gm_mid: &str,
     timing: &[SimNodeTiming],
+    thresholds: &std::collections::BTreeMap<String, f64>,
 ) -> Result<SimResult, String> {
     if outcome.exit_code != Some(0) {
         return Ok(SimResult {
@@ -535,9 +597,12 @@ fn classify_and_compute(
         let Some((max_ns, mean_ns)) = steady_state_offset(s, gm_series) else {
             continue;
         };
-        // 收敛判定：稳态 max|offset| 在阈值内才算收敛（阈值为参考线，非设计质量判定）。
-        // mid↔module 精确映射 deferred（实跑确认 module 路径后补），故先用全局默认阈值。
-        let within = max_ns.is_finite() && max_ns <= CONVERGENCE_THRESHOLD_NS;
+        // 该节点生效阈值（ns，U7）：按 series 的 ned 名查 offset_threshold，缺省回退全局兜底。
+        let threshold_ns = series_ned_name(&s.module)
+            .and_then(|ned| thresholds.get(ned).copied())
+            .unwrap_or(CONVERGENCE_THRESHOLD_NS);
+        // 收敛判定：稳态 max|offset| 在该节点阈值内才算收敛（参考线，非设计质量判定）。
+        let within = max_ns.is_finite() && max_ns <= threshold_ns;
         let converged = within;
         if converged {
             converged_count += 1;
@@ -548,6 +613,7 @@ fn classify_and_compute(
             mean_offset_ns: mean_ns,
             converged,
             within_threshold: within,
+            threshold_ns,
             samples: offset_trajectory(s, gm_series),
         });
     }
@@ -643,7 +709,7 @@ async fn load_timing(
     session_id: &str,
 ) -> Result<Vec<SimNodeTiming>, String> {
     let rows = sqlx::query(
-        "SELECT mid, master_port, slave_port, sync_period, measure_period \
+        "SELECT mid, master_port, slave_port, sync_period, measure_period, offset_threshold \
          FROM timesync_nodes WHERE session_id = ?",
     )
     .bind(session_id)
@@ -659,6 +725,7 @@ async fn load_timing(
             slave_port: parse_i64_array(&r.get::<String, _>("slave_port")),
             sync_period_ms: r.get("sync_period"),
             measure_period_ms: r.get("measure_period"),
+            offset_threshold_ns: r.get("offset_threshold"),
         });
     }
     Ok(timing)
@@ -769,6 +836,19 @@ mod tests {
     }
 
     #[test]
+    fn sim_defaults_match_constants_and_serialize_camelcase() {
+        let d = sim_defaults();
+        assert_eq!(d.oscillator, "Random"); // OscillatorKind::default()
+        assert_eq!(d.drift_ppm, DEFAULT_DRIFT_PPM);
+        assert_eq!(d.sim_time_s, DEFAULT_SIM_TIME_S);
+        let v = serde_json::to_value(&d).unwrap();
+        assert!(v.get("oscillator").is_some());
+        assert!(v.get("driftPpm").is_some(), "driftPpm camelCase");
+        assert!(v.get("simTimeS").is_some(), "simTimeS camelCase");
+        assert!(v.get("drift_ppm").is_none());
+    }
+
+    #[test]
     fn sim_result_serializes_camelcase_for_frontend() {
         let result = SimResult {
             caliber: "timesync_simulated".into(),
@@ -779,6 +859,7 @@ mod tests {
                 mean_offset_ns: 0.5,
                 converged: true,
                 within_threshold: true,
+                threshold_ns: 1000.0,
                 samples: vec![OffsetSample {
                     t_ms: 500.0,
                     offset_ns: 0.8,
@@ -799,6 +880,7 @@ mod tests {
             "meanOffsetNs",
             "converged",
             "withinThreshold",
+            "thresholdNs",
             "samples",
         ] {
             assert!(node.get(key).is_some(), "缺 perNode.{key}: {node}");
@@ -915,6 +997,7 @@ mod tests {
                 slave_port: vec![],
                 sync_period_ms: None,
                 measure_period_ms: None,
+                offset_threshold_ns: None,
             },
             SimNodeTiming {
                 mid: "1".into(),
@@ -922,8 +1005,13 @@ mod tests {
                 slave_port: vec![],
                 sync_period_ms: None,
                 measure_period_ms: None,
+                offset_threshold_ns: None,
             },
         ]
+    }
+
+    fn no_thresholds() -> std::collections::BTreeMap<String, f64> {
+        std::collections::BTreeMap::new()
     }
 
     #[test]
@@ -934,7 +1022,7 @@ mod tests {
             csv: None,
             scavetool_failed: false,
         };
-        let r = classify_and_compute(outcome, "es1", "0", &[]).unwrap();
+        let r = classify_and_compute(outcome, "es1", "0", &[], &no_thresholds()).unwrap();
         assert_eq!(r.status, "load_failed");
         assert!(r.per_node.is_empty());
     }
@@ -952,6 +1040,7 @@ mod tests {
             "es1",
             "0",
             &[],
+            &no_thresholds(),
         )
         .unwrap();
         assert_eq!(empty.status, "empty");
@@ -966,6 +1055,7 @@ mod tests {
             "es1",
             "0",
             &[],
+            &no_thresholds(),
         )
         .unwrap();
         assert_eq!(tool.status, "scavetool_failed");
@@ -980,7 +1070,7 @@ mod tests {
             csv: Some("not,a,valid,header\n1,2,3,4\n".into()),
             scavetool_failed: false,
         };
-        let r = classify_and_compute(outcome, "es1", "0", &[]).unwrap();
+        let r = classify_and_compute(outcome, "es1", "0", &[], &no_thresholds()).unwrap();
         assert_eq!(r.status, "parse_failed");
     }
 
@@ -996,7 +1086,7 @@ mod tests {
             csv: Some(csv.into()),
             scavetool_failed: false,
         };
-        let r = classify_and_compute(outcome, "es1", "0", &timing2()).unwrap();
+        let r = classify_and_compute(outcome, "es1", "0", &timing2(), &no_thresholds()).unwrap();
         assert_eq!(r.status, "converged", "{r:?}");
         assert_eq!(r.per_node.len(), 1);
         assert!(r.per_node[0].converged);
@@ -1014,11 +1104,54 @@ mod tests {
             csv: Some(csv.into()),
             scavetool_failed: false,
         };
-        let r = classify_and_compute(outcome, "es1", "0", &timing2()).unwrap();
+        let r = classify_and_compute(outcome, "es1", "0", &timing2(), &no_thresholds()).unwrap();
         assert_eq!(r.status, "converged"); // status=有结果；逐节点判收敛
         assert_eq!(r.per_node.len(), 1);
         assert!(!r.per_node[0].converged, "1ms 偏差不应判收敛");
         assert!(r.overall.contains("未收敛"));
+    }
+
+    #[test]
+    fn series_ned_name_extracts_node() {
+        assert_eq!(
+            series_ned_name("TsnAgentTimesyncNetwork.sw1.clock"),
+            Some("sw1")
+        );
+        assert_eq!(series_ned_name("net.es3.clock"), Some("es3"));
+        assert_eq!(series_ned_name("net.sw1.clock.oscillator"), None); // 非 .clock 结尾
+    }
+
+    #[test]
+    fn classify_uses_per_node_offset_threshold_ns() {
+        // sw1 稳态 max=400ns；节点阈值=500ns → within（证明用 500 不是全局 1000，也证明 <500 收敛）。
+        let csv = "run,module,name,vectime,vecvalue\n\
+            r1,net.es1.clock,timeChanged:vector,0 1 2 3,0 0 0 0\n\
+            r1,net.sw1.clock,timeChanged:vector,0 1 2 3,0.001 0.001 4e-7 4e-7\n";
+        let outcome = SimRunOutcome {
+            exit_code: Some(0),
+            output_tail: "".into(),
+            csv: Some(csv.into()),
+            scavetool_failed: false,
+        };
+        let th: std::collections::BTreeMap<String, f64> =
+            [("sw1".to_string(), 500.0)].into_iter().collect();
+        let r = classify_and_compute(outcome, "es1", "0", &timing2(), &th).unwrap();
+        assert_eq!(r.per_node.len(), 1);
+        assert!(r.per_node[0].converged, "400ns 在 500ns 阈值内应收敛");
+        assert_eq!(r.per_node[0].threshold_ns, 500.0);
+
+        // 同节点稳态 max=600ns > 500ns 阈值 → 不收敛（若仍用全局 1000 则会误判收敛）。
+        let csv2 = "run,module,name,vectime,vecvalue\n\
+            r1,net.es1.clock,timeChanged:vector,0 1 2 3,0 0 0 0\n\
+            r1,net.sw1.clock,timeChanged:vector,0 1 2 3,0.001 0.001 6e-7 6e-7\n";
+        let outcome2 = SimRunOutcome {
+            exit_code: Some(0),
+            output_tail: "".into(),
+            csv: Some(csv2.into()),
+            scavetool_failed: false,
+        };
+        let r2 = classify_and_compute(outcome2, "es1", "0", &timing2(), &th).unwrap();
+        assert!(!r2.per_node[0].converged, "600ns 超 500ns 阈值不应收敛");
     }
 
     #[test]
@@ -1033,7 +1166,7 @@ mod tests {
             csv: Some(csv.into()),
             scavetool_failed: false,
         };
-        let r = classify_and_compute(outcome, "es99", "0", &timing2()).unwrap();
+        let r = classify_and_compute(outcome, "es99", "0", &timing2(), &no_thresholds()).unwrap();
         assert_eq!(r.status, "empty");
     }
 
@@ -1166,6 +1299,13 @@ mod tests {
         assert_eq!(result.per_node.len(), 2);
         assert!(result.per_node.iter().all(|n| n.converged));
         assert!(result.overall.contains("2 个收敛"));
+        // U7 端到端：set_gm 写入的 offset_threshold(默认 1000) 经 load_timing 读出、对到各节点 series，
+        // 作为 threshold_ns 带回（证明 DB 读路径 + mid→ned 桥接通，非静默回退）。
+        assert!(
+            result.per_node.iter().all(|n| n.threshold_ns == 1000.0),
+            "per_node threshold_ns 应来自库内 offset_threshold(默认1000): {:?}",
+            result.per_node
+        );
 
         // 预定义参数确实进了生成的 ini（端到端：覆盖表单 → bundle → 远端工程）。
         let ini = mock.captured_ini.lock().unwrap().clone().unwrap();

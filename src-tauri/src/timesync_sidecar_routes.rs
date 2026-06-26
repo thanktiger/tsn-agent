@@ -31,7 +31,7 @@ use crate::topology_sidecar_routes::{RouteState, ok_summary, require_session, st
 /// 同步参数默认值（用户只给 GM 不给参数时补全；R10）。取合理 2^n：
 /// sync_period=128ms (2^7)、measure_period=1024ms (2^10)；report_enable 默认开；
 /// mean_link_delay_thresh=64 (2^6，落在取值域 2^n、n=0..7、max 128 内)；
-/// offset_threshold 给经验默认（整数阈值，取值域 0..4095）。
+/// offset_threshold 给经验默认（逐节点收敛偏移阈值，单位纳秒 ns，boss 定语义；软仿 U7 据此判收敛）。
 const DEFAULT_SYNC_PERIOD: i64 = 128;
 const DEFAULT_MEASURE_PERIOD: i64 = 1024;
 const DEFAULT_REPORT_ENABLE: i64 = 1;

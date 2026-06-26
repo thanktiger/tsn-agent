@@ -104,6 +104,7 @@ pub fn run() {
             timesync_query_command::query_timesync,
             verify_time_sync,
             inet_sim_command::run_timesync_sim,
+            inet_sim_command::get_sim_defaults,
             inet_sim_command::get_inet_host_config,
             inet_sim_command::set_inet_host_config,
             session_store::get_current_session,

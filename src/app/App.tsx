@@ -18,7 +18,13 @@ import { isEmptyTopologySnapshot } from "../sessions/topology-snapshot";
 import { ConfirmDialog } from "../ui/confirm-dialog";
 import { redactProviderNamesForDisplay } from "../ui/display-redaction";
 import { ChatPane } from "./components/chat-pane";
-import { type ConfigTabId, type SimUiState, WorkspacePane } from "./components/workspace-pane";
+import {
+  type ConfigTabId,
+  type SimUiState,
+  type TimesyncSubTab,
+  WorkspacePane,
+} from "./components/workspace-pane";
+import { computeReveal, type RevealBaseline } from "./components/workspace-pane/timesync-sim";
 import { type WorkspaceToolPanel, WorkspaceTools } from "./components/workspace-tools";
 import { useAgentRunController } from "./hooks/use-agent-run-controller";
 import { useSessionRepository } from "./hooks/use-session-repository";
@@ -64,6 +70,8 @@ export function App() {
   // U10：弹出框显隐由独立 expand 驱动（与选中解耦）；面板可在无选中节点时打开。
   const [configPanelExpanded, setConfigPanelExpanded] = useState(false);
   const [activeConfigTab, setActiveConfigTab] = useState<ConfigTabId>("node-props");
+  // 时间同步子 tab（软件仿真/硬件部署，平级）。App 级以便 reveal 强制落 soft-sim；随会话重置。
+  const [activeTimesyncSubTab, setActiveTimesyncSubTab] = useState<TimesyncSubTab>("soft-sim");
   const [selectedNodeId, setSelectedNodeId] = useState<string | undefined>();
   // U11：软仿运行态持于 App 级（非 tab 组件内）——切 tab 不取消命令、切回按 simStatus 恢复。
   const [simState, setSimState] = useState<SimUiState>({ status: "idle" });
@@ -80,15 +88,53 @@ export function App() {
   const activeRunIdRef = useRef<string | undefined>(undefined);
   // 仅当 cancel 命令返回 killed:true 才置位——是「本轮被用户真终止」的唯一依据（KTD3）。
   const cancelRequestedRef = useRef(false);
+  // set_gm 揭示（U4）：时间同步 tab 上的「有新内容」脉冲 badge（面板已开但用户在别 tab 时用）。
+  const [timesyncTabHasBadge, setTimesyncTabHasBadge] = useState(false);
+  // 镜像最新 expand/activeConfigTab，供 reveal effect 读而不把它们放进 deps（否则会误触发）。
+  const configPanelExpandedRef = useRef(configPanelExpanded);
+  configPanelExpandedRef.current = configPanelExpanded;
+  const activeConfigTabRef = useRef(activeConfigTab);
+  activeConfigTabRef.current = activeConfigTab;
+  // reveal 基线：记每会话的 gmMid 基线，区分「切会话水合」与「同会话内 set_gm」。
+  const revealBaselineRef = useRef<RevealBaseline>({
+    sessionId: currentSession.id,
+    gmMid: undefined,
+    established: false,
+  });
 
   // U10（doc-review 决定）：会话切换时三态归零——收起、回 node-props、清选中，防 PR#23 id 污染。
-  // U11：软仿运行态也随会话切换重置（不跨会话保留结果）。
+  // U11：软仿运行态也随会话切换重置（不跨会话保留结果）。U4：badge 也清。
   useEffect(() => {
     setConfigPanelExpanded(false);
     setActiveConfigTab("node-props");
+    setActiveTimesyncSubTab("soft-sim");
     setSelectedNodeId(undefined);
     setSimState({ status: "idle" });
+    setTimesyncTabHasBadge(false);
   }, [currentSession.id]);
+
+  // U4：set_gm 后分级揭示。纯决策在 computeReveal（可单测）；这里只把 action 落成 state。
+  useEffect(() => {
+    const { nextBaseline, action } = computeReveal({
+      baseline: revealBaselineRef.current,
+      currentSessionId: currentSession.id,
+      snapshotSessionId: timesyncSnapshot?.sessionId,
+      gmMid: timesyncSnapshot?.domain?.gmMid,
+      inTimeSyncStage: currentSession.workflow.currentStep === "time-sync",
+      panelExpanded: configPanelExpandedRef.current,
+      activeIsTimeSync: activeConfigTabRef.current === "time-sync",
+    });
+    revealBaselineRef.current = nextBaseline;
+    if (action === "expand-soft-sim") {
+      setConfigPanelExpanded(true);
+      setActiveConfigTab("time-sync");
+      setActiveTimesyncSubTab("soft-sim");
+    } else if (action === "badge") {
+      setTimesyncTabHasBadge(true);
+    } else if (action === "clear-badge") {
+      setTimesyncTabHasBadge(false);
+    }
+  }, [currentSession.id, currentSession.workflow.currentStep, timesyncSnapshot]);
 
   const workflow = currentSession.workflow;
   const scenarioConfig = getScenarioConfig(workflow.scenarioConfigId);
@@ -469,8 +515,17 @@ export function App() {
           sessionId={currentSession.id}
           simState={simState}
           onSimStateChange={setSimState}
+          activeTimesyncSubTab={activeTimesyncSubTab}
+          onSelectTimesyncSubTab={setActiveTimesyncSubTab}
+          timesyncTabHasBadge={timesyncTabHasBadge}
           onToggleConfigPanel={() => setConfigPanelExpanded((value) => !value)}
-          onSelectConfigTab={setActiveConfigTab}
+          onSelectConfigTab={(tab) => {
+            setActiveConfigTab(tab);
+            // 进时间同步 tab 即清 badge（用户已看到揭示）。
+            if (tab === "time-sync") {
+              setTimesyncTabHasBadge(false);
+            }
+          }}
           onNodeSelect={handleNodeSelect}
           onRefreshTopology={() => void refetchTopology()}
           onUndone={handleTopologyUndone}
