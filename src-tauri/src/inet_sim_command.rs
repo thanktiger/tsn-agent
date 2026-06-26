@@ -17,7 +17,8 @@ use crate::inet_remote::{
     is_valid_host_or_user,
 };
 use crate::inet_sim_bundle::{
-    OscillatorKind, SimNodeTiming, SimOverrides, build_timesync_sim_bundle,
+    DEFAULT_DRIFT_PPM, DEFAULT_SIM_TIME_S, OscillatorKind, SimNodeTiming, SimOverrides,
+    build_timesync_sim_bundle,
 };
 
 const CALIBER_TIMESYNC_SIMULATED: &str = "timesync_simulated";
@@ -141,6 +142,37 @@ pub async fn set_inet_host_config(
     .await
     .map_err(|e| format!("写配置失败：{e}"))?;
     Ok(())
+}
+
+// ---------- U5/U6：软仿覆盖参数默认值（单一事实源在后端，前端读用于摘要/预填）----------
+
+/// 软仿覆盖参数的生效默认值（前端折叠摘要 + 展开预填读此源，不在前端另写常量）。
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SimDefaults {
+    /// 振荡器默认类型字符串（"Constant" / "Random"），与前端 SimOverrideForm.oscillator 对齐。
+    pub oscillator: String,
+    pub drift_ppm: f64,
+    pub sim_time_s: f64,
+}
+
+/// 软仿默认值取自 inet_sim_bundle 的固定常量，与软仿生成时的兜底同源（U6 KTD2）。
+pub fn sim_defaults() -> SimDefaults {
+    let oscillator = match OscillatorKind::default() {
+        OscillatorKind::Constant => "Constant",
+        OscillatorKind::Random => "Random",
+    };
+    SimDefaults {
+        oscillator: oscillator.to_string(),
+        drift_ppm: DEFAULT_DRIFT_PPM,
+        sim_time_s: DEFAULT_SIM_TIME_S,
+    }
+}
+
+/// 纯读命令：把软仿覆盖参数默认值暴露给前端（无副作用、不碰库、不触发重算）。
+#[tauri::command]
+pub fn get_sim_defaults() -> SimDefaults {
+    sim_defaults()
 }
 
 #[derive(Debug, Deserialize)]
@@ -766,6 +798,19 @@ mod tests {
         let bare: RunTimesyncSimRequest = serde_json::from_str(r#"{"sessionId":"s2"}"#).unwrap();
         assert_eq!(bare.session_id, "s2");
         assert!(bare.oscillator.is_none() && bare.drift_ppm.is_none() && bare.sim_time_s.is_none());
+    }
+
+    #[test]
+    fn sim_defaults_match_constants_and_serialize_camelcase() {
+        let d = sim_defaults();
+        assert_eq!(d.oscillator, "Random"); // OscillatorKind::default()
+        assert_eq!(d.drift_ppm, DEFAULT_DRIFT_PPM);
+        assert_eq!(d.sim_time_s, DEFAULT_SIM_TIME_S);
+        let v = serde_json::to_value(&d).unwrap();
+        assert!(v.get("oscillator").is_some());
+        assert!(v.get("driftPpm").is_some(), "driftPpm camelCase");
+        assert!(v.get("simTimeS").is_some(), "simTimeS camelCase");
+        assert!(v.get("drift_ppm").is_none());
     }
 
     #[test]
