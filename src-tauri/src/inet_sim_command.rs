@@ -167,6 +167,16 @@ pub struct PerNodeOffset {
     pub converged: bool,
     /// 是否在该节点 offset_threshold 参考线内（无阈值则 true，仅作参考非质量判定）。
     pub within_threshold: bool,
+    /// 完整 offset(t) 抖动轨迹（相对 GM，降采样封顶），供前端画收敛曲线。
+    pub samples: Vec<OffsetSample>,
+}
+
+/// offset(t) 轨迹的单个采样点：仿真时间（ms）+ 相对 GM 偏差（ns，带符号）。
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct OffsetSample {
+    pub t_ms: f64,
+    pub offset_ns: f64,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -313,6 +323,40 @@ pub fn steady_state_offset(node: &NodeSeries, gm: &NodeSeries) -> Option<(f64, f
     let max = abs_offsets.iter().cloned().fold(0.0_f64, f64::max);
     let mean = abs_offsets.iter().sum::<f64>() / abs_offsets.len() as f64;
     Some((max, mean))
+}
+
+/// 轨迹封顶点数：长仿真每节点动辄上千采样点，降采样防 payload 爆量（前端画图够用）。
+const MAX_TRAJECTORY_SAMPLES: usize = 240;
+
+/// 单节点完整 offset(t) 抖动轨迹（带符号，相对 GM）：每采样点 offset = node − GM(插值)。
+/// 点数超 MAX_TRAJECTORY_SAMPLES 时按等步长降采样（始终含末点）。
+pub fn offset_trajectory(node: &NodeSeries, gm: &NodeSeries) -> Vec<OffsetSample> {
+    let n = node.times.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let stride = n.div_ceil(MAX_TRAJECTORY_SAMPLES).max(1);
+    let mut out: Vec<OffsetSample> = Vec::new();
+    let mut i = 0usize;
+    while i < n {
+        if let Some(gm_v) = interp(&gm.times, &gm.values, node.times[i]) {
+            out.push(OffsetSample {
+                t_ms: node.times[i] * 1e3,
+                offset_ns: (node.values[i] - gm_v) * 1e9,
+            });
+        }
+        i += stride;
+    }
+    // 始终保留末点（收敛末态），降采样可能漏掉。
+    if let Some(gm_v) = interp(&gm.times, &gm.values, node.times[n - 1])
+        && out.last().map(|s| s.t_ms) != Some(node.times[n - 1] * 1e3)
+    {
+        out.push(OffsetSample {
+            t_ms: node.times[n - 1] * 1e3,
+            offset_ns: (node.values[n - 1] - gm_v) * 1e9,
+        });
+    }
+    out
 }
 
 // ---------- 命令编排 ----------
@@ -504,6 +548,7 @@ fn classify_and_compute(
             mean_offset_ns: mean_ns,
             converged,
             within_threshold: within,
+            samples: offset_trajectory(s, gm_series),
         });
     }
 
@@ -734,6 +779,10 @@ mod tests {
                 mean_offset_ns: 0.5,
                 converged: true,
                 within_threshold: true,
+                samples: vec![OffsetSample {
+                    t_ms: 500.0,
+                    offset_ns: 0.8,
+                }],
             }],
             overall: "1 个收敛 / 0 个未收敛".into(),
             message: None,
@@ -750,9 +799,16 @@ mod tests {
             "meanOffsetNs",
             "converged",
             "withinThreshold",
+            "samples",
         ] {
             assert!(node.get(key).is_some(), "缺 perNode.{key}: {node}");
         }
+        // 轨迹采样点也走 camelCase。
+        assert!(node["samples"][0].get("tMs").is_some(), "tMs camelCase");
+        assert!(
+            node["samples"][0].get("offsetNs").is_some(),
+            "offsetNs camelCase"
+        );
         // message=None → skip_serializing_if 省略该键。
         assert!(v.get("message").is_none(), "None message 应省略");
     }
@@ -805,6 +861,50 @@ mod tests {
         let (max_ns, mean_ns) = steady_state_offset(&node, &gm).unwrap();
         assert!((max_ns - 1.0).abs() < 1e-6, "max≈1ns, got {max_ns}");
         assert!((mean_ns - 1.0).abs() < 1e-6, "瞬态不计入稳态");
+    }
+
+    #[test]
+    fn offset_trajectory_signed_full_and_downsampled() {
+        let gm = NodeSeries {
+            module: "es1.clock".into(),
+            times: vec![0.0, 1.0, 2.0],
+            values: vec![0.0, 0.0, 0.0],
+        };
+        // 短序列：全保留、带符号（node 落后 GM → 负）。
+        let node = NodeSeries {
+            module: "sw1.clock".into(),
+            times: vec![0.0, 1.0, 2.0],
+            values: vec![1e-9, -2e-9, 0.0],
+        };
+        let traj = offset_trajectory(&node, &gm);
+        assert_eq!(traj.len(), 3);
+        assert!((traj[0].t_ms - 0.0).abs() < 1e-9 && (traj[0].offset_ns - 1.0).abs() < 1e-6);
+        assert!((traj[1].offset_ns + 2.0).abs() < 1e-6, "带符号: 负偏差");
+        assert!((traj[2].t_ms - 2000.0).abs() < 1e-6, "t 转 ms");
+
+        // 长序列：降采样封顶、且必含末点。
+        let n = 1000usize;
+        let times: Vec<f64> = (0..n).map(|i| i as f64 * 1e-3).collect();
+        let big = NodeSeries {
+            module: "sw1.clock".into(),
+            times: times.clone(),
+            values: vec![0.0; n],
+        };
+        let gm_big = NodeSeries {
+            module: "es1.clock".into(),
+            times: times.clone(),
+            values: vec![0.0; n],
+        };
+        let traj = offset_trajectory(&big, &gm_big);
+        assert!(
+            traj.len() <= MAX_TRAJECTORY_SAMPLES + 1,
+            "降采样封顶: {}",
+            traj.len()
+        );
+        assert!(
+            (traj.last().unwrap().t_ms - times[n - 1] * 1e3).abs() < 1e-6,
+            "含末点"
+        );
     }
 
     fn timing2() -> [SimNodeTiming; 2] {

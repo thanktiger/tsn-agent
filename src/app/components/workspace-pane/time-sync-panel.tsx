@@ -5,6 +5,7 @@ import {
   invokeRunTimesyncSim,
   invokeSimExplain,
   isFullyConverged,
+  type PerNodeOffset,
   type SimOverrideForm,
   type SimResult,
   type SimUiState,
@@ -321,6 +322,7 @@ function SimResultArea({
           </tbody>
         </table>
       )}
+      {showResultTable && <OffsetChart perNode={result.perNode} />}
 
       {showExplain && (
         <div className="sim-explain">
@@ -349,5 +351,110 @@ function SimResultArea({
         </div>
       )}
     </div>
+  );
+}
+
+const CHART_COLORS = [
+  "#3b82f6",
+  "#ef4444",
+  "#10b981",
+  "#f59e0b",
+  "#8b5cf6",
+  "#ec4899",
+  "#14b8a6",
+  "#a3a3a3",
+];
+
+/**
+ * 从节点偏差随仿真时间的抖动曲线（零依赖 SVG）：x=仿真时间 ms，y=相对 GM 偏差 ns（带符号）。
+ * 每从节点一条折线 + 0 基线 + 图例。数据来自后端 perNode[].samples（已降采样封顶）。
+ */
+function OffsetChart({ perNode }: { perNode: PerNodeOffset[] }) {
+  const nodes = perNode.filter((n) => n.samples.length > 0);
+  if (nodes.length === 0) {
+    return null;
+  }
+
+  const W = 680;
+  const H = 260;
+  const ml = 56;
+  const mr = 12;
+  const mt = 16;
+  const mb = 30;
+  const pw = W - ml - mr;
+  const ph = H - mt - mb;
+
+  let tMax = 0;
+  let yMin = 0;
+  let yMax = 0;
+  for (const n of nodes) {
+    for (const s of n.samples) {
+      if (s.tMs > tMax) tMax = s.tMs;
+      if (s.offsetNs < yMin) yMin = s.offsetNs;
+      if (s.offsetNs > yMax) yMax = s.offsetNs;
+    }
+  }
+  // 防 0 区间：上下各留一点边距，避免除零和线贴边。
+  if (yMax === yMin) {
+    yMax += 1;
+    yMin -= 1;
+  }
+  const tSpan = tMax > 0 ? tMax : 1;
+  const ySpan = yMax - yMin;
+  const xAt = (t: number) => ml + (t / tSpan) * pw;
+  const yAt = (v: number) => mt + (1 - (v - yMin) / ySpan) * ph;
+  const baseline = yAt(0);
+
+  return (
+    <figure className="sim-chart">
+      <figcaption>从节点偏差随仿真时间（相对 GM）</figcaption>
+      <svg
+        viewBox={`0 0 ${W} ${H}`}
+        className="sim-chart-svg"
+        role="img"
+        aria-label="从节点偏差随仿真时间抖动曲线"
+        preserveAspectRatio="xMidYMid meet"
+      >
+        {/* 坐标框 + 0 基线 */}
+        <line x1={ml} y1={mt} x2={ml} y2={mt + ph} className="sim-chart-axis" />
+        <line x1={ml} y1={mt + ph} x2={ml + pw} y2={mt + ph} className="sim-chart-axis" />
+        <line x1={ml} y1={baseline} x2={ml + pw} y2={baseline} className="sim-chart-baseline" />
+        {/* y 轴上下界 + x 轴末点标注 */}
+        <text x={ml - 6} y={mt + 4} className="sim-chart-tick" textAnchor="end">
+          {yMax.toFixed(1)} ns
+        </text>
+        <text x={ml - 6} y={mt + ph} className="sim-chart-tick" textAnchor="end">
+          {yMin.toFixed(1)} ns
+        </text>
+        <text x={ml + pw} y={mt + ph + 18} className="sim-chart-tick" textAnchor="end">
+          {tMax.toFixed(0)} ms
+        </text>
+        <text x={ml} y={mt + ph + 18} className="sim-chart-tick" textAnchor="start">
+          0
+        </text>
+        {/* 各从节点折线 */}
+        {nodes.map((n, i) => (
+          <polyline
+            key={n.mid}
+            className="sim-chart-line"
+            fill="none"
+            stroke={CHART_COLORS[i % CHART_COLORS.length]}
+            points={n.samples.map((s) => `${xAt(s.tMs)},${yAt(s.offsetNs)}`).join(" ")}
+          />
+        ))}
+      </svg>
+      <ul className="sim-chart-legend">
+        {nodes.map((n, i) => (
+          <li key={n.mid}>
+            <span
+              className="sim-chart-swatch"
+              style={{ background: CHART_COLORS[i % CHART_COLORS.length] }}
+              aria-hidden="true"
+            />
+            {n.mid}
+          </li>
+        ))}
+      </ul>
+    </figure>
   );
 }

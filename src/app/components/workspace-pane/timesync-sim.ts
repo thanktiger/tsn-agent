@@ -7,6 +7,12 @@ import { invoke } from "@tauri-apps/api/core";
  * 运行态 SimUiState 持于 App 级（非 tab 组件内）——切 tab 不取消命令、切回按 status 恢复。
  */
 
+/** offset(t) 抖动轨迹采样点：仿真时间（ms）+ 相对 GM 偏差（ns，带符号）。 */
+export interface OffsetSample {
+  tMs: number;
+  offsetNs: number;
+}
+
 export interface PerNodeOffset {
   mid: string;
   /** 稳态 max|offset|（纳秒）。 */
@@ -16,6 +22,8 @@ export interface PerNodeOffset {
   converged: boolean;
   /** 是否在该节点 offset_threshold 参考线内（仅参考、非质量判定）。 */
   withinThreshold: boolean;
+  /** 完整 offset(t) 抖动轨迹（降采样封顶），供画收敛曲线。 */
+  samples: OffsetSample[];
 }
 
 /** converged | empty | load_failed | unreachable | stale_tree | bundle_error | parse_failed */
