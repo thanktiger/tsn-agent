@@ -186,15 +186,23 @@ pub struct NodeSeries {
 /// 期望列：`module`、`name`、`vectime`、`vecvalue`（vectime/vecvalue 是空格分隔的数值串）。
 /// 解析不到任何向量行 → Err（caller 判「结果为空/解析失败」）。
 pub fn parse_timechanged_csv(csv: &str) -> Result<Vec<NodeSeries>, String> {
+    // 定位真正的 CSV-R 表头行：opp_env 会在 stdout 前置环境横幅（`Environment for ... is
+    // ready.`、构建时还有 `INFO`/`building` 行），行数不固定，须扫描跳过而非假定第一行。
     let mut lines = csv.lines();
-    let header = lines.next().ok_or_else(|| "CSV 空".to_string())?;
-    let cols: Vec<&str> = split_csv_row(header);
-    let idx = |name: &str| cols.iter().position(|c| c.trim() == name);
-    let (Some(mi), Some(ni), Some(ti), Some(vi)) =
-        (idx("module"), idx("name"), idx("vectime"), idx("vecvalue"))
-    else {
-        return Err("CSV 缺 module/name/vectime/vecvalue 列".to_string());
-    };
+    let mut header_cols: Option<Vec<&str>> = None;
+    for line in lines.by_ref() {
+        let cols: Vec<&str> = split_csv_row(line);
+        let has_all = ["module", "name", "vectime", "vecvalue"]
+            .iter()
+            .all(|want| cols.iter().any(|c| c.trim() == *want));
+        if has_all {
+            header_cols = Some(cols);
+            break;
+        }
+    }
+    let cols = header_cols.ok_or_else(|| "CSV 缺 module/name/vectime/vecvalue 列".to_string())?;
+    let idx = |name: &str| cols.iter().position(|c| c.trim() == name).unwrap();
+    let (mi, ni, ti, vi) = (idx("module"), idx("name"), idx("vectime"), idx("vecvalue"));
 
     let mut out = Vec::new();
     for line in lines {
@@ -742,6 +750,20 @@ mod tests {
         let series = parse_timechanged_csv(csv).unwrap();
         assert_eq!(series.len(), 2, "只取 timeChanged 行");
         assert_eq!(series[0].times, vec![0.0, 1.0, 2.0]);
+    }
+
+    #[test]
+    fn parse_csv_skips_opp_env_banner_and_reads_real_csvr_header() {
+        // 真机：opp_env 在 stdout 前置环境横幅，且真 CSV-R 头含 type/attrname/attrvalue 列。
+        let csv = "Environment for 'omnetpp-6.4.0' in directory '/x' is ready.\n\
+            Environment for INET 4.6.0 in directory '/y' is ready.\n\
+            run,type,module,name,attrname,attrvalue,vectime,vecvalue\n\
+            G-0,runattr,,,configname,General,,\n\
+            G-0,vector,TsnAgentTimesyncNetwork.es1.clock,timeChanged:vector,,,0 1 2,0.0 0.0 0.0\n\
+            G-0,vector,TsnAgentTimesyncNetwork.sw1.clock,timeChanged:vector,,,0 1 2,0.0 0.001 0.002\n";
+        let series = parse_timechanged_csv(csv).unwrap();
+        assert_eq!(series.len(), 2);
+        assert_eq!(series[1].values, vec![0.0, 0.001, 0.002]);
     }
 
     #[test]
