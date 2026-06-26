@@ -144,19 +144,57 @@ describe("TimeSyncPanel 运行/结果（U11）", () => {
     expect(within(table).getByText("12.3 ns")).toBeInTheDocument();
   });
 
-  it("收敛结果在表下渲染抖动曲线（每从节点一条线 + 阈值带 + 短名图例）", () => {
+  it("收敛结果在表下渲染抖动曲线（每从节点一条线 + 短名图例）", () => {
     render(
       <TimeSyncPanel {...baseProps({ simState: { status: "done", result: convergedResult() } })} />,
     );
     const chart = screen.getByRole("img", { name: "从节点偏差随仿真时间抖动曲线" });
     expect(chart).toBeInTheDocument();
     expect(chart.querySelectorAll("polyline.sim-chart-line")).toHaveLength(2);
-    // ±1µs 收敛阈值带。
-    expect(chart.querySelector("rect.sim-chart-threshold-band")).not.toBeNull();
     // 图例与表格用短名（sw1/es2，各出现在表格+图例），完整模块路径只放 title 不进文本。
     expect(screen.getAllByText("sw1").length).toBeGreaterThanOrEqual(1);
     expect(screen.getAllByText("es2").length).toBeGreaterThanOrEqual(1);
     expect(screen.queryByText("TsnAgentTimesyncNetwork.sw1.clock")).not.toBeInTheDocument();
+  });
+
+  it("偏差远小于阈值（如 Constant）→ y 轴贴合数据、阈值改顶部标注而非压平", () => {
+    render(
+      <TimeSyncPanel {...baseProps({ simState: { status: "done", result: convergedResult() } })} />,
+    );
+    const chart = screen.getByRole("img", { name: "从节点偏差随仿真时间抖动曲线" });
+    // 数据 <40ns、阈值 1µs 在视图外 → 不画带，改顶部标注。
+    expect(chart.querySelector("rect.sim-chart-threshold-band")).toBeNull();
+    expect(screen.getByText(/±1µs 阈值（远高于此范围/)).toBeInTheDocument();
+    // y 轴上界贴合数据（几十 ns 量级，而非被 1µs 撑到上千）。
+    const topLabel = screen.getByText(/^\d+ ns$/);
+    expect(Number(topLabel.textContent?.replace(" ns", ""))).toBeLessThan(200);
+  });
+
+  it("偏差接近阈值（如 Random，几百 ns）→ 纳入 ±1µs 阈值带", () => {
+    const randomLike: SimResult = {
+      caliber: "timesync_simulated",
+      status: "converged",
+      overall: "1 个从节点收敛",
+      perNode: [
+        {
+          mid: "TsnAgentTimesyncNetwork.es3.clock",
+          maxOffsetNs: 750,
+          meanOffsetNs: 120,
+          converged: true,
+          withinThreshold: true,
+          samples: [
+            { tMs: 0, offsetNs: 600 },
+            { tMs: 30000, offsetNs: -500 },
+            { tMs: 60000, offsetNs: 450 },
+          ],
+        },
+      ],
+    };
+    render(<TimeSyncPanel {...baseProps({ simState: { status: "done", result: randomLike } })} />);
+    const chart = screen.getByRole("img", { name: "从节点偏差随仿真时间抖动曲线" });
+    // 数据约 ±600ns 接近 1µs → 阈值带应纳入视图。
+    expect(chart.querySelector("rect.sim-chart-threshold-band")).not.toBeNull();
+    expect(screen.getByText("±1µs 阈值")).toBeInTheDocument();
   });
 
   it("空结果不渲染全绿（显示 message、无表格）", () => {
