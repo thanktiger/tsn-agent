@@ -6,7 +6,8 @@ import { invoke } from "@tauri-apps/api/core";
 export interface InetHostConfig {
   host: string;
   user: string;
-  inetPath: string;
+  /** INET 环境命令前缀：以 `<inetEnvCmd> -c '<cmd>'` 在 OMNeT++/INET 环境里跑 inet 与 opp_scavetool。 */
+  inetEnvCmd: string;
 }
 
 /** 读 UI 持久的远端主机配置（无记录时后端回播种当前默认）。 */

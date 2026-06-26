@@ -17,7 +17,8 @@ use std::time::{Duration, Instant};
 pub struct InetHostConfig {
     pub host: String,
     pub user: String,
-    pub inet_path: String,
+    /// INET 环境命令前缀（见 RemoteConfig.inet_env_cmd）；序列化为 `inetEnvCmd`。
+    pub inet_env_cmd: String,
 }
 
 /// host/user 字符集校验（R20 + security-lens）：限 `[a-zA-Z0-9._-]`、非空。
@@ -37,13 +38,20 @@ pub struct InetBundle {
     pub manifest_json: String,
 }
 
-/// 远端主机配置。本期固定 boss 那台（多主机/UI 配置 deferred）；密钥靠 ssh-agent，不存密码。
+/// 开发期默认 INET 环境命令前缀（真机校正 2026-06-26）：把任意命令丢进 opp_env 的
+/// OMNeT++/INET 环境里跑（inet 与 opp_scavetool 都在该环境 PATH 上）。app 以
+/// `<inet_env_cmd> -c '<cmd>'` 调用。源自 boss 那台的 `~/.local/bin/inet` wrapper。
+const DEFAULT_INET_ENV_CMD: &str = "source /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh && /home/zhang/.local/bin/opp_env run inet-4.6.0 -w /home/zhang/inet-workspace --build-modes=release";
+
+/// 远端主机配置。密钥靠 ssh-agent，不存密码。
 #[derive(Debug, Clone)]
 pub struct RemoteConfig {
     pub host: String,
     pub user: String,
     pub remote_base_dir: String,
-    pub inet_path: String,
+    /// INET 环境命令前缀：以 `<inet_env_cmd> -c '<cmd>'` 在 OMNeT++/INET 环境里跑命令。
+    /// 自用工具、信任用户：这是命令模板、直接执行，不做字符集校验（同 inet_path 的安全口径）。
+    pub inet_env_cmd: String,
     pub timeout: Duration,
 }
 
@@ -54,13 +62,13 @@ impl RemoteConfig {
         let user = std::env::var("TSN_AGENT_INET_USER").unwrap_or_else(|_| "zhang".into());
         let remote_base_dir = std::env::var("TSN_AGENT_INET_BASEDIR")
             .unwrap_or_else(|_| "/home/zhang/tsn-agent-runs".into());
-        let inet_path = std::env::var("TSN_AGENT_INET_PATH")
-            .unwrap_or_else(|_| "/home/zhang/.local/bin/inet".into());
+        let inet_env_cmd =
+            std::env::var("TSN_AGENT_INET_ENV").unwrap_or_else(|_| DEFAULT_INET_ENV_CMD.into());
         Self {
             host,
             user,
             remote_base_dir,
-            inet_path,
+            inet_env_cmd,
             timeout: Duration::from_secs(120),
         }
     }
@@ -98,14 +106,20 @@ pub trait RemoteRunner {
     ) -> Result<SimRunOutcome, RemoteError>;
 }
 
-/// 远端 scavetool 取数命令串（KTD8 shell-quote filter 与路径）：cd 进 run 目录、
-/// export timeChanged 到 CSV、再 cat 回传 stdout。filter/路径都过 sh_squote 防注入。
-pub fn remote_scavetool_cmd(remote_dir: &str, scavetool_filter: &str) -> String {
-    format!(
+/// 远端 scavetool 取数命令串：在 inet_env_cmd 的环境里（opp_scavetool 在该环境 PATH 上）
+/// cd 进 run 目录、export timeChanged 到 CSV、再 cat 回传 stdout。filter/路径都过 sh_squote 防注入，
+/// inner 整体再 sh_squote 作为 `-c` 单参（嵌套引号安全）。
+pub fn remote_scavetool_cmd(
+    cfg: &RemoteConfig,
+    remote_dir: &str,
+    scavetool_filter: &str,
+) -> String {
+    let inner = format!(
         "cd {} && opp_scavetool export -f {} -F CSV-R -o timechanged.csv results/*.vec >/dev/null 2>&1 && cat timechanged.csv",
         sh_squote(remote_dir),
         sh_squote(scavetool_filter)
-    )
+    );
+    format!("{} -c {}", cfg.inet_env_cmd, sh_squote(&inner))
 }
 
 // ---- 纯函数（可单测）：目录名 / argv / 脱敏 ----
@@ -161,13 +175,14 @@ fn sh_squote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
-/// 远端运行命令串：cd 到 bundle 目录跑 inet（路径 shell-quote，KTD8）。
+/// 远端运行命令串：在 inet_env_cmd 的 OMNeT++/INET 环境里 cd 到 bundle 目录跑 inet。
+/// inet 在该环境 PATH 上；inner 整体 sh_squote 后作为 `-c` 的单个参数（嵌套引号安全）。
 pub fn remote_run_cmd(cfg: &RemoteConfig, remote_dir: &str) -> String {
-    format!(
-        "cd {} && {} -u Cmdenv -f omnetpp.ini -n .",
-        sh_squote(remote_dir),
-        sh_squote(&cfg.inet_path)
-    )
+    let inner = format!(
+        "cd {} && inet -u Cmdenv -f omnetpp.ini -n .",
+        sh_squote(remote_dir)
+    );
+    format!("{} -c {}", cfg.inet_env_cmd, sh_squote(&inner))
 }
 
 /// 远端清理命令串：rm -rf 受 is_safe 约束的 run 目录（调用方须先校验 dir 安全）。
@@ -330,7 +345,10 @@ impl RemoteRunner for SshRunner {
         let (csv, scavetool_failed) = match run_with_timeout(
             make_cmd(
                 &ssh,
-                build_ssh_argv(cfg, &remote_scavetool_cmd(&remote_dir, scavetool_filter)),
+                build_ssh_argv(
+                    cfg,
+                    &remote_scavetool_cmd(cfg, &remote_dir, scavetool_filter),
+                ),
             ),
             cfg.timeout,
         ) {
@@ -461,7 +479,7 @@ mod tests {
             host: "100.104.38.106".into(),
             user: "zhang".into(),
             remote_base_dir: "/home/zhang/tsn-agent-runs".into(),
-            inet_path: "/home/zhang/.local/bin/inet".into(),
+            inet_env_cmd: "OPPENV run inet-4.6.0 --build-modes=release".into(),
             timeout: Duration::from_secs(120),
         }
     }
@@ -476,8 +494,23 @@ mod tests {
         assert!(argv.iter().any(|a| a == "BatchMode=yes"));
         assert!(argv.iter().any(|a| a == "zhang@100.104.38.106"));
         let last = argv.last().unwrap();
-        assert!(last.contains("cd '/home/zhang/tsn-agent-runs/run-ab'"));
-        assert!(last.contains("-u Cmdenv -f omnetpp.ini -n ."));
+        // inet 在 inet_env_cmd 环境里跑：`<env> -c '<inner>'`，inner 含 cd run 目录 + inet。
+        assert!(last.starts_with("OPPENV run inet-4.6.0 --build-modes=release -c "));
+        assert!(last.contains("run-ab"));
+        assert!(last.contains("inet -u Cmdenv -f omnetpp.ini -n ."));
+    }
+
+    #[test]
+    fn scavetool_cmd_runs_in_inet_env() {
+        // 取数也走 inet_env_cmd 环境（opp_scavetool 在该环境 PATH 上）；filter 经 sh_squote。
+        let cmd = remote_scavetool_cmd(
+            &cfg(),
+            "/home/zhang/tsn-agent-runs/run-x",
+            "name=~timeChanged",
+        );
+        assert!(cmd.starts_with("OPPENV run inet-4.6.0 --build-modes=release -c "));
+        assert!(cmd.contains("opp_scavetool export -f"));
+        assert!(cmd.contains("cat timechanged.csv"));
     }
 
     #[test]
@@ -531,20 +564,20 @@ mod tests {
     }
 
     #[test]
-    fn inet_host_config_uses_camelcase_inet_path() {
-        // 前端 get/set_inet_host_config 读 inetPath（camelCase），非 inet_path。
+    fn inet_host_config_uses_camelcase_inet_env_cmd() {
+        // 前端 get/set_inet_host_config 读 inetEnvCmd（camelCase），非 inet_env_cmd。
         let cfg = InetHostConfig {
             host: "h".into(),
             user: "u".into(),
-            inet_path: "/opt/inet".into(),
+            inet_env_cmd: "opp_env run inet-4.6.0".into(),
         };
         let v: serde_json::Value = serde_json::to_value(&cfg).unwrap();
-        assert!(v.get("inetPath").is_some(), "inetPath camelCase");
-        assert!(v.get("inet_path").is_none());
+        assert!(v.get("inetEnvCmd").is_some(), "inetEnvCmd camelCase");
+        assert!(v.get("inet_env_cmd").is_none());
         // 回程：前端发 camelCase → 反序列化回结构。
         let back: InetHostConfig =
-            serde_json::from_str(r#"{"host":"h2","user":"u2","inetPath":"/i"}"#).unwrap();
-        assert_eq!(back.inet_path, "/i");
+            serde_json::from_str(r#"{"host":"h2","user":"u2","inetEnvCmd":"x"}"#).unwrap();
+        assert_eq!(back.inet_env_cmd, "x");
     }
 
     #[test]

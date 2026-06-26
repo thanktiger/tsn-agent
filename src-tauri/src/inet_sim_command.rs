@@ -64,10 +64,10 @@ async fn resolve_remote_config(pool: &sqlx::Pool<sqlx::Sqlite>) -> Result<Remote
         ui.as_ref().map(|c| c.user.as_str()),
         &base.user,
     );
-    let inet_path = pick(
-        "TSN_AGENT_INET_PATH",
-        ui.as_ref().map(|c| c.inet_path.as_str()),
-        &base.inet_path,
+    let inet_env_cmd = pick(
+        "TSN_AGENT_INET_ENV",
+        ui.as_ref().map(|c| c.inet_env_cmd.as_str()),
+        &base.inet_env_cmd,
     );
     if !is_valid_host_or_user(&host) {
         return Err(format!(
@@ -83,7 +83,7 @@ async fn resolve_remote_config(pool: &sqlx::Pool<sqlx::Sqlite>) -> Result<Remote
         host,
         user,
         remote_base_dir: base.remote_base_dir,
-        inet_path,
+        inet_env_cmd,
         timeout: base.timeout,
     })
 }
@@ -102,7 +102,7 @@ pub async fn get_inet_host_config(
     Ok(InetHostConfig {
         host: base.host,
         user: base.user,
-        inet_path: base.inet_path,
+        inet_env_cmd: base.inet_env_cmd,
     })
 }
 
@@ -634,7 +634,7 @@ mod tests {
         let cfg = InetHostConfig {
             host: "10.0.0.5".into(),
             user: "alice".into(),
-            inet_path: "/opt/inet".into(),
+            inet_env_cmd: "opp_env mock".into(),
         };
         let json = serde_json::to_string(&cfg).unwrap();
         sqlx::query(
@@ -651,7 +651,9 @@ mod tests {
             let resolved = resolve_remote_config(&pool).await.unwrap();
             assert_eq!(resolved.host, "10.0.0.5");
             assert_eq!(resolved.user, "alice");
-            assert_eq!(resolved.inet_path, "/opt/inet");
+            if std::env::var("TSN_AGENT_INET_ENV").is_err() {
+                assert_eq!(resolved.inet_env_cmd, "opp_env mock");
+            }
         }
     }
 
@@ -664,7 +666,7 @@ mod tests {
         let bad = InetHostConfig {
             host: "evil; rm -rf".into(),
             user: "zhang".into(),
-            inet_path: "/opt/inet".into(),
+            inet_env_cmd: "opp_env mock".into(),
         };
         let json = serde_json::to_string(&bad).unwrap();
         sqlx::query(

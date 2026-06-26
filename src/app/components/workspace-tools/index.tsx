@@ -438,7 +438,7 @@ function SkillToolPanel() {
 const HOST_KEY_HINT = "新主机首次连接需先手动 ssh 建立 host key 信任";
 
 /**
- * U5：远端 INET 主机配置表单（host / user / inet 路径，自由输入）。
+ * U5：远端 INET 主机配置表单（host / user / INET 环境命令，自由输入）。
  * doc-review 决定：显式「保存」提交（非 blur 自动存）；保存后关抽屉；关闭不保存则回滚
  * （表单 form-local，重开时重新从后端加载）。known_hosts 常驻提示挂在主机输入框下方。
  */
@@ -509,13 +509,17 @@ function InetHostConfigForm({ onClose }: { onClose: () => void }) {
             />
           </label>
           <label className="sim-field">
-            <span>INET 路径</span>
+            <span>INET 环境命令</span>
             <input
               type="text"
-              value={config.inetPath}
-              onChange={(event) => setConfig({ ...config, inetPath: event.target.value })}
+              value={config.inetEnvCmd}
+              onChange={(event) => setConfig({ ...config, inetEnvCmd: event.target.value })}
             />
           </label>
+          <p className="host-form-hint">
+            在此环境里跑 inet 与 opp_scavetool（如 opp_env wrapper），app 以 “命令 -c 实际指令”
+            方式调用。一般用默认即可。
+          </p>
           <div className="drawer-actions">
             <button
               className="btn primary"
