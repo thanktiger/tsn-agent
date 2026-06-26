@@ -409,12 +409,17 @@ function OffsetChart({ perNode }: { perNode: PerNodeOffset[] }) {
       if (a > rawAbsMax) rawAbsMax = a;
     }
   }
-  // y 轴贴合实际数据：取 |offset| 的 95 分位（×1.3 余量）作对称上界，让启动瞬态的大锯齿
-  // 溢出截断、稳态抖动看得清。阈值不参与定界——否则数据远小于阈值时（如 Constant 振荡器
-  // 偏差才几十 ns）曲线会被 ±1µs 带压成贴底直线。
+  // y 轴定界自适应（取 |offset| 的 95 分位 ×1.3 裁掉启动瞬态作数据界）：
+  // - 数据接近阈值（≥1/3）→ 把 ±1µs 阈值纳入视图，显示参考带（如 Random 稳态几百 ns）；
+  // - 数据远小于阈值（如 Constant 偏差才几十 ns）→ 贴合数据，否则会被 ±1µs 带压成贴底直线，
+  //   阈值改顶部标注。
   absVals.sort((a, b) => a - b);
   const p95 = absVals[Math.floor(absVals.length * 0.95)] ?? 0;
-  const yBound = Math.max(p95 * 1.3, 1);
+  const dataBound = Math.max(p95 * 1.3, 1);
+  const yBound =
+    dataBound >= CONVERGENCE_THRESHOLD_NS / 3
+      ? Math.max(dataBound, CONVERGENCE_THRESHOLD_NS * 1.15)
+      : dataBound;
   const clipped = rawAbsMax > yBound;
   const thresholdInView = CONVERGENCE_THRESHOLD_NS <= yBound;
 

@@ -170,6 +170,33 @@ describe("TimeSyncPanel 运行/结果（U11）", () => {
     expect(Number(topLabel.textContent?.replace(" ns", ""))).toBeLessThan(200);
   });
 
+  it("偏差接近阈值（如 Random，几百 ns）→ 纳入 ±1µs 阈值带", () => {
+    const randomLike: SimResult = {
+      caliber: "timesync_simulated",
+      status: "converged",
+      overall: "1 个从节点收敛",
+      perNode: [
+        {
+          mid: "TsnAgentTimesyncNetwork.es3.clock",
+          maxOffsetNs: 750,
+          meanOffsetNs: 120,
+          converged: true,
+          withinThreshold: true,
+          samples: [
+            { tMs: 0, offsetNs: 600 },
+            { tMs: 30000, offsetNs: -500 },
+            { tMs: 60000, offsetNs: 450 },
+          ],
+        },
+      ],
+    };
+    render(<TimeSyncPanel {...baseProps({ simState: { status: "done", result: randomLike } })} />);
+    const chart = screen.getByRole("img", { name: "从节点偏差随仿真时间抖动曲线" });
+    // 数据约 ±600ns 接近 1µs → 阈值带应纳入视图。
+    expect(chart.querySelector("rect.sim-chart-threshold-band")).not.toBeNull();
+    expect(screen.getByText("±1µs 阈值")).toBeInTheDocument();
+  });
+
   it("空结果不渲染全绿（显示 message、无表格）", () => {
     render(
       <TimeSyncPanel {...baseProps({ simState: { status: "done", result: emptyResult() } })} />,
