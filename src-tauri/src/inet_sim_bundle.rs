@@ -27,6 +27,10 @@ const MAX_DATARATE_MBPS: f64 = 100_000.0;
 const DEFAULT_DRIFT_PPM: f64 = 100.0;
 const DEFAULT_SIM_TIME_S: f64 = 1.0;
 const NOMINAL_TICK_LENGTH: &str = "10ns";
+/// RandomDriftOscillator 必填项：漂移率更新间隔（取自 INET gptp showcase）。
+const RANDOM_CHANGE_INTERVAL: &str = "12.5ms";
+/// 每次更新的漂移率增量（随机游走步长，showcase 默认）。
+const RANDOM_DRIFT_STEP_PPM: f64 = 1.0;
 const LINK_LENGTH: &str = "10m";
 const SEED_SET: u32 = 0;
 
@@ -341,9 +345,23 @@ fn build_ini(
     // 振荡器：每节点挂时钟振荡器（漂移驱动偏差）。
     match overrides.oscillator {
         OscillatorKind::Random => {
+            // RandomDriftOscillator 用 initialDriftRate（非 driftRate，后者它没有 → 静默丢弃），
+            // changeInterval 必填（无默认，缺则 Cmdenv 停下等输入）。漂移率在 [-drift, drift] 内随机游走。
             ini.push_str("**.clock.oscillator.typename = \"RandomDriftOscillator\"\n");
             ini.push_str(&format!(
-                "**.clock.oscillator.driftRate = uniform(-{drift}ppm, {drift}ppm)\n"
+                "**.clock.oscillator.changeInterval = {RANDOM_CHANGE_INTERVAL}\n"
+            ));
+            ini.push_str(&format!(
+                "**.clock.oscillator.initialDriftRate = uniform(-{drift}ppm, {drift}ppm)\n"
+            ));
+            ini.push_str(&format!(
+                "**.clock.oscillator.driftRateChange = uniform(-{RANDOM_DRIFT_STEP_PPM}ppm, {RANDOM_DRIFT_STEP_PPM}ppm)\n"
+            ));
+            ini.push_str(&format!(
+                "**.clock.oscillator.driftRateChangeLowerLimit = -{drift}ppm\n"
+            ));
+            ini.push_str(&format!(
+                "**.clock.oscillator.driftRateChangeUpperLimit = {drift}ppm\n"
             ));
         }
         OscillatorKind::Constant => {
@@ -492,6 +510,15 @@ mod tests {
         assert!(ini.contains("*.*.hasTimeSynchronization = true"));
         assert!(ini.contains("seed-set = 0"));
         assert!(ini.contains("RandomDriftOscillator"));
+        // 真机校正：RandomDriftOscillator 的 changeInterval 必填（无默认会停下等输入）。
+        assert!(
+            ini.contains("**.clock.oscillator.changeInterval = 12.5ms"),
+            "{ini}"
+        );
+        assert!(
+            ini.contains("**.clock.oscillator.initialDriftRate = uniform"),
+            "{ini}"
+        );
         assert!(ini.contains("nominalTickLength = 10ns"));
         assert!(ini.contains("**.clock.result-recording-modes = +vector"));
         // referenceClock 指向 GM 的 ned 名（es1）。
