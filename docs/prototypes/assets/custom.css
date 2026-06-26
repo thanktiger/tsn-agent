@@ -1,0 +1,189 @@
+html,
+body {
+  max-width: 100%;
+  overflow-x: hidden;
+}
+
+html {
+  scroll-padding-top: calc(var(--dim-header-height, 2.6rem) + 0.75rem);
+}
+
+:root {
+  --docs-sidebar-width: clamp(16rem, 24vw, 22rem);
+}
+
+.tsd-page-toolbar {
+  position: fixed !important;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 30 !important;
+}
+
+body {
+  padding-top: var(--dim-header-height, 2.6rem);
+}
+
+/* Keep TypeDoc usable on 14-inch laptop screens: left navigation, right content. */
+@media (min-width: 770px) {
+  .container {
+    max-width: none;
+    box-sizing: border-box;
+    width: 100%;
+  }
+
+  .container-main {
+    display: grid !important;
+    grid-template-columns: minmax(0, 1fr) !important;
+    grid-template-areas: "content" !important;
+    column-gap: 0;
+    max-width: 100vw;
+    padding-left: var(--docs-sidebar-width);
+    align-items: start;
+  }
+
+  .col-sidebar {
+    display: flex !important;
+    flex-direction: column;
+    grid-area: sidebar !important;
+    min-width: 0;
+    /* 桌面端固定左侧栏:右侧正文滚动时菜单始终可见,菜单过长时自身滚动 */
+    position: fixed !important;
+    left: 0;
+    top: var(--dim-header-height, 2.6rem);
+    bottom: 0;
+    width: var(--docs-sidebar-width);
+    max-height: none;
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding: 1rem 1rem 1.5rem 2rem;
+    box-sizing: border-box;
+    background: var(--color-background);
+    border-right: 1px solid var(--color-accent);
+    z-index: 5;
+  }
+
+  .col-content {
+    grid-area: content !important;
+    min-width: 0;
+    width: 100%;
+    max-width: 100%;
+    overflow-x: auto;
+    overflow-y: visible;
+  }
+
+  .site-menu {
+    order: 1;
+  }
+
+  .page-menu {
+    order: 2;
+  }
+
+  .page-menu,
+  .site-menu {
+    max-height: none !important;
+    overflow: visible !important;
+    padding-left: 0 !important;
+    position: static !important;
+    top: auto !important;
+  }
+}
+
+@media (min-width: 770px) and (max-width: 1100px) {
+  .container {
+    padding-left: 1rem;
+    padding-right: 1rem;
+  }
+
+  .container-main {
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+
+  .col-content {
+    padding-right: 0;
+  }
+}
+
+@media (min-width: 770px) and (max-width: 1100px) {
+  :root {
+    --docs-sidebar-width: 18rem;
+  }
+}
+
+.tsd-panel,
+.tsd-typography {
+  box-sizing: border-box;
+  min-width: 0;
+}
+
+.tsd-panel.tsd-typography {
+  max-width: 100%;
+  overflow: visible;
+}
+
+/* 表格自适应:列宽按内容自动分配,单元格内自由换行,长字符串/长 JSON 路径自动断行,
+   避免右侧内容区出现水平滚动条 */
+.tsd-typography table {
+  display: table;
+  width: 100%;
+  max-width: 100%;
+  table-layout: auto;
+  border-collapse: collapse;
+}
+
+.tsd-typography th,
+.tsd-typography td {
+  white-space: normal;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  vertical-align: top;
+  padding: 0.4em 0.6em;
+}
+
+/* 表格内的 inline <code>(如 `oss_cfg.json` / `0x40500000`)允许跟着换行,
+   避免长 JSON 路径或寄存器名把整列撑爆 */
+.tsd-typography table code {
+  white-space: normal;
+  word-break: break-all;
+  overflow-wrap: anywhere;
+}
+
+/* 代码块 <pre> 保持不换行(代码块可读性优先),超长时单独横滚 */
+.tsd-typography pre {
+  max-width: 100%;
+  overflow-x: auto;
+  white-space: pre;
+  word-break: normal;
+}
+
+.tsd-typography img,
+.tsd-typography svg {
+  max-width: 100%;
+}
+
+#tsd-search-results > li.doc-search-result > a {
+  display: block;
+  padding: 0.5rem 0.625rem;
+  text-decoration: none;
+}
+
+#tsd-search-results > li.doc-search-result > a .doc-search-title {
+  display: block;
+  color: var(--color-text);
+  font-weight: 600;
+}
+
+#tsd-search-results > li.doc-search-result > a .doc-search-snippet {
+  display: block;
+  color: var(--color-text-aside);
+  font-size: 0.875rem;
+  line-height: 1.35;
+  margin-top: 0.15rem;
+}
+
+#tsd-search-results > li.doc-search-result > a mark {
+  background: var(--color-background-warning);
+  color: var(--color-warning-text);
+  padding: 0 0.1em;
+}
