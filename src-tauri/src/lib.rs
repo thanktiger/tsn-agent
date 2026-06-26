@@ -2,6 +2,7 @@ mod backend_e2e;
 mod commands;
 mod db;
 mod eval_command;
+mod hardware_api;
 mod inet_remote;
 mod inet_sim_bundle;
 mod inet_sim_command;
