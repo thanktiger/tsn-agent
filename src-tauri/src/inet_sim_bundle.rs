@@ -543,6 +543,11 @@ mod tests {
             7,
         )
         .unwrap();
+        // node_ned_names 全量映射（U7：命令层据此把逐节点阈值对到对应 series）。
+        // sample：GM mid"1"→es1、switch mid"0"→sw1、mid"2"→es2。
+        assert_eq!(b.node_ned_names.get("0").map(String::as_str), Some("sw1"));
+        assert_eq!(b.node_ned_names.get("1").map(String::as_str), Some("es1"));
+        assert_eq!(b.node_ned_names.get("2").map(String::as_str), Some("es2"));
         let ini = &b.bundle.omnetpp_ini;
         // gPTP 硬性前提全在。
         assert!(ini.contains("simtime-resolution = fs"));

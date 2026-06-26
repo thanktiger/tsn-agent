@@ -23,9 +23,6 @@ import {
 } from "../../../sessions/topology-snapshot";
 import { DetailRow, Stat } from "../shared";
 import { TimeSyncPanel, type TimesyncSubTab } from "./time-sync-panel";
-
-export type { TimesyncSubTab };
-
 import type { SimUiState } from "./timesync-sim";
 import {
   classifyTimesyncEdge,
@@ -39,6 +36,7 @@ import {
 } from "./topology-flow";
 import { TsnFloatingEdge } from "./tsn-floating-edge";
 
+export type { TimesyncSubTab } from "./time-sync-panel";
 export type { SimUiState } from "./timesync-sim";
 export type { TimesyncEdgeKind, TsnEdgeData, TsnNodeKind } from "./topology-flow";
 export {

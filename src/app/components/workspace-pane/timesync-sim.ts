@@ -88,6 +88,62 @@ export function hasNonConvergedNode(result: SimResult): boolean {
   return result.perNode.some((node) => !node.converged);
 }
 
+/** U4：set_gm 揭示的每会话基线——区分「切会话水合」与「同会话内 set_gm 跃迁」。 */
+export interface RevealBaseline {
+  sessionId: string;
+  gmMid: string | null | undefined;
+  established: boolean;
+}
+
+/** U4 揭示动作：展开并落软仿子 tab / 挂 badge / 清 badge / 无。 */
+export type RevealAction = "expand-soft-sim" | "badge" | "clear-badge" | "none";
+
+/**
+ * U4：set_gm 后分级揭示的纯决策（无副作用，便于单测）。App 的 effect 调它并据 action 改 state。
+ * 关键防误触：只认属于当前会话的快照（snapshotSessionId === currentSessionId）。切会话时
+ * useTimesyncSnapshot 首帧仍是旧会话快照，sessionId 不符 → 不揭示、不建基线，直到当前会话快照到达
+ * 作基线（不揭示）；其后同会话内 gmMid 无→有/值变化才揭示。这样「切进已有 GM 的会话」不被误当 set_gm。
+ */
+export function computeReveal(input: {
+  baseline: RevealBaseline;
+  currentSessionId: string;
+  snapshotSessionId: string | undefined;
+  gmMid: string | null | undefined;
+  inTimeSyncStage: boolean;
+  panelExpanded: boolean;
+  activeIsTimeSync: boolean;
+}): { nextBaseline: RevealBaseline; action: RevealAction } {
+  const { baseline, currentSessionId, snapshotSessionId, gmMid } = input;
+  // 会话变了：基线重置为未建立，不揭示（首帧快照可能仍是旧会话的，不可信）。
+  if (baseline.sessionId !== currentSessionId) {
+    return {
+      nextBaseline: { sessionId: currentSessionId, gmMid: undefined, established: false },
+      action: "none",
+    };
+  }
+  // 快照不属于当前会话（切换后旧快照残留）→ 等当前会话快照到达。
+  if (snapshotSessionId !== currentSessionId) {
+    return { nextBaseline: baseline, action: "none" };
+  }
+  // 首个当前会话快照 → 作基线，不揭示。
+  if (!baseline.established) {
+    return {
+      nextBaseline: { sessionId: currentSessionId, gmMid, established: true },
+      action: "none",
+    };
+  }
+  // 离开时间同步阶段 → 清 badge。
+  if (!input.inTimeSyncStage) {
+    return { nextBaseline: { ...baseline, gmMid }, action: "clear-badge" };
+  }
+  // 真实跃迁：gmMid 有值且与基线不同（首次设 GM 或换 GM）。
+  let action: RevealAction = "none";
+  if (gmMid && gmMid !== baseline.gmMid) {
+    action = !input.panelExpanded ? "expand-soft-sim" : input.activeIsTimeSync ? "none" : "badge";
+  }
+  return { nextBaseline: { ...baseline, gmMid }, action };
+}
+
 /** R5a：默认软仿写通道 = run_timesync_sim Tauri command（测试可注入替身）。 */
 export async function invokeRunTimesyncSim(
   sessionId: string,

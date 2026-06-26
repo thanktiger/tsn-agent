@@ -1299,6 +1299,13 @@ mod tests {
         assert_eq!(result.per_node.len(), 2);
         assert!(result.per_node.iter().all(|n| n.converged));
         assert!(result.overall.contains("2 个收敛"));
+        // U7 端到端：set_gm 写入的 offset_threshold(默认 1000) 经 load_timing 读出、对到各节点 series，
+        // 作为 threshold_ns 带回（证明 DB 读路径 + mid→ned 桥接通，非静默回退）。
+        assert!(
+            result.per_node.iter().all(|n| n.threshold_ns == 1000.0),
+            "per_node threshold_ns 应来自库内 offset_threshold(默认1000): {:?}",
+            result.per_node
+        );
 
         // 预定义参数确实进了生成的 ini（端到端：覆盖表单 → bundle → 远端工程）。
         let ini = mock.captured_ini.lock().unwrap().clone().unwrap();
