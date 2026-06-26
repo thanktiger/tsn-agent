@@ -456,8 +456,10 @@ const CHART_COLORS = [
   "#5D3FD3",
 ];
 
-/** 收敛阈值（ns），镜像后端 CONVERGENCE_THRESHOLD_NS=1000（1µs）。 */
-const CONVERGENCE_THRESHOLD_NS = 1000;
+/** 阈值标签格式化：整 µs 显示 µs，否则 ns（如 1000→±1µs、500→±500ns）。 */
+function formatThreshold(ns: number): string {
+  return ns % 1000 === 0 ? `±${ns / 1000}µs` : `±${ns}ns`;
+}
 
 /** 取模块短名：`TsnAgentTimesyncNetwork.sw1.clock` → `sw1`（去网络前缀与 .clock 后缀）。 */
 function shortNodeName(mid: string): string {
@@ -499,26 +501,30 @@ function OffsetChart({ perNode }: { perNode: PerNodeOffset[] }) {
       if (a > rawAbsMax) rawAbsMax = a;
     }
   }
+  // U7：阈值取自各节点 thresholdNs。统一时画带、用实际值标注；不一致则不画统一带（表格逐节点判定）。
+  const thresholdValues = nodes.map((n) => n.thresholdNs);
+  const uniformThreshold = thresholdValues.every((t) => t === thresholdValues[0])
+    ? thresholdValues[0]
+    : null;
   // y 轴定界自适应（取 |offset| 的 95 分位 ×1.3 裁掉启动瞬态作数据界）：
-  // - 数据接近阈值（≥1/3）→ 把 ±1µs 阈值纳入视图，显示参考带（如 Random 稳态几百 ns）；
-  // - 数据远小于阈值（如 Constant 偏差才几十 ns）→ 贴合数据，否则会被 ±1µs 带压成贴底直线，
-  //   阈值改顶部标注。
+  // - 数据接近阈值（≥1/3）→ 把阈值纳入视图，显示参考带（如 Random 稳态几百 ns）；
+  // - 数据远小于阈值（如 Constant 偏差才几十 ns）→ 贴合数据，否则会被阈值带压成贴底直线，阈值改顶部标注。
   absVals.sort((a, b) => a - b);
   const p95 = absVals[Math.floor(absVals.length * 0.95)] ?? 0;
   const dataBound = Math.max(p95 * 1.3, 1);
   const yBound =
-    dataBound >= CONVERGENCE_THRESHOLD_NS / 3
-      ? Math.max(dataBound, CONVERGENCE_THRESHOLD_NS * 1.15)
+    uniformThreshold !== null && dataBound >= uniformThreshold / 3
+      ? Math.max(dataBound, uniformThreshold * 1.15)
       : dataBound;
   const clipped = rawAbsMax > yBound;
-  const thresholdInView = CONVERGENCE_THRESHOLD_NS <= yBound;
+  const thresholdInView = uniformThreshold !== null && uniformThreshold <= yBound;
 
   const tSpan = tMax > 0 ? tMax : 1;
   const xAt = (t: number) => ml + (t / tSpan) * pw;
   const yAt = (v: number) => mt + (1 - (v + yBound) / (2 * yBound)) * ph;
   const baseline = yAt(0);
-  const bandTop = yAt(CONVERGENCE_THRESHOLD_NS);
-  const bandBottom = yAt(-CONVERGENCE_THRESHOLD_NS);
+  const bandTop = yAt(uniformThreshold ?? 0);
+  const bandBottom = yAt(-(uniformThreshold ?? 0));
 
   return (
     <figure className="sim-chart">
@@ -561,13 +567,19 @@ function OffsetChart({ perNode }: { perNode: PerNodeOffset[] }) {
         <text x={ml - 6} y={mt + ph} className="sim-chart-tick" textAnchor="end">
           -{yBound.toFixed(0)} ns
         </text>
-        {thresholdInView ? (
+        {uniformThreshold !== null && thresholdInView && (
           <text x={ml + pw} y={bandTop - 3} className="sim-chart-tick" textAnchor="end">
-            ±1µs 阈值
+            {formatThreshold(uniformThreshold)} 阈值
           </text>
-        ) : (
+        )}
+        {uniformThreshold !== null && !thresholdInView && (
           <text x={ml + pw} y={mt + 11} className="sim-chart-tick" textAnchor="end">
-            ↑ ±1µs 阈值（远高于此范围，全部在内）
+            ↑ {formatThreshold(uniformThreshold)} 阈值（远高于此范围，全部在内）
+          </text>
+        )}
+        {uniformThreshold === null && (
+          <text x={ml + pw} y={mt + 11} className="sim-chart-tick" textAnchor="end">
+            各节点阈值不一（见表格参考线）
           </text>
         )}
         <text x={ml + pw} y={mt + ph + 18} className="sim-chart-tick" textAnchor="end">

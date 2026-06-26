@@ -22,6 +22,8 @@ export interface PerNodeOffset {
   converged: boolean;
   /** 是否在该节点 offset_threshold 参考线内（仅参考、非质量判定）。 */
   withinThreshold: boolean;
+  /** 该节点生效的收敛阈值（纳秒）——逐节点 offset_threshold，缺省回退全局兜底。 */
+  thresholdNs: number;
   /** 完整 offset(t) 抖动轨迹（降采样封顶），供画收敛曲线。 */
   samples: OffsetSample[];
 }

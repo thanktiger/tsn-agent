@@ -16,6 +16,7 @@ function convergedResult(): SimResult {
         meanOffsetNs: 5.1,
         converged: true,
         withinThreshold: true,
+        thresholdNs: 1000,
         samples: [
           { tMs: 0, offsetNs: 12.3 },
           { tMs: 500, offsetNs: 2.1 },
@@ -28,6 +29,7 @@ function convergedResult(): SimResult {
         meanOffsetNs: 9.9,
         converged: true,
         withinThreshold: true,
+        thresholdNs: 1000,
         samples: [
           { tMs: 0, offsetNs: -30.7 },
           { tMs: 500, offsetNs: -4.0 },
@@ -50,6 +52,7 @@ function partlyConvergedResult(): SimResult {
         meanOffsetNs: 5.1,
         converged: true,
         withinThreshold: true,
+        thresholdNs: 1000,
         samples: [{ tMs: 0, offsetNs: 12.3 }],
       },
       {
@@ -58,6 +61,7 @@ function partlyConvergedResult(): SimResult {
         meanOffsetNs: 8000,
         converged: false,
         withinThreshold: false,
+        thresholdNs: 1000,
         samples: [{ tMs: 0, offsetNs: 9000 }],
       },
     ],
@@ -189,6 +193,7 @@ describe("TimeSyncPanel 运行/结果（U11）", () => {
           meanOffsetNs: 120,
           converged: true,
           withinThreshold: true,
+          thresholdNs: 1000,
           samples: [
             { tMs: 0, offsetNs: 600 },
             { tMs: 30000, offsetNs: -500 },
@@ -202,6 +207,64 @@ describe("TimeSyncPanel 运行/结果（U11）", () => {
     // 数据约 ±600ns 接近 1µs → 阈值带应纳入视图。
     expect(chart.querySelector("rect.sim-chart-threshold-band")).not.toBeNull();
     expect(screen.getByText("±1µs 阈值")).toBeInTheDocument();
+  });
+
+  it("阈值带按各节点实际阈值标注（统一 500ns → ±500ns 阈值）(U7)", () => {
+    const result: SimResult = {
+      caliber: "timesync_simulated",
+      status: "converged",
+      overall: "1 个从节点收敛",
+      perNode: [
+        {
+          mid: "net.sw1.clock",
+          maxOffsetNs: 300,
+          meanOffsetNs: 80,
+          converged: true,
+          withinThreshold: true,
+          thresholdNs: 500,
+          samples: [
+            { tMs: 0, offsetNs: 300 },
+            { tMs: 30000, offsetNs: -250 },
+            { tMs: 60000, offsetNs: 200 },
+          ],
+        },
+      ],
+    };
+    render(<TimeSyncPanel {...baseProps({ simState: { status: "done", result } })} />);
+    expect(screen.getByText("±500ns 阈值")).toBeInTheDocument();
+    expect(screen.queryByText("±1µs 阈值")).not.toBeInTheDocument();
+  });
+
+  it("各节点阈值不一致 → 不画统一带，提示看表格 (U7)", () => {
+    const result: SimResult = {
+      caliber: "timesync_simulated",
+      status: "converged",
+      overall: "2 个从节点收敛",
+      perNode: [
+        {
+          mid: "net.sw1.clock",
+          maxOffsetNs: 200,
+          meanOffsetNs: 50,
+          converged: true,
+          withinThreshold: true,
+          thresholdNs: 500,
+          samples: [{ tMs: 0, offsetNs: 200 }],
+        },
+        {
+          mid: "net.es2.clock",
+          maxOffsetNs: 300,
+          meanOffsetNs: 60,
+          converged: true,
+          withinThreshold: true,
+          thresholdNs: 1000,
+          samples: [{ tMs: 0, offsetNs: 300 }],
+        },
+      ],
+    };
+    render(<TimeSyncPanel {...baseProps({ simState: { status: "done", result } })} />);
+    const chart = screen.getByRole("img", { name: "从节点偏差随仿真时间抖动曲线" });
+    expect(chart.querySelector("rect.sim-chart-threshold-band")).toBeNull();
+    expect(screen.getByText(/各节点阈值不一/)).toBeInTheDocument();
   });
 
   it("空结果不渲染全绿（显示 message、无表格）", () => {

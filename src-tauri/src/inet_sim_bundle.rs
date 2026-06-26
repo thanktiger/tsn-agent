@@ -43,6 +43,9 @@ pub use crate::inet_remote::InetBundle;
 pub struct TimesyncSimBundle {
     pub bundle: InetBundle,
     pub gm_ned_name: String,
+    /// mid → ned 名（sw{N}/es{N}）全量映射。命令层据此把逐节点 offset_threshold 对到
+    /// 对应 module 的 timeChanged series（series 按 ned 名 keyed，阈值按 mid keyed，需此桥接）。
+    pub node_ned_names: std::collections::BTreeMap<String, String>,
 }
 
 /// 覆盖表单（R4）：振荡器类型 / 漂移幅度 / sim 时长。缺省走 R3(a) 固定默认。
@@ -76,6 +79,8 @@ pub struct SimNodeTiming {
     pub sync_period_ms: Option<i64>,
     /// gPTP pdelayInterval（来自 measure_period，毫秒）。
     pub measure_period_ms: Option<i64>,
+    /// 逐节点收敛偏移阈值（纳秒，boss 定语义）。None → 软仿用全局兜底阈值。
+    pub offset_threshold_ns: Option<i64>,
 }
 
 struct MappedNode {
@@ -308,8 +313,14 @@ network TsnAgentTimesyncNetwork extends TsnNetworkBase\n{{\n\
     let manifest_json =
         serde_json::to_string_pretty(&manifest).unwrap_or_else(|_| "{}".to_string());
 
+    let node_ned_names: BTreeMap<String, String> = mapped
+        .iter()
+        .map(|(mid, node)| ((*mid).to_string(), node.ned_name.clone()))
+        .collect();
+
     Ok(TimesyncSimBundle {
         gm_ned_name: gm_ned.clone(),
+        node_ned_names,
         bundle: InetBundle {
             network_ned,
             omnetpp_ini,
@@ -484,6 +495,7 @@ mod tests {
                 slave_port: vec![],
                 sync_period_ms: Some(125),
                 measure_period_ms: Some(1000),
+                offset_threshold_ns: None,
             },
             // sw0：master 端口 5、2；slave 端口朝 GM = 5。
             SimNodeTiming {
@@ -492,6 +504,7 @@ mod tests {
                 slave_port: vec![5],
                 sync_period_ms: None,
                 measure_period_ms: None,
+                offset_threshold_ns: None,
             },
             SimNodeTiming {
                 mid: "2".into(),
@@ -499,6 +512,7 @@ mod tests {
                 slave_port: vec![0],
                 sync_period_ms: None,
                 measure_period_ms: None,
+                offset_threshold_ns: None,
             },
         ];
         (nodes, links, timing)
