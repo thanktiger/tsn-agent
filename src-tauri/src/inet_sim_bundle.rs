@@ -333,6 +333,10 @@ fn build_ini(
     ini.push_str(&format!("seed-set = {SEED_SET}\n"));
     ini.push_str("cmdenv-interactive = false\n");
     ini.push_str("cmdenv-express-mode = true\n");
+    // 真机校正（2026-06-26）：在所有 TSN 节点上启用时间同步——这才会实例化每节点的
+    // clock + gptp 子模块（否则节点无 clock → 不录 timeChanged → scavetool 导出 0 行 →
+    // 取数解析失败）。与 INET gptp showcase 同款（`*.*.hasTimeSynchronization = true`）。
+    ini.push_str("*.*.hasTimeSynchronization = true\n");
 
     // 振荡器：每节点挂时钟振荡器（漂移驱动偏差）。
     match overrides.oscillator {
@@ -484,6 +488,8 @@ mod tests {
         let ini = &b.bundle.omnetpp_ini;
         // gPTP 硬性前提全在。
         assert!(ini.contains("simtime-resolution = fs"));
+        // 真机校正：必须启用时间同步以实例化各节点 clock（否则不录 timeChanged）。
+        assert!(ini.contains("*.*.hasTimeSynchronization = true"));
         assert!(ini.contains("seed-set = 0"));
         assert!(ini.contains("RandomDriftOscillator"));
         assert!(ini.contains("nominalTickLength = 10ns"));
