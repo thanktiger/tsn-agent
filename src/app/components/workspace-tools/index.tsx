@@ -1,14 +1,4 @@
-import {
-  Database,
-  Download,
-  FolderOpen,
-  Plus,
-  Settings,
-  Trash2,
-  Upload,
-  Wrench,
-  X,
-} from "lucide-react";
+import { Download, FolderOpen, Plus, Settings, Trash2, Upload, Wrench, X } from "lucide-react";
 import { type Dispatch, type SetStateAction, useEffect, useState } from "react";
 import { resolvePlannerBaseUrl } from "../../../planner/planner-contract";
 import { appVersion, type ReleaseNote, releaseNotes } from "../../../release/release-info";
@@ -25,7 +15,7 @@ import { getInetHostConfig, type InetHostConfig, setInetHostConfig } from "../..
 import type { TransferNotice } from "../../session-transfer";
 import { DetailRow, formatTime } from "../shared";
 
-export type WorkspaceToolPanel = "sessions" | "eval" | "skills" | "settings";
+export type WorkspaceToolPanel = "sessions" | "skills" | "settings";
 
 export interface WorkspaceToolsProps {
   activePanel: WorkspaceToolPanel | undefined;
@@ -93,7 +83,6 @@ function WorkspaceToolRail({
 }) {
   const tools: Array<{ id: WorkspaceToolPanel; label: string; icon: typeof FolderOpen }> = [
     { id: "sessions", label: "会话", icon: FolderOpen },
-    { id: "eval", label: "评估采集", icon: Database },
     { id: "skills", label: "Skill", icon: Wrench },
     { id: "settings", label: "设置", icon: Settings },
   ];
@@ -180,10 +169,14 @@ function WorkspaceToolDrawer({
           onRevealExport={onRevealExport}
         />
       )}
-      {activePanel === "eval" && <EvalToolPanel currentSessionId={currentSession.id} />}
       {activePanel === "skills" && <SkillToolPanel />}
       {activePanel === "settings" && (
-        <SettingsToolPanel version={appVersion} releases={releaseNotes} onClose={onClose} />
+        <SettingsToolPanel
+          version={appVersion}
+          releases={releaseNotes}
+          currentSessionId={currentSession.id}
+          onClose={onClose}
+        />
       )}
     </aside>
   );
@@ -312,7 +305,8 @@ function EvalToolPanel({ currentSessionId }: { currentSessionId: string }) {
   };
 
   return (
-    <div className="workspace-tool-panel">
+    <section className="settings-eval-section" aria-label="评估采集">
+      <h3 className="settings-eval-section__title">评估采集</h3>
       <p className="tool-panel-summary">
         每次与大模型的交互都原样保存为 eval 样本（不脱敏、含密钥原文），用于离线评估。 数据存在本机
         eval 目录，删除会话不会删除它——隐私清除请用下方按钮。
@@ -381,7 +375,7 @@ function EvalToolPanel({ currentSessionId }: { currentSessionId: string }) {
           <span>{notice}</span>
         </p>
       )}
-    </div>
+    </section>
   );
 }
 
@@ -558,10 +552,12 @@ function InetHostConfigForm({ onClose }: { onClose: () => void }) {
 function SettingsToolPanel({
   version,
   releases,
+  currentSessionId,
   onClose,
 }: {
   version: string;
   releases: ReleaseNote[];
+  currentSessionId: string;
   onClose: () => void;
 }) {
   const defaultSelectedVersion =
@@ -589,6 +585,8 @@ function SettingsToolPanel({
           value={window.__TAURI_INTERNALS__ ? "桌面文件系统" : "浏览器预览"}
         />
       </div>
+
+      <EvalToolPanel currentSessionId={currentSessionId} />
 
       <InetHostConfigForm onClose={onClose} />
 
@@ -635,7 +633,6 @@ function SettingsToolPanel({
 function workspacePanelLabel(panel: WorkspaceToolPanel): string {
   const labels: Record<WorkspaceToolPanel, string> = {
     sessions: "会话管理",
-    eval: "评估采集",
     skills: "Skill 能力",
     settings: "工作台设置",
   };
@@ -646,7 +643,6 @@ function workspacePanelLabel(panel: WorkspaceToolPanel): string {
 function workspacePanelKicker(panel: WorkspaceToolPanel): string {
   const labels: Record<WorkspaceToolPanel, string> = {
     sessions: "Sessions",
-    eval: "Eval",
     skills: "Skills",
     settings: "Settings",
   };

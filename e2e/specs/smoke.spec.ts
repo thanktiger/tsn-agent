@@ -7,7 +7,7 @@ import { expect, test } from "@playwright/test";
  * 由 Tauri e2e（real_agent_e2e）覆盖。
  *
  * 断言对齐当前 UI（2026-06）：planning-export 阶段顶部 note 已移除；右侧
- * 「执行日志」模块已被「评估采集」工具轨取代。
+ * 「执行日志」模块已被「评估采集」取代，并折叠进「设置」面板。
  */
 test("web preview fails closed with a desktop CTA while the workspace shell stays usable", async ({ page }) => {
   await page.goto("/");
@@ -26,11 +26,8 @@ test("web preview fails closed with a desktop CTA while the workspace shell stay
   await expect(page.getByText(/需要在 TSN Agent 桌面版中运行/)).toBeVisible();
   await expect(page.getByText("拓扑生成后在这里显示")).toBeVisible();
 
-  // 工作台工具轨：评估采集面板可开（执行日志模块已被评估采集取代）。
-  await page.getByRole("button", { name: "评估采集" }).click();
-  await expect(page.getByRole("complementary", { name: "评估采集" })).toBeVisible();
-
-  // 设置抽屉：更新日志可见。
+  // 设置抽屉：评估采集已折叠进设置，更新日志可见。
   await page.getByRole("button", { name: "设置" }).click();
+  await expect(page.getByRole("heading", { name: "评估采集" })).toBeVisible();
   await expect(page.getByText("更新日志")).toBeVisible();
 });

@@ -385,6 +385,17 @@ textarea:focus-visible {
   gap: 8px;
 }
 
+/* 评估采集：低频维护工具，作为设置面板内的一段。 */
+.settings-eval-section {
+  margin-top: 16px;
+}
+
+.settings-eval-section__title {
+  margin: 0 0 8px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
 /* U5：远端仿真主机配置表单。 */
 .settings-host-form {
   margin-top: 16px;
