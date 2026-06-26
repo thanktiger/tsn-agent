@@ -42,7 +42,7 @@ description: TSN Agent 时间同步阶段指引。引导用户用自然语言指
 | 测量周期 `measurePeriod` | 1024（ms） | 2 的幂，合法范围 1..32768 |
 | 上报使能 `reportEnable` | 1 | 0 或 1 |
 | 平均链路时延阈值 `meanLinkDelayThresh` | 经验默认 | 2 的幂，合法范围 1..128 |
-| 偏移阈值 `offsetThreshold` | 1000 | 整数，合法范围 0..4095 |
+| 偏移阈值 `offsetThreshold` | 1000（ns） | 收敛偏移阈值，正整数纳秒 |
 
 参数的合法取值（2 的幂 / 上下限 / 0-1）由工具 schema 强校验，越界会被直接拒；介绍默认值即可，不必把完整合法域逐条复述给用户。
 
