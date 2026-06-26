@@ -410,11 +410,17 @@ fn build_ini(
             m.ned_name,
             master_eths.join(", ")
         ));
-        if let Some(slave) = t.slave_port.first()
-            && let Some(e) = eth_name(port_eth, &t.mid, *slave)
-        {
-            ini.push_str(&format!("*.{}.gptp.slavePort = \"{e}\"\n", m.ned_name));
-        }
+        // slavePort 总是显式发：GM 发空串覆盖 TsnDevice 的非空默认（否则 MASTER_NODE
+        // 残留默认 slavePort → INET 报 “MASTER_NODE with slave port”）。
+        let slave_eth = t
+            .slave_port
+            .first()
+            .and_then(|p| eth_name(port_eth, &t.mid, *p))
+            .unwrap_or_default();
+        ini.push_str(&format!(
+            "*.{}.gptp.slavePort = \"{slave_eth}\"\n",
+            m.ned_name
+        ));
         if let Some(sync) = t.sync_period_ms {
             ini.push_str(&format!("*.{}.gptp.syncInterval = {sync}ms\n", m.ned_name));
         }
@@ -553,6 +559,8 @@ mod tests {
             ini.contains("*.es2.gptp.gptpNodeType = \"SLAVE_NODE\""),
             "{ini}"
         );
+        // GM 显式空 slavePort 覆盖 TsnDevice 默认（否则 MASTER_NODE 报 slave port 冲突）。
+        assert!(ini.contains("*.es1.gptp.slavePort = \"\""), "{ini}");
     }
 
     #[test]
