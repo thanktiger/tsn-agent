@@ -219,6 +219,7 @@ export function WorkspacePane({
 }: WorkspacePaneProps) {
   // U11：time-sync 阶段叠加时钟树视图——画布节点注入端口角色（GM/同步/旁路/未覆盖）。
   const showClockTree = workflowStep === "time-sync";
+  const enableHardwareDeploymentAnimation = isHardwareDeploymentAnimationActive(hardwareState);
   const [isTimesyncTreeDialogOpen, setIsTimesyncTreeDialogOpen] = useState(false);
   useEffect(() => {
     if (!showClockTree) {
@@ -252,16 +253,21 @@ export function WorkspacePane({
     const propagationPlan = buildTimesyncPropagationPlan(topologySnapshot.links, timesyncSnapshot);
     return {
       ...flow,
-      nodes: enrichTimesyncNodes(flow.nodes, timesyncSnapshot, propagationPlan, true),
+      nodes: enrichTimesyncNodes(
+        flow.nodes,
+        timesyncSnapshot,
+        propagationPlan,
+        enableHardwareDeploymentAnimation,
+      ),
       edges: decorateTimesyncEdges(
         flow.edges,
         linkByEdgeId,
         timesyncSnapshot,
         propagationPlan,
-        true,
+        enableHardwareDeploymentAnimation,
       ),
     };
-  }, [topologySnapshot, showClockTree, timesyncSnapshot]);
+  }, [topologySnapshot, showClockTree, timesyncSnapshot, enableHardwareDeploymentAnimation]);
 
   const timesyncTreeDialogFlow = useMemo(() => {
     if (!topologySnapshot || isEmptyTopologySnapshot(topologySnapshot) || !showClockTree) {
@@ -865,6 +871,15 @@ function enrichTimesyncNodes(
     };
     return { ...node, data: { ...node.data, timesync } };
   });
+}
+
+function isHardwareDeploymentAnimationActive(state: HardwareUiState): boolean {
+  return (
+    state.status === "checking" ||
+    state.status === "starting" ||
+    state.status === "confirming" ||
+    state.status === "observing"
+  );
 }
 
 function decorateTimesyncEdges(

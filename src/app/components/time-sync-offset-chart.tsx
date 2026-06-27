@@ -5,6 +5,9 @@ import "./time-sync-offset-chart.css";
 export const TIME_SYNC_ALL_SERIES_ID = "all";
 const DEFAULT_THRESHOLD_NS = 200;
 const SERIES_COLORS = ["#fa541c", "#d4380d", "#ad2102", "#722ed1", "#c41d7f", "#8c8c8c"];
+const THRESHOLD_SERIES_ID_PREFIX = "__time-sync-threshold-";
+const DATA_ZOOM_INSIDE_ID = "time-sync-offset-datazoom-inside";
+const DATA_ZOOM_SLIDER_ID = "time-sync-offset-datazoom-slider";
 
 export interface TimeSyncMetricPoint {
   x?: string | number;
@@ -96,6 +99,13 @@ interface MetricCard {
   label: string;
   value: string;
   tone?: "success";
+}
+
+interface DataZoomState {
+  start?: number;
+  end?: number;
+  startValue?: string | number;
+  endValue?: string | number;
 }
 
 interface NormalizedChartData {
@@ -272,12 +282,20 @@ function EchartsLineCanvas({
 }) {
   const chartElementRef = useRef<HTMLDivElement | null>(null);
   const chartInstanceRef = useRef<ECharts.ECharts | undefined>(undefined);
+  const dataZoomStateRef = useRef<DataZoomState | undefined>(undefined);
   const latestOptionRef = useRef<ECharts.EChartsOption>(
-    buildTimeSyncChartOption(points, series, thresholdNs),
+    buildTimeSyncChartOption(points, series, thresholdNs, dataZoomStateRef.current),
   );
 
   useEffect(() => {
-    latestOptionRef.current = buildTimeSyncChartOption(points, series, thresholdNs);
+    const chart = chartInstanceRef.current;
+    dataZoomStateRef.current = readDataZoomState(chart) ?? dataZoomStateRef.current;
+    latestOptionRef.current = buildTimeSyncChartOption(
+      points,
+      series,
+      thresholdNs,
+      dataZoomStateRef.current,
+    );
     chartInstanceRef.current?.setOption(latestOptionRef.current, {
       notMerge: true,
       lazyUpdate: true,
@@ -305,6 +323,13 @@ function EchartsLineCanvas({
         echarts.getInstanceByDom(el)?.dispose();
         chart = echarts.init(el, undefined, { renderer: "canvas" });
         chartInstanceRef.current = chart;
+        const handleDataZoom = (payload: unknown) => {
+          dataZoomStateRef.current =
+            dataZoomStateFromPayload(payload) ??
+            readDataZoomState(chart) ??
+            dataZoomStateRef.current;
+        };
+        chart.on("datazoom", handleDataZoom);
         chart.setOption(latestOptionRef.current, {
           notMerge: true,
           lazyUpdate: true,
@@ -325,6 +350,7 @@ function EchartsLineCanvas({
     return () => {
       disposed = true;
       observer?.disconnect();
+      chart?.off("datazoom");
       chart?.dispose();
       if (chartInstanceRef.current === chart) {
         chartInstanceRef.current = undefined;
@@ -478,6 +504,7 @@ function buildTimeSyncChartOption(
   points: ChartPoint[],
   series: NormalizedSeries[],
   thresholdNs = DEFAULT_THRESHOLD_NS,
+  dataZoomState?: DataZoomState,
 ): ECharts.EChartsOption {
   const yRange = resolveYAxisRange(points, series);
   return {
@@ -487,19 +514,25 @@ function buildTimeSyncChartOption(
     grid: { top: 14, right: 42, bottom: 88, left: 66 },
     tooltip: {
       trigger: "axis",
-      valueFormatter: (value) => `${value} ns`,
+      appendToBody: true,
+      extraCssText: "z-index: 2000;",
+      formatter: formatTimeSyncTooltip,
     },
     legend: { show: false },
     dataZoom: [
       {
+        id: DATA_ZOOM_INSIDE_ID,
         type: "inside",
         xAxisIndex: 0,
         filterMode: "none",
+        ...dataZoomState,
       },
       {
+        id: DATA_ZOOM_SLIDER_ID,
         type: "slider",
         xAxisIndex: 0,
         filterMode: "none",
+        ...dataZoomState,
         height: 22,
         bottom: 18,
         brushSelect: false,
@@ -571,6 +604,7 @@ function buildTimeSyncChartOption(
 
 function thresholdLine(name: string, points: ChartPoint[], value: number) {
   return {
+    id: `${THRESHOLD_SERIES_ID_PREFIX}${value > 0 ? "positive" : "negative"}`,
     name,
     type: "line" as const,
     data: points.map(() => value),
@@ -584,6 +618,127 @@ function thresholdLine(name: string, points: ChartPoint[], value: number) {
       fontSize: 11,
     },
   };
+}
+
+function readDataZoomState(chart: ECharts.ECharts | undefined): DataZoomState | undefined {
+  if (!chart) {
+    return undefined;
+  }
+  try {
+    const option = chart.getOption?.() as { dataZoom?: unknown } | undefined;
+    const zooms = Array.isArray(option?.dataZoom) ? option.dataZoom.filter(isRecord) : [];
+    return dataZoomStateFromRecord(
+      zooms.find((zoom) => zoom.id === DATA_ZOOM_SLIDER_ID) ?? zooms[0],
+    );
+  } catch {
+    return undefined;
+  }
+}
+
+function dataZoomStateFromPayload(payload: unknown): DataZoomState | undefined {
+  if (!isRecord(payload)) {
+    return undefined;
+  }
+  const batches = Array.isArray(payload.batch) ? payload.batch.filter(isRecord) : undefined;
+  return dataZoomStateFromRecord(batches?.[0] ?? payload);
+}
+
+function dataZoomStateFromRecord(
+  record: Record<string, unknown> | undefined,
+): DataZoomState | undefined {
+  if (!record) {
+    return undefined;
+  }
+  const state: DataZoomState = {};
+  for (const key of ["start", "end", "startValue", "endValue"] as const) {
+    const value = record[key];
+    if (typeof value === "number" && Number.isFinite(value)) {
+      state[key] = value;
+    } else if ((key === "startValue" || key === "endValue") && typeof value === "string") {
+      state[key] = value;
+    }
+  }
+  return Object.keys(state).length > 0 ? state : undefined;
+}
+
+function formatTimeSyncTooltip(params: unknown): string {
+  const items = (Array.isArray(params) ? params : [params]).filter(isRecord);
+  const dataItems = items.filter((item) => !isThresholdTooltipItem(item));
+  const header = tooltipAxisLabel(items[0]);
+  const rows = dataItems.flatMap((item) => {
+    const value = tooltipNumericValue(item);
+    if (value === undefined) {
+      return [];
+    }
+    const marker = typeof item.marker === "string" ? item.marker : "";
+    const seriesName =
+      typeof item.seriesName === "string" && item.seriesName.trim() !== ""
+        ? item.seriesName
+        : "节点";
+    return `${marker}${escapeTooltipText(seriesName)}: ${value} ns`;
+  });
+  return [header ? escapeTooltipText(header) : undefined, ...rows].filter(Boolean).join("<br/>");
+}
+
+function isThresholdTooltipItem(item: Record<string, unknown>): boolean {
+  const seriesName = typeof item.seriesName === "string" ? item.seriesName.trim() : "";
+  return (
+    (typeof item.seriesId === "string" && item.seriesId.startsWith(THRESHOLD_SERIES_ID_PREFIX)) ||
+    /^[+-]\d+(?:\.\d+)?ns$/.test(seriesName)
+  );
+}
+
+function tooltipAxisLabel(item: Record<string, unknown> | undefined): string | undefined {
+  if (!item) {
+    return undefined;
+  }
+  for (const key of ["axisValueLabel", "axisValue", "name"]) {
+    const value = item[key];
+    if (typeof value === "string" && value.trim() !== "") {
+      return value;
+    }
+    if (typeof value === "number" && Number.isFinite(value)) {
+      return String(value);
+    }
+  }
+  return undefined;
+}
+
+function tooltipNumericValue(item: Record<string, unknown>): number | undefined {
+  const value = item.value;
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === "string" && value.trim() !== "") {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : undefined;
+  }
+  if (Array.isArray(value)) {
+    for (let index = value.length - 1; index >= 0; index -= 1) {
+      const parsed = tooltipNumericValue({ value: value[index] });
+      if (parsed !== undefined) {
+        return parsed;
+      }
+    }
+  }
+  return undefined;
+}
+
+function escapeTooltipText(value: string): string {
+  return value.replace(/[&<>"']/g, (char) => {
+    switch (char) {
+      case "&":
+        return "&amp;";
+      case "<":
+        return "&lt;";
+      case ">":
+        return "&gt;";
+      case '"':
+        return "&quot;";
+      default:
+        return "&#39;";
+    }
+  });
 }
 
 function resolveYAxisRange(

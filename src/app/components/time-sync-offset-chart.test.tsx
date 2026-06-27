@@ -11,6 +11,9 @@ const echartsMock = vi.hoisted(() => ({
   setOption: vi.fn(),
   resize: vi.fn(),
   dispose: vi.fn(),
+  getOption: vi.fn(),
+  on: vi.fn(),
+  off: vi.fn(),
 }));
 
 vi.mock("echarts", () => ({
@@ -67,9 +70,27 @@ function sampleMetrics(): TimeSyncMetricsQueryResponse {
   };
 }
 
+function appendPoint(metrics: TimeSyncMetricsQueryResponse): TimeSyncMetricsQueryResponse {
+  const next = structuredClone(metrics) as Extract<
+    TimeSyncMetricsQueryResponse,
+    { series?: unknown }
+  >;
+  const series = next.series?.find((item) => String(item.node_id) === "2");
+  series?.points?.push({
+    bucket_start_ns: 30_000_000,
+    latest_offset_ns: 18,
+    avg_offset_ns: 12,
+    max_abs_offset_ns: 360,
+  });
+  return next;
+}
+
 describe("TimeSyncOffsetChart", () => {
   it("使用最新、平均、最大绝对偏差计算曲线范围，并展示 dataZoom 与周期信息", async () => {
     echartsMock.setOption.mockClear();
+    echartsMock.getOption.mockReset().mockReturnValue(undefined);
+    echartsMock.on.mockClear();
+    echartsMock.off.mockClear();
 
     render(
       <TimeSyncOffsetChart
@@ -91,13 +112,90 @@ describe("TimeSyncOffsetChart", () => {
     await waitFor(() => expect(echartsMock.setOption).toHaveBeenCalled());
 
     const option = echartsMock.setOption.mock.calls.at(-1)?.[0] as {
-      dataZoom: Array<{ type: string }>;
+      dataZoom: Array<{ id: string; type: string }>;
       series: Array<{ data: Array<number | null> }>;
+      tooltip: {
+        appendToBody: boolean;
+        extraCssText: string;
+        formatter: (params: unknown) => string;
+      };
       yAxis: { min: number; max: number; interval: number };
     };
     expect(option.dataZoom.map((item) => item.type)).toEqual(["inside", "slider"]);
+    expect(option.dataZoom.map((item) => item.id)).toEqual([
+      "time-sync-offset-datazoom-inside",
+      "time-sync-offset-datazoom-slider",
+    ]);
+    expect(option.tooltip.appendToBody).toBe(true);
+    expect(option.tooltip.extraCssText).toContain("z-index: 2000");
     expect(option.series[2]?.data).toEqual([4, -8, 12]);
     expect(option.yAxis).toMatchObject({ min: -500, max: 500, interval: 250 });
+    expect(
+      option.tooltip.formatter([
+        {
+          axisValueLabel: "00:00:00.000",
+          seriesName: "+1000ns",
+          value: 1000,
+          marker: "<span></span>",
+        },
+        {
+          axisValueLabel: "00:00:00.000",
+          seriesName: "ES-2",
+          value: 4,
+          marker: "<span></span>",
+        },
+        {
+          axisValueLabel: "00:00:00.000",
+          seriesName: "-1000ns",
+          value: -1000,
+          marker: "<span></span>",
+        },
+      ]),
+    ).toBe("00:00:00.000<br/><span></span>ES-2: 4 ns");
+  });
+
+  it("轮询刷新数据时保留用户当前 dataZoom 窗口", async () => {
+    echartsMock.setOption.mockClear();
+    echartsMock.getOption.mockReset().mockReturnValue({
+      dataZoom: [
+        {
+          id: "time-sync-offset-datazoom-slider",
+          start: 35,
+          end: 88,
+        },
+      ],
+    });
+
+    const { rerender } = render(
+      <TimeSyncOffsetChart
+        metrics={sampleMetrics()}
+        masterNodeId="1"
+        masterLabel="GM-1"
+        syncPeriodLabel="125 ms"
+        measurePeriodLabel="1024 ms"
+      />,
+    );
+    await waitFor(() => expect(echartsMock.setOption).toHaveBeenCalled());
+    echartsMock.setOption.mockClear();
+
+    rerender(
+      <TimeSyncOffsetChart
+        metrics={appendPoint(sampleMetrics())}
+        masterNodeId="1"
+        masterLabel="GM-1"
+        syncPeriodLabel="125 ms"
+        measurePeriodLabel="1024 ms"
+      />,
+    );
+
+    await waitFor(() => expect(echartsMock.setOption).toHaveBeenCalled());
+    const option = echartsMock.setOption.mock.calls.at(-1)?.[0] as {
+      dataZoom: Array<{ start?: number; end?: number }>;
+    };
+    expect(option.dataZoom).toEqual([
+      expect.objectContaining({ start: 35, end: 88 }),
+      expect.objectContaining({ start: 35, end: 88 }),
+    ]);
   });
 
   it("节点汇总指标只从 offset 字段归一化，不依赖接口请求逻辑", () => {
