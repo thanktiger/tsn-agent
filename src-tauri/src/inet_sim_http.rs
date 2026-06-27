@@ -110,7 +110,10 @@ impl InetSimHttpClient for ReqwestInetSimClient {
                 return Err("软仿服务忙（已有任务在运行）".to_string());
             }
             if !status.is_success() {
-                return Err(format!("提交软仿失败（HTTP {status}）：{}", body_text(&bytes)));
+                return Err(format!(
+                    "提交软仿失败（HTTP {status}）：{}",
+                    body_text(&bytes)
+                ));
             }
             serde_json::from_slice::<JobResp>(&bytes)
                 .map(|j| j.job_id)
@@ -129,7 +132,10 @@ impl InetSimHttpClient for ReqwestInetSimClient {
             let status = resp.status();
             let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
             if !status.is_success() {
-                return Err(format!("查状态失败（HTTP {status}）：{}", body_text(&bytes)));
+                return Err(format!(
+                    "查状态失败（HTTP {status}）：{}",
+                    body_text(&bytes)
+                ));
             }
             serde_json::from_slice::<StatusResp>(&bytes)
                 .map(|s| s.status)
@@ -148,7 +154,10 @@ impl InetSimHttpClient for ReqwestInetSimClient {
             let status = resp.status();
             let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
             if !status.is_success() {
-                return Err(format!("取结果失败（HTTP {status}）：{}", body_text(&bytes)));
+                return Err(format!(
+                    "取结果失败（HTTP {status}）：{}",
+                    body_text(&bytes)
+                ));
             }
             serde_json::from_slice::<HttpSimResult>(&bytes)
                 .map_err(|e| format!("解析结果失败：{e}"))
@@ -318,7 +327,10 @@ mod tests {
         assert_eq!(out.csv.as_deref(), Some("module,name,vectime,vecvalue\n"));
         assert!(!out.scavetool_failed);
         // submit 收到的 filter 透传正确。
-        assert_eq!(runner.client.submitted_filter.borrow().as_deref(), Some("filt"));
+        assert_eq!(
+            runner.client.submitted_filter.borrow().as_deref(),
+            Some("filt")
+        );
     }
 
     #[test]
@@ -329,7 +341,9 @@ mod tests {
             csv: None,
             scavetool_failed: false,
         });
-        let out = fast_runner(client).run_sim_fetch_csv(&bundle(), &cfg(), "f").unwrap();
+        let out = fast_runner(client)
+            .run_sim_fetch_csv(&bundle(), &cfg(), "f")
+            .unwrap();
         assert_eq!(out.exit_code, Some(1));
         assert!(out.csv.is_none());
     }

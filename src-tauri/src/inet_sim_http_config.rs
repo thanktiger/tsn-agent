@@ -46,7 +46,10 @@ pub async fn resolve_inet_sim_http_url(
         .filter(|v| !v.trim().is_empty());
     let resolved = match env_url {
         Some(u) => u,
-        None => load_config(pool).await.map(|c| c.base_url).unwrap_or_default(),
+        None => load_config(pool)
+            .await
+            .map(|c| c.base_url)
+            .unwrap_or_default(),
     };
     let trimmed = resolved.trim();
     if trimmed.is_empty() {
@@ -128,12 +131,14 @@ mod tests {
             base_url: url.to_string(),
         })
         .unwrap();
-        sqlx::query("INSERT OR REPLACE INTO app_state (key, value, updated_at) VALUES (?, ?, 'now')")
-            .bind(INET_SIM_HTTP_CONFIG_KEY)
-            .bind(&json)
-            .execute(pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            "INSERT OR REPLACE INTO app_state (key, value, updated_at) VALUES (?, ?, 'now')",
+        )
+        .bind(INET_SIM_HTTP_CONFIG_KEY)
+        .bind(&json)
+        .execute(pool)
+        .await
+        .unwrap();
     }
 
     #[test]
