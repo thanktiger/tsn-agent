@@ -411,7 +411,13 @@ export function applyOperationsInputSchema(): z.ZodRawShape {
           "链路在 srcNode 上占用的端口号（端口是结构事实源、直写列）。新生成拓扑端口 P0 起编，填两端节点实际端口；必传——缺省会被拒绝（端口不再从 stylesJson 解析）",
         ),
       dstPort: z.number().int().describe("链路在 dstNode 上占用的端口号；必传——缺省会被拒绝"),
-      speed: z.number().int().optional().describe("链路速率 Mbps（可选，缺省由 bundle 取默认）"),
+      speed: z
+        .number()
+        .int()
+        .optional()
+        .describe(
+          "链路速率 Mbps；按用户意图填（常见 {10,100,1000,10000}，1000 最常用），未指定时缺省落库 1000（与 initialize 模板默认一致，不再留 NULL）",
+        ),
       stylesJson: z
         .string()
         .describe(
@@ -632,9 +638,10 @@ export function createTimesyncToolRegistry(): TimesyncMcpToolDefinition[] {
       title: "Set clock-sync parameters",
       description:
         "Update gPTP sync parameters for one node (pass mid) or all nodes (omit mid). Only provided fields change; " +
-        "port roles are NOT touched. syncPeriod / measurePeriod are powers of two in ms (1..32768); " +
+        "port roles are NOT touched. syncPeriod must be one of 125/250/500/1000/2000/4000/8000 ms " +
+        "(powers-of-two seconds in integer ms; hardware OpenSync requirement); measurePeriod is a power of two in ms (1..32768); " +
         "meanLinkDelayThresh is a power of two (1..128); offsetThreshold is an integer 0..4095; reportEnable is 0/1. " +
-        "Recommended defaults (already applied on set_gm): syncPeriod=128, measurePeriod=1024, reportEnable=1, " +
+        "Recommended defaults (already applied on set_gm): syncPeriod=125, measurePeriod=1024, reportEnable=1, " +
         "meanLinkDelayThresh=64, offsetThreshold=1000.",
       inputSchema: setParamsInputSchema(),
       handler: async (args) =>
@@ -710,6 +717,19 @@ function powerOfTwoSchema(max: number, label: string): z.ZodNumber {
     });
 }
 
+// syncPeriod 合法域（boss 定）：2 的幂「秒」、整数 ms 表示 = 1000*2^k, k∈[-3,3]。
+// 2^-4 秒=62.5ms 非整数 ms，故整数 ms 截到 125；硬件 OpenSync 口径。注意 125/250 不是 2 的幂 ms，
+// 故不能复用 powerOfTwoSchema——这是「2 的幂秒」不是「2 的幂 ms」。
+const SYNC_PERIOD_VALUES_MS = [125, 250, 500, 1000, 2000, 4000, 8000] as const;
+function syncPeriodSchema(): z.ZodTypeAny {
+  return z
+    .number()
+    .int()
+    .refine((v) => (SYNC_PERIOD_VALUES_MS as readonly number[]).includes(v), {
+      message: `syncPeriod 必须是 2 的幂秒的整数 ms 值（${SYNC_PERIOD_VALUES_MS.join(" / ")}）`,
+    });
+}
+
 const binaryFlagSchema = z.number().int().min(0).max(1).describe("0 或 1");
 
 export function setGmInputSchema(): z.ZodRawShape {
@@ -723,9 +743,9 @@ export function setGmInputSchema(): z.ZodRawShape {
 export function setParamsInputSchema(): z.ZodRawShape {
   return {
     mid: z.string().min(1).optional().describe("目标节点 mid；省略则对全部节点应用"),
-    syncPeriod: powerOfTwoSchema(32768, "syncPeriod")
+    syncPeriod: syncPeriodSchema()
       .optional()
-      .describe("同步周期 ms，2 的幂 1..32768（推荐 128）"),
+      .describe("同步周期 ms，2 的幂秒的整数 ms 值：125/250/500/1000/2000/4000/8000（推荐 125）"),
     measurePeriod: powerOfTwoSchema(32768, "measurePeriod")
       .optional()
       .describe("测量周期 ms，2 的幂 1..32768（推荐 1024）"),

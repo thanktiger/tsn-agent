@@ -8,6 +8,9 @@
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
 
+/// link.add 省略 speed 时的默认链路速率（Mbps），与 initialize 模板 dataRateMbps 默认对齐。
+const DEFAULT_LINK_SPEED_MBPS: i64 = 1000;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum TopologyOp {
@@ -69,7 +72,7 @@ pub struct LinkAddArgs {
     /// 链路在 dst_node 上占用的端口号。缺省 → 硬校验拒绝。
     #[serde(default)]
     pub dst_port: Option<i64>,
-    /// 链路速率（Mbps）；可选，缺省由 bundle 取默认。
+    /// 链路速率（Mbps）；可选，缺省落库默认 1000（DEFAULT_LINK_SPEED_MBPS，与 initialize 模板对齐）。
     #[serde(default)]
     pub speed: Option<i64>,
     pub styles_json: String,
@@ -264,7 +267,10 @@ pub async fn apply_op(
                     a.link_seq
                 )));
             };
-            let speed = a.speed;
+            // speed 缺省兜底 1000 Mbps：大模型在 link.add 常省略 speed（schema 可选），导致手加链路
+            // speed=NULL 与 initialize 模板链路（dataRateMbps 默认 1000）不一致、且触发硬件校验
+            // missing_speed WARN。这里给确定性默认（用户指定速率时大模型仍可显式传，覆盖此默认）。
+            let speed = a.speed.or(Some(DEFAULT_LINK_SPEED_MBPS));
             // 三态写入：同 node.add，冲突时读回只比对请求提供的字段。
             let res = sqlx::query(
                 r#"INSERT INTO topology_links
@@ -538,6 +544,41 @@ mod tests {
             .unwrap();
             assert_eq!(row.get::<Option<i64>, _>("src_port"), Some(4));
             assert_eq!(row.get::<Option<i64>, _>("dst_port"), Some(5));
+        });
+    }
+
+    // link.add 省略 speed → 默认 1000 Mbps（与 initialize 模板的 dataRateMbps 默认对齐，
+    // 避免手加链路 speed NULL 与初始链路 1000 不一致 + 消除硬件校验 missing_speed WARN 噪声）。
+    #[test]
+    fn link_add_defaults_speed_to_1000_when_omitted() {
+        tauri::async_runtime::block_on(async {
+            let pool = fresh_pool().await;
+            seed_two_nodes(&pool).await;
+            let mut tx = pool.begin().await.unwrap();
+            apply_op(
+                &mut tx,
+                "s1",
+                &TopologyOp::LinkAdd(LinkAddArgs {
+                    link_seq: 0,
+                    name: None,
+                    src_node: "0".into(),
+                    dst_node: "1".into(),
+                    src_port: Some(2),
+                    dst_port: Some(3),
+                    speed: None,
+                    styles_json: r#"{"plane":"A"}"#.into(),
+                }),
+            )
+            .await
+            .unwrap();
+            tx.commit().await.unwrap();
+            let row = sqlx::query(
+                "SELECT speed FROM topology_links WHERE session_id='s1' AND link_seq=0",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(row.get::<Option<i64>, _>("speed"), Some(1000));
         });
     }
 

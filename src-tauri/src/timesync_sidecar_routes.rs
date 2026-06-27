@@ -28,11 +28,13 @@ use std::sync::Arc;
 use crate::timesync_tree::{NodePortRoles, compute_clock_tree};
 use crate::topology_sidecar_routes::{RouteState, ok_summary, require_session, structured_error};
 
-/// 同步参数默认值（用户只给 GM 不给参数时补全；R10）。取合理 2^n：
-/// sync_period=128ms (2^7)、measure_period=1024ms (2^10)；report_enable 默认开；
+/// 同步参数默认值（用户只给 GM 不给参数时补全；R10）。
+/// sync_period=125ms（2^-3 秒）：合法域是「2 的幂秒、整数 ms 表示」= {125,250,500,1000,2000,4000,8000}
+/// （2^-3~2^3 秒；硬件 OpenSync 口径，boss 定），默认取最快的 125（接近旧 128、收敛快、硬件示例用值）。
+/// measure_period=1024ms (2^10)；report_enable 默认开；
 /// mean_link_delay_thresh=64 (2^6，落在取值域 2^n、n=0..7、max 128 内)；
 /// offset_threshold 给经验默认（逐节点收敛偏移阈值，单位纳秒 ns，boss 定语义；软仿 U7 据此判收敛）。
-const DEFAULT_SYNC_PERIOD: i64 = 128;
+const DEFAULT_SYNC_PERIOD: i64 = 125;
 const DEFAULT_MEASURE_PERIOD: i64 = 1024;
 const DEFAULT_REPORT_ENABLE: i64 = 1;
 const DEFAULT_MEAN_LINK_DELAY_THRESH: i64 = 64;

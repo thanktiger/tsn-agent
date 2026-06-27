@@ -864,10 +864,10 @@ describe("timesync MCP tool registry", () => {
   });
 
   it("set_params forwards only provided fields (mid omitted = all nodes)", async () => {
-    await parseToolText(runTimesyncTool("timesync.set_params", { syncPeriod: 256 }));
+    await parseToolText(runTimesyncTool("timesync.set_params", { syncPeriod: 250 }));
     const { route, body } = lastFetchCall();
     expect(route).toBe("/db/timesync/set_params");
-    expect(body).toMatchObject({ syncPeriod: 256 });
+    expect(body).toMatchObject({ syncPeriod: 250 });
     // pruneUndefined 剔除未提供字段：不发 mid / offsetThreshold。
     expect(body).not.toHaveProperty("mid");
     expect(body).not.toHaveProperty("offsetThreshold");
@@ -919,15 +919,19 @@ describe("timesync input schemas (zod boundary)", () => {
     expect(setGm.safeParse({ gmMid: "3", freSwitch: -1 }).success).toBe(false);
   });
 
-  it("set_params accepts powers of two for periods (1..32768) and rejects non-powers", () => {
-    expect(setParams.safeParse({ syncPeriod: 128 }).success).toBe(true);
-    expect(setParams.safeParse({ syncPeriod: 1 }).success).toBe(true);
-    expect(setParams.safeParse({ syncPeriod: 32768 }).success).toBe(true);
-    expect(setParams.safeParse({ measurePeriod: 1024 }).success).toBe(true);
-    // 非 2 的幂 / 越上界 → 拒绝。
+  it("set_params syncPeriod accepts only 2^k-second integer-ms values; measurePeriod stays power-of-two ms", () => {
+    // syncPeriod 合法集 {125,250,500,1000,2000,4000,8000}（2 的幂秒、整数 ms）。
+    expect(setParams.safeParse({ syncPeriod: 125 }).success).toBe(true);
+    expect(setParams.safeParse({ syncPeriod: 1000 }).success).toBe(true);
+    expect(setParams.safeParse({ syncPeriod: 8000 }).success).toBe(true);
+    // 旧 128（2 的幂 ms 但非 2 的幂秒）+ 其它非集合值 → 拒绝。
+    expect(setParams.safeParse({ syncPeriod: 128 }).success).toBe(false);
+    expect(setParams.safeParse({ syncPeriod: 1 }).success).toBe(false);
+    expect(setParams.safeParse({ syncPeriod: 32768 }).success).toBe(false);
     expect(setParams.safeParse({ syncPeriod: 100 }).success).toBe(false);
-    expect(setParams.safeParse({ syncPeriod: 0 }).success).toBe(false);
-    expect(setParams.safeParse({ syncPeriod: 65536 }).success).toBe(false);
+    // measurePeriod 仍是 2 的幂 ms（1..32768）。
+    expect(setParams.safeParse({ measurePeriod: 1024 }).success).toBe(true);
+    expect(setParams.safeParse({ measurePeriod: 125 }).success).toBe(false);
   });
 
   it("set_params meanLinkDelayThresh is a power of two 1..128", () => {
@@ -952,7 +956,7 @@ describe("timesync input schemas (zod boundary)", () => {
     expect(setParams.safeParse({ reportEnable: 1 }).success).toBe(true);
     expect(setParams.safeParse({ reportEnable: 0 }).success).toBe(true);
     expect(setParams.safeParse({ reportEnable: 2 }).success).toBe(false);
-    expect(setParams.safeParse({ mid: "5", syncPeriod: 256 }).success).toBe(true);
+    expect(setParams.safeParse({ mid: "5", syncPeriod: 250 }).success).toBe(true);
     expect(setParams.safeParse({ mid: "" }).success).toBe(false);
     // 空补丁（全部省略）是合法的——sidecar 端 COALESCE 全 no-op。
     expect(setParams.safeParse({}).success).toBe(true);
