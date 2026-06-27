@@ -1,0 +1,15 @@
+[Unit]
+Description=INET soft-sim HTTP service (tsn-agent)
+After=network.target
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__SERVICE_DIR__
+# 占位由 install.sh 替换。环境变量可在此追加 Environment= 覆盖（端口/运行目录/沉淀指令等）。
+ExecStart=__SERVICE_DIR__/.venv/bin/uvicorn app:app --host 0.0.0.0 --port __PORT__
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
