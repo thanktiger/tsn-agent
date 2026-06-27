@@ -46,7 +46,7 @@ function baseProps(overrides: Partial<WorkspaceToolsProps> = {}): WorkspaceTools
 describe("WorkspaceTools", () => {
   it("renders the tool rail with sessions and settings buttons", () => {
     render(<WorkspaceTools {...baseProps()} />);
-    expect(screen.getByRole("button", { name: /会话/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /工程/ })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /设置/ })).toBeInTheDocument();
   });
 
@@ -54,20 +54,20 @@ describe("WorkspaceTools", () => {
     const user = userEvent.setup();
     const setActivePanel = vi.fn();
     render(<WorkspaceTools {...baseProps({ setActivePanel })} />);
-    await user.click(screen.getByRole("button", { name: /会话/ }));
+    await user.click(screen.getByRole("button", { name: /工程/ }));
     expect(setActivePanel).toHaveBeenCalled();
   });
 
   it("renders the sessions drawer when activePanel is sessions", () => {
     render(<WorkspaceTools {...baseProps({ activePanel: "sessions" })} />);
-    expect(screen.getByRole("button", { name: /新建会话/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /新建工程/ })).toBeInTheDocument();
   });
 
   it("calls onNewSession from the sessions drawer", async () => {
     const user = userEvent.setup();
     const onNewSession = vi.fn();
     render(<WorkspaceTools {...baseProps({ activePanel: "sessions", onNewSession })} />);
-    await user.click(screen.getByRole("button", { name: /新建会话/ }));
+    await user.click(screen.getByRole("button", { name: /新建工程/ }));
     expect(onNewSession).toHaveBeenCalled();
   });
 
@@ -87,14 +87,14 @@ describe("WorkspaceTools", () => {
     );
     await user.click(screen.getByRole("button", { name: /导出当前/ }));
     expect(onExportSession).toHaveBeenCalled();
-    await user.click(screen.getByRole("button", { name: /导入会话/ }));
+    await user.click(screen.getByRole("button", { name: /导入工程/ }));
     expect(onImportSession).toHaveBeenCalled();
   });
 
   it("disables transfer buttons while the agent is running", () => {
     render(<WorkspaceTools {...baseProps({ activePanel: "sessions", transferBusy: true })} />);
     expect(screen.getByRole("button", { name: /导出当前/ })).toBeDisabled();
-    expect(screen.getByRole("button", { name: /导入会话/ })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /导入工程/ })).toBeDisabled();
   });
 
   it("会话预览跳过工具消息，回退到最近的自然语言对话", () => {

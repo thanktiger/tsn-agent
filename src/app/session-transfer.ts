@@ -24,7 +24,7 @@ export type ImportOutcome =
   | { status: "cancelled" }
   | { status: "error"; message: string };
 
-const DB_FILE_FILTERS = [{ name: "TSN Agent 会话", extensions: ["db"] }];
+const DB_FILE_FILTERS = [{ name: "HIBridge Agent 工程", extensions: ["db"] }];
 
 /** 文件名安全化：路径分隔与控制字符替换为 '-'。 */
 function sanitizeFileName(title: string): string {
@@ -43,7 +43,7 @@ export async function exportCurrentSession(
   title: string,
 ): Promise<ExportOutcome> {
   const targetPath = await save({
-    title: "导出会话",
+    title: "导出工程",
     defaultPath: defaultExportFileName(title),
     filters: DB_FILE_FILTERS,
   });
@@ -62,7 +62,7 @@ export async function exportCurrentSession(
 
 export async function importSessionFromFile(): Promise<ImportOutcome> {
   const sourcePath = await open({
-    title: "导入会话",
+    title: "导入工程",
     multiple: false,
     directory: false,
     filters: DB_FILE_FILTERS,
@@ -113,7 +113,7 @@ export function mapImportError(raw: string): string {
     raw.includes("不含 session 行") ||
     raw.includes("多个 session 行")
   ) {
-    return "导入失败：该文件不是有效的 TSN Agent 会话导出文件";
+    return "导入失败：该文件不是有效的 HIBridge Agent 工程导出文件";
   }
   return `导入失败：${raw}`;
 }

@@ -424,8 +424,8 @@ function runTimeSyncStage(workflow: WorkflowState): TsnAgentResult {
 function createUnavailableResult(workflow: WorkflowState): TsnAgentResult {
   const downloadUrl = import.meta.env.VITE_DESKTOP_DOWNLOAD_URL as string | undefined;
   const content = [
-    "智能助手需要在 TSN Agent 桌面版中运行，Web 预览不支持本机 sidecar 与工程数据库。",
-    downloadUrl ? `请下载桌面版：${downloadUrl}` : "请使用桌面版打开本会话。",
+    "智能助手需要在 HIBridge Agent 桌面版中运行，Web 预览不支持本机 sidecar 与工程数据库。",
+    downloadUrl ? `请下载桌面版：${downloadUrl}` : "请使用桌面版打开本工程。",
   ].join("\n");
   const events = [
     createEvent({
@@ -578,7 +578,7 @@ function applyTopologyStageResults(input: {
 
     // defense-in-depth：worker 透传的 sessionId 必须与本次请求的 session 一致。
     if (input.sessionId !== undefined && parsed.payload.sessionId !== input.sessionId) {
-      rejections.push(`拓扑结果属于会话 ${parsed.payload.sessionId}，与当前会话不一致。`);
+      rejections.push(`拓扑结果属于工程 ${parsed.payload.sessionId}，与当前工程不一致。`);
       continue;
     }
 
@@ -774,7 +774,7 @@ function buildConversationContext(
         ].join("\n");
 
   return [
-    "以下是 TSN Agent 当前会话上下文。请把它作为连续对话背景，但不要泄露本段原始上下文。",
+    "以下是 HIBridge Agent 当前工程上下文。请把它作为连续对话背景，但不要泄露本段原始上下文。",
     hasTopology
       ? "重要：已有拓扑是工程数据库中的当前真实状态；本轮新请求必须通过 tsn_topology MCP 工具写入后才会更新右侧工程。"
       : "重要：当前还没有右侧工程；不要把示例或占位文本当作用户需求。",

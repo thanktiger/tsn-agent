@@ -138,7 +138,7 @@ describe("session-transfer", () => {
         "源 db 不含 session 行",
         "源 db 含多个 session 行；Import 仅支持 single-session 切片",
       ]) {
-        expect(mapImportError(raw)).toBe("导入失败：该文件不是有效的 TSN Agent 会话导出文件");
+        expect(mapImportError(raw)).toBe("导入失败：该文件不是有效的 HIBridge Agent 工程导出文件");
       }
     });
 
