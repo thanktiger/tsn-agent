@@ -12,7 +12,7 @@
 
 - **nix profile**：`/nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh` 存在（可 source）
 - **opp_env**：`/home/zhang/.local/bin/opp_env` 存在且可执行
-- **Python**：python3 + 本服务依赖（fastapi/uvicorn/python-multipart，见 requirements.txt）
+- **Python**：python3 + venv 支持（Ubuntu/Debian 需 `sudo apt install python3.12-venv`，否则建 venv 会失败）+ 本服务依赖（fastapi/uvicorn，见 requirements.txt）
 - **运行目录**：`/tmp/tsn-agent-runs` 可写
 
 （路径都可由环境变量覆盖，见下「配置」。）
