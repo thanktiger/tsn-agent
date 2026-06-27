@@ -3,8 +3,9 @@ name: Production Desktop Build
 on:
   workflow_dispatch:
   push:
-    branches:
-      - release/**
+    # 从 main 出 release：版本 bump 经 PR 合入 main 后，在 main 上打 tag vX.Y.Z 触发打包。
+    tags:
+      - "v*.*.*"
 
 permissions:
   contents: write
@@ -12,7 +13,7 @@ permissions:
 jobs:
   prepare-release:
     name: Prepare release metadata
-    if: startsWith(github.ref, 'refs/heads/release/')
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-22.04
     outputs:
       version: ${{ steps.release.outputs.version }}
@@ -40,7 +41,7 @@ jobs:
 
   build:
     name: Build ${{ matrix.name }}
-    if: startsWith(github.ref, 'refs/heads/release/')
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     needs: prepare-release
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
@@ -137,7 +138,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tagName: v${{ needs.prepare-release.outputs.version }}
-          releaseName: TSN Agent v${{ needs.prepare-release.outputs.version }}
+          releaseName: HIBridge Agent v${{ needs.prepare-release.outputs.version }}
           releaseBody: ${{ steps.release-notes.outputs.body }}
           releaseDraft: false
           prerelease: false
