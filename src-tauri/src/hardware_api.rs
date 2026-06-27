@@ -277,7 +277,9 @@ impl HardwareApiClient for ReqwestHardwareClient {
                 "source": "hardware",
                 "mode": "series",
                 "bucket": "1s",
-                "only_synced": false,
+                // 每节点最多回 60 个 1s 桶 = 最近一分钟的滚动实时窗口（boss 定）；
+                // 每秒轮询即拿最近 60 点重画，不在前端累积/不出"一分钟后结论"。
+                "limit": 60,
             }))
             .send()
             .await
