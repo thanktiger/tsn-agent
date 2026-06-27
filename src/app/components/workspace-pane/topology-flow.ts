@@ -52,6 +52,11 @@ export interface TsnEdgeData {
   /** U8/KTD1：端口号读自 src_port/dst_port 列；src 标在 source 端、dst 标在 target 端。NULL→不渲染。 */
   srcPort?: number;
   dstPort?: number;
+  /** time-sync 视图中的同步报文动效方向；普通拓扑阶段不设置。 */
+  timesyncPulse?: "forward" | "reverse" | "none";
+  timesyncPulseDelaySec?: number;
+  timesyncPulseTravelSec?: number;
+  timesyncPulseCycleSec?: number;
   /** 同节点同方位的端口标签序数；渲染层沿连线向内分层，避免标签重叠。 */
   srcOrd?: number;
   dstOrd?: number;
@@ -174,6 +179,9 @@ import type { TimesyncNodeRole, TimesyncSnapshot } from "../../../sessions/times
 /** time-sync 阶段画布注入到 React Flow 节点 data 的时钟树角色（拓扑阶段为 undefined）。 */
 export interface TsnNodeTimesync {
   role: TimesyncNodeRole;
+  isGm?: boolean;
+  arrivalDelaySec?: number;
+  pulseCycleSec?: number;
 }
 
 /**
@@ -187,6 +195,33 @@ export interface TsnNodeTimesync {
  * 方向信息（哪端 master=父）编码在返回值里，渲染层据此画 父→子 的同步报文方向箭头。
  */
 export type TimesyncEdgeKind = "tree-master-to-slave" | "tree-slave-to-master" | "passive";
+
+export interface TimesyncPropagationEdge {
+  pulse: Exclude<TsnEdgeData["timesyncPulse"], undefined | "none">;
+  depth: number;
+  delaySec: number;
+  travelSec: number;
+  cycleSec: number;
+}
+
+export interface TimesyncPropagationNode {
+  depth: number;
+  arrivalDelaySec: number;
+  cycleSec: number;
+}
+
+export interface TimesyncPropagationPlan {
+  edges: Map<string, TimesyncPropagationEdge>;
+  nodes: Map<string, TimesyncPropagationNode>;
+}
+
+const TIMESYNC_PULSE_TRAVEL_SEC = 1.8;
+const TIMESYNC_PULSE_LOOP_PAUSE_SEC = 1.2;
+const TIMESYNC_NODE_CONTACT_LEAD_SEC = 0.12;
+
+function roundTimelineSec(value: number): number {
+  return Math.round(value * 100) / 100;
+}
 
 export function classifyTimesyncEdge(
   link: Pick<TopologyLinkRow, "srcNode" | "dstNode" | "srcPort" | "dstPort">,
@@ -215,11 +250,159 @@ export function classifyTimesyncEdge(
   return "passive";
 }
 
+export function buildTimesyncPropagationPlan(
+  links: TopologyLinkRow[],
+  snapshot: TimesyncSnapshot | undefined,
+): TimesyncPropagationPlan {
+  const gmMid = snapshot?.domain?.gmMid ?? null;
+  if (!gmMid) {
+    return { edges: new Map(), nodes: new Map() };
+  }
+
+  type DirectedTreeEdge = {
+    link: TopologyLinkRow;
+    parent: string;
+    child: string;
+    pulse: TimesyncPropagationEdge["pulse"];
+  };
+  const byParent = new Map<string, DirectedTreeEdge[]>();
+  const sortedLinks = [...links].sort((left, right) => left.linkSeq - right.linkSeq);
+  for (const link of sortedLinks) {
+    const kind = classifyTimesyncEdge(link, snapshot);
+    if (kind === "tree-master-to-slave") {
+      const entries = byParent.get(link.srcNode) ?? [];
+      entries.push({ link, parent: link.srcNode, child: link.dstNode, pulse: "forward" });
+      byParent.set(link.srcNode, entries);
+    } else if (kind === "tree-slave-to-master") {
+      const entries = byParent.get(link.dstNode) ?? [];
+      entries.push({ link, parent: link.dstNode, child: link.srcNode, pulse: "reverse" });
+      byParent.set(link.dstNode, entries);
+    }
+  }
+
+  const visitedDepth = new Map<string, number>([[gmMid, 0]]);
+  const queue = [gmMid];
+  const traversed: Array<DirectedTreeEdge & { depth: number }> = [];
+  for (let index = 0; index < queue.length; index += 1) {
+    const parent = queue[index];
+    const parentDepth = visitedDepth.get(parent) ?? 0;
+    for (const edge of byParent.get(parent) ?? []) {
+      if (visitedDepth.has(edge.child)) {
+        continue;
+      }
+      const childDepth = parentDepth + 1;
+      visitedDepth.set(edge.child, childDepth);
+      queue.push(edge.child);
+      traversed.push({ ...edge, depth: parentDepth });
+    }
+  }
+
+  const maxArrivalDepth = Math.max(0, ...traversed.map((edge) => edge.depth + 1));
+  const cycleSec = maxArrivalDepth * TIMESYNC_PULSE_TRAVEL_SEC + TIMESYNC_PULSE_LOOP_PAUSE_SEC;
+  const edgePlan = new Map<string, TimesyncPropagationEdge>();
+  const nodePlan = new Map<string, TimesyncPropagationNode>();
+  for (const edge of traversed) {
+    const delaySec = edge.depth * TIMESYNC_PULSE_TRAVEL_SEC;
+    edgePlan.set(linkRowId(edge.link), {
+      pulse: edge.pulse,
+      depth: edge.depth,
+      delaySec,
+      travelSec: TIMESYNC_PULSE_TRAVEL_SEC,
+      cycleSec,
+    });
+    nodePlan.set(edge.child, {
+      depth: edge.depth + 1,
+      arrivalDelaySec: roundTimelineSec(
+        Math.max(0, delaySec + TIMESYNC_PULSE_TRAVEL_SEC - TIMESYNC_NODE_CONTACT_LEAD_SEC),
+      ),
+      cycleSec,
+    });
+  }
+
+  return { edges: edgePlan, nodes: nodePlan };
+}
+
+function topologyCenter(nodes: TopologyNodeRow[]): { x: number; y: number } {
+  let minX = Number.POSITIVE_INFINITY;
+  let minY = Number.POSITIVE_INFINITY;
+  let maxX = Number.NEGATIVE_INFINITY;
+  let maxY = Number.NEGATIVE_INFINITY;
+  for (const node of nodes) {
+    minX = Math.min(minX, node.x);
+    minY = Math.min(minY, node.y);
+    maxX = Math.max(maxX, node.x + NODE_W);
+    maxY = Math.max(maxY, node.y + NODE_H);
+  }
+  return {
+    x: (minX + maxX) / 2,
+    y: (minY + maxY) / 2,
+  };
+}
+
+export function layoutTimesyncTreeNodes(
+  nodes: Node[],
+  snapshot: TopologyRowSnapshot,
+  snapshotTimesync: TimesyncSnapshot | undefined,
+  propagationPlan: TimesyncPropagationPlan,
+): Node[] {
+  const gmMid = snapshotTimesync?.domain?.gmMid ?? null;
+  if (!gmMid || nodes.length === 0 || snapshot.nodes.length === 0) {
+    return nodes;
+  }
+
+  const rowByMid = new Map(snapshot.nodes.map((node) => [node.mid, node]));
+  if (!rowByMid.has(gmMid)) {
+    return nodes;
+  }
+
+  const depthByMid = new Map<string, number>([[gmMid, 0]]);
+  for (const [mid, nodePlan] of propagationPlan.nodes) {
+    depthByMid.set(mid, nodePlan.depth);
+  }
+  const maxTreeDepth = Math.max(0, ...depthByMid.values());
+  const fallbackDepth = maxTreeDepth + 1;
+  const groups = new Map<number, Node[]>();
+  for (const node of nodes) {
+    const depth = depthByMid.get(node.id) ?? fallbackDepth;
+    const group = groups.get(depth) ?? [];
+    group.push(node);
+    groups.set(depth, group);
+  }
+
+  const center = topologyCenter(snapshot.nodes);
+  const depthGap = 150;
+  const siblingGap = 180;
+  const depthValues = [...groups.keys()].sort((left, right) => left - right);
+  const maxDepth = Math.max(...depthValues);
+  const startY = center.y - (maxDepth * depthGap) / 2 - NODE_H / 2;
+  const rowOrder = new Map(snapshot.nodes.map((node, index) => [node.mid, index]));
+  const positioned = new Map<string, Node>();
+
+  for (const depth of depthValues) {
+    const group = [...(groups.get(depth) ?? [])].sort(
+      (left, right) => (rowOrder.get(left.id) ?? 0) - (rowOrder.get(right.id) ?? 0),
+    );
+    const width = (group.length - 1) * siblingGap;
+    const startX = center.x - width / 2 - NODE_W / 2;
+    group.forEach((node, index) => {
+      positioned.set(node.id, {
+        ...node,
+        position: {
+          x: Math.round(startX + index * siblingGap),
+          y: Math.round(startY + depth * depthGap),
+        },
+      });
+    });
+  }
+
+  return nodes.map((node) => positioned.get(node.id) ?? node);
+}
+
 /** 父→子方向箭头：报文从 master（父）流向 slave（子），即 GM 往外。 */
 const TREE_DIRECTION_MARKER: EdgeMarker = {
   type: MarkerType.ArrowClosed,
-  width: 16,
-  height: 16,
+  width: 10,
+  height: 10,
   color: "#15803d",
 };
 

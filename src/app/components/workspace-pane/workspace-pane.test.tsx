@@ -1,5 +1,6 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import type { ReactElement } from "react";
 import { describe, expect, it, vi } from "vitest";
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -38,8 +39,9 @@ vi.mock("@xyflow/react", () => ({
   applyNodeChanges: (_changes: unknown[], nodes: Array<{ id: string }>) => nodes,
   Position: { Left: "left", Right: "right", Top: "top", Bottom: "bottom" },
   ReactFlow: (props: {
-    nodes: Array<{ id: string; position: { x: number; y: number } }>;
+    nodes: Array<{ id: string; type?: string; data?: unknown; position: { x: number; y: number } }>;
     edges: Array<{ id: string }>;
+    nodeTypes?: Record<string, (props: { data: unknown; selected: boolean }) => ReactElement>;
     nodesDraggable?: boolean;
     selectionOnDrag?: boolean;
     multiSelectionKeyCode?: string | null;
@@ -72,6 +74,12 @@ vi.mock("@xyflow/react", () => ({
             {node.position.x},{node.position.y}
           </span>
         ))}
+        {nodes.map((node) => {
+          const NodeComponent = node.type ? props.nodeTypes?.[node.type] : undefined;
+          return NodeComponent ? (
+            <NodeComponent key={`render-${node.id}`} data={node.data} selected={false} />
+          ) : null;
+        })}
         {nodes.map((node) => (
           <button key={node.id} type="button" onClick={() => onNodeClick?.({}, node)}>
             选择节点 {node.id}
@@ -118,6 +126,12 @@ vi.mock("@xyflow/react", () => ({
             className?: string;
             markerStart?: unknown;
             markerEnd?: unknown;
+            data?: {
+              timesyncPulse?: string;
+              timesyncPulseDelaySec?: number;
+              timesyncPulseTravelSec?: number;
+              timesyncPulseCycleSec?: number;
+            };
           };
           return (
             <span
@@ -126,6 +140,10 @@ vi.mock("@xyflow/react", () => ({
               data-class={e.className ?? ""}
               data-marker-start={e.markerStart ? "yes" : "no"}
               data-marker-end={e.markerEnd ? "yes" : "no"}
+              data-timesync-pulse={e.data?.timesyncPulse ?? ""}
+              data-timesync-delay={String(e.data?.timesyncPulseDelaySec ?? "")}
+              data-timesync-travel={String(e.data?.timesyncPulseTravelSec ?? "")}
+              data-timesync-cycle={String(e.data?.timesyncPulseCycleSec ?? "")}
             />
           );
         })}
@@ -144,6 +162,7 @@ import type {
   TopologyRowSnapshot,
 } from "../../../sessions/topology-snapshot";
 import {
+  buildTimesyncPropagationPlan,
   classifyTimesyncEdge,
   nodeRowLabel,
   nodeTypeToken,
@@ -1026,7 +1045,7 @@ describe("WorkspacePane 时钟同步视图（U11）", () => {
     expect(screen.queryByLabelText("时钟同步")).not.toBeInTheDocument();
   });
 
-  it("time-sync 阶段显示时钟同步栏与 GM 显示名", () => {
+  it("time-sync 阶段不显示底部时钟同步栏", () => {
     render(
       <WorkspacePane
         {...baseProps({
@@ -1036,13 +1055,13 @@ describe("WorkspacePane 时钟同步视图（U11）", () => {
         })}
       />,
     );
-    const bar = screen.getByLabelText("时钟同步");
-    expect(bar).toHaveTextContent("时钟同步树");
-    // GM = mid "1" → 显示名 SW-1。
-    expect(bar).toHaveTextContent("SW-1");
+    expect(screen.queryByLabelText("时钟同步")).not.toBeInTheDocument();
+    expect(screen.queryByText("主时钟")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "查看同步树" })).toBeInTheDocument();
+    expect(screen.getByTitle("主时钟节点")).toHaveTextContent("GM");
   });
 
-  it("time-sync 阶段未设 GM 时提示未指定", () => {
+  it("time-sync 阶段未设 GM 时不展示底部提示", () => {
     render(
       <WorkspacePane
         {...baseProps({
@@ -1052,10 +1071,11 @@ describe("WorkspacePane 时钟同步视图（U11）", () => {
         })}
       />,
     );
-    expect(screen.getByLabelText("时钟同步")).toHaveTextContent("未指定时钟主节点");
+    expect(screen.queryByLabelText("时钟同步")).not.toBeInTheDocument();
+    expect(screen.queryByText("未指定时钟主节点")).not.toBeInTheDocument();
   });
 
-  it("time-sync 阶段未覆盖节点进告警", () => {
+  it("time-sync 阶段未覆盖节点不展示底部告警", () => {
     // GM=1 落库但 ES-2 不在 timesync_nodes（不连通）→ 未覆盖告警含 ES-2。
     const partial: TimesyncSnapshot = {
       sessionId: "s1",
@@ -1083,7 +1103,7 @@ describe("WorkspacePane 时钟同步视图（U11）", () => {
         })}
       />,
     );
-    expect(screen.getByText(/未覆盖/)).toHaveTextContent("ES-2");
+    expect(screen.queryByText(/未覆盖/)).not.toBeInTheDocument();
   });
 
   it("timesyncRoleBadge 文案映射", () => {
@@ -1126,10 +1146,190 @@ describe("WorkspacePane 时钟同步视图（U11）", () => {
       />,
     );
     const meta = screen.getByTestId("edge-meta-link-0");
-    expect(meta).toHaveAttribute("data-class", "timesync-tree-edge");
+    expect(meta).toHaveAttribute(
+      "data-class",
+      "timesync-tree-edge timesync-flow-edge timesync-flow-forward",
+    );
     // src(1)=父 master、dst(2)=子 slave → 箭头指向 target（markerEnd）。
     expect(meta).toHaveAttribute("data-marker-end", "yes");
     expect(meta).toHaveAttribute("data-marker-start", "no");
+    expect(meta).toHaveAttribute("data-timesync-pulse", "forward");
+    expect(meta).toHaveAttribute("data-timesync-delay", "0");
+    expect(meta).toHaveAttribute("data-timesync-travel", "1.8");
+    const flow = screen.getByTestId("rf-mock");
+    const gmNode = within(flow).getByText("SW-1").closest(".tsn-node");
+    const reachedNode = within(flow).getByText("ES-2").closest(".tsn-node");
+    expect(gmNode).not.toHaveClass("timesync-arrival-pulse");
+    expect(reachedNode).not.toHaveClass("timesync-arrival-pulse");
+  });
+
+  it("time-sync 阶段：只有非 GM 交换机在小圆点到达时触发呼吸灯", () => {
+    const snapshot = portedSnapshot();
+    snapshot.nodes = [
+      { mid: "1", name: "SW-1", x: 0, y: 0, nodeType: "switch", insertOrder: 0 },
+      { mid: "2", name: "SW-2", x: 160, y: 0, nodeType: "switch", insertOrder: 1 },
+    ];
+    render(
+      <WorkspacePane
+        {...baseProps({
+          topologySnapshot: snapshot,
+          workflowStep: "time-sync",
+          timesyncSnapshot: timesyncFor("1"),
+        })}
+      />,
+    );
+    const flow = screen.getByTestId("rf-mock");
+    const gmNode = within(flow).getByText("SW-1").closest(".tsn-node");
+    const reachedSwitch = within(flow).getByText("SW-2").closest(".tsn-node");
+    expect(gmNode).not.toHaveClass("timesync-arrival-pulse");
+    expect(reachedSwitch).toHaveClass("timesync-arrival-pulse");
+    expect(reachedSwitch).toHaveStyle({
+      "--timesync-arrival-delay": "1.68s",
+      "--timesync-cycle-duration": "3s",
+    });
+  });
+
+  it("time-sync 阶段：反向树边虚线动效方向跟随 markerStart", () => {
+    const snapshot = portedSnapshot();
+    snapshot.links = [
+      {
+        linkSeq: 0,
+        name: "rev",
+        srcNode: "2",
+        dstNode: "1",
+        srcPort: 0,
+        dstPort: 0,
+        stylesJson: "{}",
+      },
+    ];
+    render(
+      <WorkspacePane
+        {...baseProps({
+          topologySnapshot: snapshot,
+          workflowStep: "time-sync",
+          timesyncSnapshot: timesyncFor("1"),
+        })}
+      />,
+    );
+    const meta = screen.getByTestId("edge-meta-link-0");
+    expect(meta).toHaveAttribute(
+      "data-class",
+      "timesync-tree-edge timesync-flow-edge timesync-flow-reverse",
+    );
+    expect(meta).toHaveAttribute("data-marker-end", "no");
+    expect(meta).toHaveAttribute("data-marker-start", "yes");
+    expect(meta).toHaveAttribute("data-timesync-pulse", "reverse");
+  });
+
+  it("time-sync 阶段：右上按钮以弹框展示无动画同步树", async () => {
+    const user = userEvent.setup();
+    const snapshot: TopologyRowSnapshot = {
+      sessionId: "s1",
+      nodes: [
+        { mid: "1", name: "SW-1", x: 0, y: 0, nodeType: "switch", insertOrder: 0 },
+        { mid: "2", name: "SW-2", x: 420, y: 0, nodeType: "switch", insertOrder: 1 },
+        { mid: "3", name: "ES-3", x: 840, y: 0, nodeType: "endSystem", insertOrder: 2 },
+      ],
+      links: [
+        {
+          linkSeq: 0,
+          name: null,
+          srcNode: "1",
+          dstNode: "2",
+          srcPort: 0,
+          dstPort: 0,
+          stylesJson: "{}",
+        },
+        {
+          linkSeq: 1,
+          name: null,
+          srcNode: "2",
+          dstNode: "3",
+          srcPort: 1,
+          dstPort: 0,
+          stylesJson: "{}",
+        },
+      ],
+    };
+    const timesync: TimesyncSnapshot = {
+      sessionId: "s1",
+      domain: { gmMid: "1", oneStepMode: 0, freSwitch: 0, disabledLinkSeqs: [] },
+      nodes: [
+        {
+          mid: "1",
+          masterPort: [0],
+          slavePort: [],
+          portPtpEnabled: [0],
+          syncPeriod: 128,
+          measurePeriod: 1024,
+          reportEnable: 1,
+          meanLinkDelayThresh: 64,
+          offsetThreshold: 1000,
+        },
+        {
+          mid: "2",
+          masterPort: [1],
+          slavePort: [0],
+          portPtpEnabled: [0, 1],
+          syncPeriod: 128,
+          measurePeriod: 1024,
+          reportEnable: 1,
+          meanLinkDelayThresh: 64,
+          offsetThreshold: 1000,
+        },
+        {
+          mid: "3",
+          masterPort: [],
+          slavePort: [0],
+          portPtpEnabled: [0],
+          syncPeriod: 128,
+          measurePeriod: 1024,
+          reportEnable: 1,
+          meanLinkDelayThresh: 64,
+          offsetThreshold: 1000,
+        },
+      ],
+    };
+    render(
+      <WorkspacePane
+        {...baseProps({
+          topologySnapshot: snapshot,
+          workflowStep: "time-sync",
+          timesyncSnapshot: timesync,
+        })}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "查看同步树" })).toBeInTheDocument();
+    expect(screen.getByTestId("node-pos-1")).toHaveTextContent("0,0");
+    expect(screen.getByTestId("rf-mock")).toHaveAttribute("data-nodes-draggable", "true");
+
+    await user.click(screen.getByRole("button", { name: "查看同步树" }));
+    const dialog = screen.getByRole("dialog", { name: "同步树" });
+    expect(screen.getAllByTestId("rf-mock")[0]).toHaveAttribute("data-nodes-draggable", "true");
+    expect(within(dialog).getByTestId("rf-mock")).toHaveAttribute("data-nodes-draggable", "false");
+    expect(within(dialog).getByTestId("node-pos-1")).toHaveTextContent("420,-150");
+    expect(within(dialog).getByTestId("node-pos-2")).toHaveTextContent("420,0");
+    expect(within(dialog).getByTestId("node-pos-3")).toHaveTextContent("420,150");
+    expect(within(dialog).getByTestId("edge-meta-link-0")).toHaveAttribute(
+      "data-class",
+      "timesync-tree-edge",
+    );
+    expect(within(dialog).getByTestId("edge-meta-link-0")).toHaveAttribute(
+      "data-timesync-pulse",
+      "none",
+    );
+
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("dialog", { name: "同步树" })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "查看同步树" }));
+    await user.click(screen.getByRole("button", { name: "关闭同步树弹框" }));
+    expect(screen.queryByRole("dialog", { name: "同步树" })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "查看同步树" }));
+    await user.click(screen.getByRole("button", { name: "关闭同步树" }));
+    expect(screen.queryByRole("dialog", { name: "同步树" })).not.toBeInTheDocument();
   });
 
   it("time-sync 阶段：非树边（端口不在 master/slave 集合）淡化无箭头", () => {
@@ -1175,6 +1375,7 @@ describe("WorkspacePane 时钟同步视图（U11）", () => {
     expect(meta).toHaveAttribute("data-class", "timesync-passive-edge");
     expect(meta).toHaveAttribute("data-marker-end", "no");
     expect(meta).toHaveAttribute("data-marker-start", "no");
+    expect(meta).toHaveAttribute("data-timesync-pulse", "none");
   });
 
   it("topology 阶段：边不受时钟树富化影响（保留平面 className、无箭头）", () => {
@@ -1276,6 +1477,110 @@ describe("classifyTimesyncEdge（时钟树边分类纯函数，U8 读端口列�
     // src(0).port0 ∈ master，但 dst(1).port1 ∈ master（非 slave）→ 不构成 master→slave。
     const link = { srcNode: "0", dstNode: "1", srcPort: 0, dstPort: 1 };
     expect(classifyTimesyncEdge(link, snap())).toBe("passive");
+  });
+});
+
+describe("buildTimesyncPropagationPlan（GM 扩散动画计划）", () => {
+  it("从 GM 按层级扩散，分叉子边同一波启动", () => {
+    const links = [
+      {
+        linkSeq: 0,
+        name: null,
+        srcNode: "0",
+        dstNode: "1",
+        srcPort: 0,
+        dstPort: 0,
+        stylesJson: "{}",
+      },
+      {
+        linkSeq: 1,
+        name: null,
+        srcNode: "1",
+        dstNode: "2",
+        srcPort: 1,
+        dstPort: 0,
+        stylesJson: "{}",
+      },
+      {
+        linkSeq: 2,
+        name: null,
+        srcNode: "1",
+        dstNode: "3",
+        srcPort: 2,
+        dstPort: 0,
+        stylesJson: "{}",
+      },
+    ];
+    const snapshot: TimesyncSnapshot = {
+      sessionId: "s1",
+      domain: { gmMid: "0", oneStepMode: 0, freSwitch: 0, disabledLinkSeqs: [] },
+      nodes: [
+        {
+          mid: "0",
+          masterPort: [0],
+          slavePort: [],
+          portPtpEnabled: [0],
+          syncPeriod: null,
+          measurePeriod: null,
+          reportEnable: null,
+          meanLinkDelayThresh: null,
+          offsetThreshold: null,
+        },
+        {
+          mid: "1",
+          masterPort: [1, 2],
+          slavePort: [0],
+          portPtpEnabled: [0, 1, 2],
+          syncPeriod: null,
+          measurePeriod: null,
+          reportEnable: null,
+          meanLinkDelayThresh: null,
+          offsetThreshold: null,
+        },
+        {
+          mid: "2",
+          masterPort: [],
+          slavePort: [0],
+          portPtpEnabled: [0],
+          syncPeriod: null,
+          measurePeriod: null,
+          reportEnable: null,
+          meanLinkDelayThresh: null,
+          offsetThreshold: null,
+        },
+        {
+          mid: "3",
+          masterPort: [],
+          slavePort: [0],
+          portPtpEnabled: [0],
+          syncPeriod: null,
+          measurePeriod: null,
+          reportEnable: null,
+          meanLinkDelayThresh: null,
+          offsetThreshold: null,
+        },
+      ],
+    };
+
+    const plan = buildTimesyncPropagationPlan(links, snapshot);
+    expect(plan.edges.get("link-0")).toEqual(
+      expect.objectContaining({ pulse: "forward", depth: 0, delaySec: 0, travelSec: 1.8 }),
+    );
+    expect(plan.edges.get("link-1")).toEqual(
+      expect.objectContaining({ pulse: "forward", depth: 1, delaySec: 1.8 }),
+    );
+    expect(plan.edges.get("link-2")).toEqual(
+      expect.objectContaining({ pulse: "forward", depth: 1, delaySec: 1.8 }),
+    );
+    expect(plan.nodes.get("1")).toEqual(
+      expect.objectContaining({ depth: 1, arrivalDelaySec: 1.68 }),
+    );
+    expect(plan.nodes.get("2")).toEqual(
+      expect.objectContaining({ depth: 2, arrivalDelaySec: 3.48 }),
+    );
+    expect(plan.nodes.get("3")).toEqual(
+      expect.objectContaining({ depth: 2, arrivalDelaySec: 3.48 }),
+    );
   });
 });
 
