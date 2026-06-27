@@ -207,9 +207,11 @@ export function portLabelPoint(
   y: number,
   position: Position,
   ord = 0,
+  avoidMarker = false,
 ): { x: number; y: number } {
-  const v = 14 + ord * 13;
-  const h = 16 + ord * 20;
+  const markerGap = avoidMarker ? 10 : 0;
+  const v = 14 + markerGap + ord * 13;
+  const h = 16 + markerGap + ord * 20;
   switch (position) {
     case Position.Top:
       return { x, y: y - v };
@@ -249,6 +251,52 @@ function PortLabel({
   );
 }
 
+function EdgePulse({
+  id,
+  path,
+  delaySec = 0,
+  travelSec = 1.8,
+  cycleSec,
+}: {
+  id: string;
+  path: string;
+  delaySec?: number;
+  travelSec?: number;
+  cycleSec?: number;
+}) {
+  const motionPathId = `${id}-timesync-motion-path`;
+  const safeDelaySec = Math.max(0, delaySec);
+  const safeTravelSec = Math.max(0.1, travelSec);
+  const safeCycleSec = Math.max(safeTravelSec, cycleSec ?? safeTravelSec);
+  const hideBeginSec = Math.min(safeCycleSec, safeDelaySec + safeTravelSec);
+  const startRatio = safeDelaySec / safeCycleSec;
+  const endRatio = hideBeginSec / safeCycleSec;
+  return (
+    <>
+      <path id={motionPathId} d={path} className="tsn-edge-motion-path" />
+      <circle className="tsn-edge-pulse" r="8" opacity="0">
+        <animate
+          attributeName="opacity"
+          values="0;0;1;1;0;0"
+          keyTimes={`0;${startRatio};${startRatio};${endRatio};${endRatio};1`}
+          dur={`${safeCycleSec}s`}
+          repeatCount="indefinite"
+        />
+        <animateMotion
+          calcMode="linear"
+          dur={`${safeCycleSec}s`}
+          keyPoints="0;0;1;1"
+          keyTimes={`0;${startRatio};${endRatio};1`}
+          repeatCount="indefinite"
+          rotate="auto"
+        >
+          <mpath href={`#${motionPathId}`} />
+        </animateMotion>
+      </circle>
+    </>
+  );
+}
+
 export function TsnFloatingEdge(props: EdgeProps) {
   const { id, source, target, markerEnd, markerStart, style, selected } = props;
   const sourceNode = useInternalNode(source);
@@ -274,6 +322,12 @@ export function TsnFloatingEdge(props: EdgeProps) {
   const parallelCount = typeof data.parallelCount === "number" ? data.parallelCount : 1;
   const anchors = parallelFloatingEdgeAnchors(sourceRect, targetRect, parallelIndex, parallelCount);
   const path = straightFloatingEdgePath(anchors);
+  const reversePath = straightFloatingEdgePath({
+    sx: anchors.tx,
+    sy: anchors.ty,
+    tx: anchors.sx,
+    ty: anchors.sy,
+  });
   // U8/KTD1：src_port 标在 source 端、dst_port 标在 target 端（几何无关，跟节点不跟屏幕）。
   // 自环（src===dst）端点重合：两标签各自反向小偏移（src 上、dst 下）防叠压。
   const selfLoop = data.selfLoop === true;
@@ -285,6 +339,7 @@ export function TsnFloatingEdge(props: EdgeProps) {
         anchors.sy,
         selfLoop ? Position.Top : anchors.sourcePosition,
         data.srcOrd ?? 0,
+        Boolean(markerStart),
       )
     : undefined;
   const dst = hasDst
@@ -293,6 +348,7 @@ export function TsnFloatingEdge(props: EdgeProps) {
         anchors.ty,
         selfLoop ? Position.Bottom : anchors.targetPosition,
         data.dstOrd ?? 0,
+        Boolean(markerEnd),
       )
     : undefined;
 
@@ -306,6 +362,15 @@ export function TsnFloatingEdge(props: EdgeProps) {
         style={style}
         interactionWidth={TSN_EDGE_INTERACTION_WIDTH}
       />
+      {(data.timesyncPulse === "forward" || data.timesyncPulse === "reverse") && (
+        <EdgePulse
+          id={id}
+          path={data.timesyncPulse === "reverse" ? reversePath : path}
+          delaySec={data.timesyncPulseDelaySec}
+          travelSec={data.timesyncPulseTravelSec}
+          cycleSec={data.timesyncPulseCycleSec}
+        />
+      )}
       {src && hasSrc && (
         <PortLabel x={src.x} y={src.y} text={String(data.srcPort)} selected={Boolean(selected)} />
       )}

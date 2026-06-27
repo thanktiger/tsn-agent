@@ -1866,6 +1866,125 @@ textarea:focus-visible {
   color: var(--accent);
 }
 
+.clock-tree-toggle {
+  position: absolute;
+  z-index: 6;
+  top: 12px;
+  right: 12px;
+  height: 30px;
+  padding: 0 12px;
+  border: 1px solid rgba(250, 84, 28, 0.28);
+  border-radius: 5px;
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 600;
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: 0 6px 18px rgba(15, 23, 42, 0.12);
+}
+
+.clock-tree-toggle:hover {
+  border-color: rgba(250, 84, 28, 0.48);
+  background: #fff7ed;
+}
+
+.timesync-tree-modal-layer {
+  position: fixed;
+  z-index: 40;
+  inset: 72px 24px 24px;
+  display: flex;
+  align-items: stretch;
+  justify-content: center;
+  padding: 0;
+  pointer-events: none;
+}
+
+.timesync-tree-modal-backdrop {
+  position: absolute;
+  inset: 0;
+  border: 0;
+  background: transparent;
+  pointer-events: auto;
+}
+
+.timesync-tree-modal {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-rows: 48px minmax(0, 1fr);
+  width: min(1120px, 100%);
+  min-height: 520px;
+  overflow: hidden;
+  border: 1px solid rgba(226, 232, 240, 0.95);
+  border-radius: 6px;
+  background: #ffffff;
+  box-shadow: 0 22px 55px rgba(15, 23, 42, 0.18);
+  pointer-events: auto;
+}
+
+.timesync-tree-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 14px 0 18px;
+  border-bottom: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.96);
+}
+
+.timesync-tree-modal-header h2 {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.timesync-tree-modal-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: var(--text-muted);
+  font-size: 22px;
+  line-height: 1;
+  background: transparent;
+}
+
+.timesync-tree-modal-close:hover {
+  color: var(--accent);
+  border-color: rgba(250, 84, 28, 0.22);
+  background: #fff7ed;
+}
+
+.timesync-tree-modal-canvas {
+  position: relative;
+  min-height: 0;
+  background-image:
+    linear-gradient(rgba(220, 224, 232, 0.62) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(220, 224, 232, 0.62) 1px, transparent 1px);
+  background-position: -1px -1px;
+  background-size: 60px 60px;
+}
+
+.timesync-tree-modal-canvas .react-flow__edge.timesync-tree-edge .react-flow__edge-path {
+  stroke: #15803d;
+  stroke-width: 2.4px;
+  stroke-dasharray: none;
+  filter: drop-shadow(0 0 3px rgba(21, 128, 61, 0.22));
+}
+
+.timesync-tree-modal-canvas .react-flow__edge.timesync-passive-edge .react-flow__edge-path {
+  stroke: #94a3b8;
+  stroke-width: 1px;
+  stroke-dasharray: none;
+  opacity: 0.6;
+}
+
+.timesync-tree-modal-canvas .react-flow__node {
+  cursor: default;
+}
+
 /* R9：节点可拖动的光标反馈；精确选择器避免波及 Controls 按钮。 */
 .topology-canvas .react-flow__node {
   cursor: grab;
@@ -1997,33 +2116,45 @@ textarea:focus-visible {
   white-space: nowrap;
 }
 
-/* U11：time-sync 阶段时钟树角色视觉——GM 绿、被同步蓝、旁路灰、未覆盖红。
-   叠加在节点类型配色之上（class 顺序保证 timesync-* 后写、优先生效）。 */
+/* U11：time-sync 阶段时钟树角色视觉——节点保留原类型配色，GM 以橙色角标和呼吸灯强调。 */
 .tsn-node.timesync-gm {
-  border-color: #16a34a;
+  border-color: var(--accent);
   border-width: 2px;
-  background: #ecfdf5;
-  box-shadow: 0 0 0 2px rgba(22, 163, 74, 0.25);
-}
-
-.tsn-node.timesync-synced {
-  border-color: #2563eb;
-  background: #eff6ff;
-}
-
-.tsn-node.timesync-passive {
-  border-color: rgba(100, 116, 139, 0.55);
-  background: #f1f5f9;
-  opacity: 0.85;
-}
-
-.tsn-node.timesync-uncovered {
-  border-color: #dc2626;
-  background: #fef2f2;
+  box-shadow:
+    0 0 0 2px rgba(250, 84, 28, 0.16),
+    0 0 18px rgba(250, 84, 28, 0.2);
 }
 
 .tsn-node.timesync-gm .tsn-node-type {
-  background: #16a34a;
+  background: var(--accent);
+}
+
+.tsn-node.timesync-arrival-pulse {
+  animation: timesyncArrivalPulse var(--timesync-cycle-duration, 6s) ease-in-out infinite;
+  animation-delay: var(--timesync-arrival-delay, 0s);
+}
+
+.tsn-node-gm-corner {
+  position: absolute;
+  top: -7px;
+  right: -7px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 25px;
+  height: 18px;
+  padding: 0 6px;
+  border: 1px solid rgba(250, 84, 28, 0.24);
+  border-radius: 9px;
+  color: #ffffff;
+  font-size: 9px;
+  font-weight: 800;
+  line-height: 1;
+  background: var(--accent);
+  box-shadow:
+    0 0 0 2px rgba(255, 247, 237, 0.95),
+    0 4px 10px rgba(250, 84, 28, 0.24);
+  pointer-events: none;
 }
 
 /* U12：time-sync 阶段时钟树边——树边醒目（绿、加粗、实线），非树边淡化（灰、虚线）。
@@ -2031,6 +2162,7 @@ textarea:focus-visible {
 .topology-canvas .react-flow__edge.timesync-tree-edge .react-flow__edge-path {
   stroke: #15803d;
   stroke-width: 2.4px;
+  filter: drop-shadow(0 0 3px rgba(21, 128, 61, 0.22));
 }
 
 .topology-canvas .react-flow__edge.timesync-passive-edge .react-flow__edge-path {
@@ -2040,39 +2172,35 @@ textarea:focus-visible {
   opacity: 0.6;
 }
 
-/* 时钟同步信息栏：GM + 禁用链路 + 未覆盖告警。 */
-.clock-tree-bar {
-  position: absolute;
-  z-index: 2;
-  bottom: 12px;
-  left: 12px;
-  right: 12px;
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 10px;
-  padding: 6px 12px;
-  border: 1px solid rgba(22, 163, 74, 0.3);
-  border-radius: 6px;
-  background: rgba(236, 253, 245, 0.95);
-  font-size: 12px;
+.topology-canvas .react-flow__edge.timesync-flow-edge .react-flow__edge-path {
+  stroke-dasharray: 10 7;
 }
 
-.clock-tree-title {
-  font-weight: 700;
-  color: #15803d;
+.topology-canvas .react-flow__edge.timesync-flow-forward .react-flow__edge-path {
+  animation: timesyncDashFlowForward 0.9s linear infinite;
 }
 
-.clock-tree-gm strong {
-  color: #15803d;
+.topology-canvas .react-flow__edge.timesync-flow-reverse .react-flow__edge-path {
+  animation: timesyncDashFlowReverse 0.9s linear infinite;
 }
 
-.clock-tree-meta {
-  color: var(--text-muted);
+.topology-canvas .react-flow__edge.timesync-flow-edge .react-flow__edge-interaction {
+  stroke-dasharray: none;
+  animation: none;
 }
 
-.clock-tree-warn {
-  color: #b91c1c;
+.tsn-edge-motion-path {
+  fill: none;
+  stroke: transparent;
+  pointer-events: none;
+}
+
+.tsn-edge-pulse {
+  fill: #22c55e;
+  stroke: #ffffff;
+  stroke-width: 2px;
+  filter: drop-shadow(0 0 5px rgba(34, 197, 94, 0.85));
+  pointer-events: none;
 }
 
 /* R2：handle 不再承担视觉与交互（floating 边自算锚点）；保留 DOM 但完全隐形。
@@ -3191,6 +3319,36 @@ textarea:focus-visible {
 
   to {
     background-position: -120% 0;
+  }
+}
+
+@keyframes timesyncArrivalPulse {
+  0%,
+  100% {
+    box-shadow: 0 3px 10px rgba(0, 0, 0, 0.08);
+  }
+
+  6% {
+    box-shadow:
+      0 0 0 4px rgba(34, 197, 94, 0.18),
+      0 0 22px rgba(34, 197, 94, 0.35),
+      0 3px 10px rgba(0, 0, 0, 0.08);
+  }
+
+  18% {
+    box-shadow: 0 3px 10px rgba(0, 0, 0, 0.08);
+  }
+}
+
+@keyframes timesyncDashFlowForward {
+  to {
+    stroke-dashoffset: -17;
+  }
+}
+
+@keyframes timesyncDashFlowReverse {
+  to {
+    stroke-dashoffset: 17;
   }
 }
 

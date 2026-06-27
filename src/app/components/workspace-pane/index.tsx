@@ -12,7 +12,7 @@ import {
   ReactFlow,
   type ReactFlowInstance,
 } from "@xyflow/react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { type CSSProperties, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { WorkflowStep } from "../../../domain/scenario-config";
 import { type TimesyncSnapshot, timesyncRoleForNode } from "../../../sessions/timesync-snapshot";
 import {
@@ -25,10 +25,15 @@ import { DetailRow, Stat } from "../shared";
 import { TimeSyncPanel, type TimesyncSubTab } from "./time-sync-panel";
 import type { SimUiState } from "./timesync-sim";
 import {
+  buildTimesyncPropagationPlan,
   classifyTimesyncEdge,
+  layoutTimesyncTreeNodes,
   linkRowId,
   nodeRowLabel,
   nodeTypeToken,
+  type TimesyncEdgeKind,
+  type TimesyncPropagationPlan,
+  type TsnEdgeData,
   type TsnNodeKind,
   type TsnNodeTimesync,
   timesyncEdgeDecoration,
@@ -40,7 +45,9 @@ export type { TimesyncSubTab } from "./time-sync-panel";
 export type { SimUiState } from "./timesync-sim";
 export type { TimesyncEdgeKind, TsnEdgeData, TsnNodeKind } from "./topology-flow";
 export {
+  buildTimesyncPropagationPlan,
   classifyTimesyncEdge,
+  layoutTimesyncTreeNodes,
   nodeRowLabel,
   nodeTypeToken,
   parseLinkStyles,
@@ -205,6 +212,25 @@ export function WorkspacePane({
 }: WorkspacePaneProps) {
   // U11：time-sync 阶段叠加时钟树视图——画布节点注入端口角色（GM/同步/旁路/未覆盖）。
   const showClockTree = workflowStep === "time-sync";
+  const [isTimesyncTreeDialogOpen, setIsTimesyncTreeDialogOpen] = useState(false);
+  useEffect(() => {
+    if (!showClockTree) {
+      setIsTimesyncTreeDialogOpen(false);
+    }
+  }, [showClockTree]);
+  useEffect(() => {
+    if (!isTimesyncTreeDialogOpen) {
+      return undefined;
+    }
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setIsTimesyncTreeDialogOpen(false);
+      }
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [isTimesyncTreeDialogOpen]);
+
   const flowTopology = useMemo(() => {
     if (!topologySnapshot || isEmptyTopologySnapshot(topologySnapshot)) {
       return undefined;
@@ -216,26 +242,43 @@ export function WorkspacePane({
     // 富化节点 data：注入时钟树角色，画布 TsnTopologyNode 据此渲染角色徽标 + GM 高亮。
     // 富化 edges：树边醒目 + 父→子方向箭头，非树边淡化（替换平面着色，本阶段只看树结构）。
     const linkByEdgeId = new Map(topologySnapshot.links.map((link) => [linkRowId(link), link]));
+    const propagationPlan = buildTimesyncPropagationPlan(topologySnapshot.links, timesyncSnapshot);
     return {
       ...flow,
-      nodes: flow.nodes.map((node) => {
-        const summary = timesyncRoleForNode(timesyncSnapshot, node.id);
-        const timesync: TsnNodeTimesync = { role: summary.role };
-        return { ...node, data: { ...node.data, timesync } };
-      }),
-      edges: flow.edges.map((edge) => {
-        const link = linkByEdgeId.get(edge.id);
-        if (!link) {
-          return edge;
-        }
-        const decoration = timesyncEdgeDecoration(classifyTimesyncEdge(link, timesyncSnapshot));
-        return {
-          ...edge,
-          className: decoration.className,
-          markerStart: decoration.markerStart,
-          markerEnd: decoration.markerEnd,
-        };
-      }),
+      nodes: enrichTimesyncNodes(flow.nodes, timesyncSnapshot, propagationPlan, true),
+      edges: decorateTimesyncEdges(
+        flow.edges,
+        linkByEdgeId,
+        timesyncSnapshot,
+        propagationPlan,
+        true,
+      ),
+    };
+  }, [topologySnapshot, showClockTree, timesyncSnapshot]);
+
+  const timesyncTreeDialogFlow = useMemo(() => {
+    if (!topologySnapshot || isEmptyTopologySnapshot(topologySnapshot) || !showClockTree) {
+      return undefined;
+    }
+    const flow = topologySnapshotToReactFlow(topologySnapshot);
+    const linkByEdgeId = new Map(topologySnapshot.links.map((link) => [linkRowId(link), link]));
+    const propagationPlan = buildTimesyncPropagationPlan(topologySnapshot.links, timesyncSnapshot);
+    const enrichedNodes = enrichTimesyncNodes(flow.nodes, timesyncSnapshot, propagationPlan, false);
+    return {
+      ...flow,
+      nodes: layoutTimesyncTreeNodes(
+        enrichedNodes,
+        topologySnapshot,
+        timesyncSnapshot,
+        propagationPlan,
+      ),
+      edges: decorateTimesyncEdges(
+        flow.edges,
+        linkByEdgeId,
+        timesyncSnapshot,
+        propagationPlan,
+        false,
+      ),
     };
   }, [topologySnapshot, showClockTree, timesyncSnapshot]);
 
@@ -571,26 +614,6 @@ export function WorkspacePane({
       })()
     : undefined;
 
-  // U11：时钟同步信息栏派生数据（GM 显示名、未覆盖节点）。只在 time-sync 阶段用。
-  const clockTreeInfo = useMemo(() => {
-    if (!showClockTree) {
-      return undefined;
-    }
-    const gmMid = timesyncSnapshot?.domain?.gmMid ?? null;
-    const gmNode = gmMid ? topologySnapshot?.nodes.find((node) => node.mid === gmMid) : undefined;
-    const gmLabel = gmMid ? (gmNode ? nodeRowLabel(gmNode) : `节点 ${gmMid}`) : null;
-    // 未覆盖：设了 GM 但拓扑节点不在 timesync_nodes（BFS 从 GM 到不了）——与 Rust
-    // UNCOVERED_NODES 告警同口径。旁路（passive）节点在树里只是端口全空，不算未覆盖，
-    // 由画布徽标「旁路」表达，不进此告警栏。
-    const uncovered = gmMid
-      ? (topologySnapshot?.nodes ?? [])
-          .filter((node) => timesyncRoleForNode(timesyncSnapshot, node.mid).role === "uncovered")
-          .map((node) => nodeRowLabel(node))
-      : [];
-    const disabledCount = timesyncSnapshot?.domain?.disabledLinkSeqs.length ?? 0;
-    return { gmLabel, uncovered, disabledCount };
-  }, [showClockTree, timesyncSnapshot, topologySnapshot]);
-
   return (
     <section className="workspace-pane" aria-label="工程状态">
       <div className="topology-stage grid-bg">
@@ -625,6 +648,15 @@ export function WorkspacePane({
           aria-label="拓扑画布"
           data-testid="topology-canvas"
         >
+          {showClockTree && hasTopology && (
+            <button
+              type="button"
+              className="clock-tree-toggle"
+              onClick={() => setIsTimesyncTreeDialogOpen(true)}
+            >
+              查看同步树
+            </button>
+          )}
           {flowTopology ? (
             <ReactFlow
               nodes={flowNodes}
@@ -661,29 +693,54 @@ export function WorkspacePane({
                   : "描述你的 TSN 需求后生成拓扑图"}
             </div>
           )}
+          {isTimesyncTreeDialogOpen && timesyncTreeDialogFlow && (
+            <div className="timesync-tree-modal-layer">
+              <button
+                type="button"
+                className="timesync-tree-modal-backdrop"
+                aria-label="关闭同步树弹框"
+                onClick={() => setIsTimesyncTreeDialogOpen(false)}
+              />
+              <section
+                className="timesync-tree-modal"
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="timesync-tree-modal-title"
+              >
+                <header className="timesync-tree-modal-header">
+                  <h2 id="timesync-tree-modal-title">同步树</h2>
+                  <button
+                    type="button"
+                    className="timesync-tree-modal-close"
+                    aria-label="关闭同步树"
+                    onClick={() => setIsTimesyncTreeDialogOpen(false)}
+                  >
+                    ×
+                  </button>
+                </header>
+                <div
+                  className="timesync-tree-modal-canvas"
+                  data-testid="timesync-tree-dialog-canvas"
+                >
+                  <ReactFlow
+                    nodes={timesyncTreeDialogFlow.nodes}
+                    edges={timesyncTreeDialogFlow.edges}
+                    nodeTypes={nodeTypes}
+                    edgeTypes={edgeTypes}
+                    nodesDraggable={false}
+                    selectionOnDrag={false}
+                    multiSelectionKeyCode={null}
+                    proOptions={{ hideAttribution: true }}
+                    fitView
+                  >
+                    <Background />
+                    <Controls showInteractive={false} />
+                  </ReactFlow>
+                </div>
+              </section>
+            </div>
+          )}
         </div>
-        {showClockTree && hasTopology && (
-          <div className="clock-tree-bar" role="group" aria-label="时钟同步">
-            <span className="clock-tree-title mono">时钟同步树</span>
-            <span className="clock-tree-gm">
-              {clockTreeInfo?.gmLabel ? (
-                <>
-                  主时钟 <strong>{clockTreeInfo.gmLabel}</strong>
-                </>
-              ) : (
-                "未指定时钟主节点（GM）"
-              )}
-            </span>
-            {clockTreeInfo && clockTreeInfo.disabledCount > 0 && (
-              <span className="clock-tree-meta mono">禁用链路 {clockTreeInfo.disabledCount}</span>
-            )}
-            {clockTreeInfo && clockTreeInfo.uncovered.length > 0 && (
-              <span className="clock-tree-warn" role="status">
-                未覆盖：{clockTreeInfo.uncovered.join("、")}
-              </span>
-            )}
-          </div>
-        )}
       </div>
 
       {/* U10：弹出框显隐由独立 expand 驱动；底部 handle 条常驻，可在无选中节点时展开。 */}
@@ -782,6 +839,74 @@ export function WorkspacePane({
   );
 }
 
+function enrichTimesyncNodes(
+  nodes: Node[],
+  timesyncSnapshot: TimesyncSnapshot | undefined,
+  propagationPlan: TimesyncPropagationPlan,
+  includeArrivalPulse: boolean,
+): Node[] {
+  return nodes.map((node) => {
+    const summary = timesyncRoleForNode(timesyncSnapshot, node.id);
+    const nodePulse = includeArrivalPulse ? propagationPlan.nodes.get(node.id) : undefined;
+    const timesync: TsnNodeTimesync = {
+      role: summary.role,
+      isGm: summary.role === "gm",
+      arrivalDelaySec: nodePulse?.arrivalDelaySec,
+      pulseCycleSec: nodePulse?.cycleSec,
+    };
+    return { ...node, data: { ...node.data, timesync } };
+  });
+}
+
+function decorateTimesyncEdges(
+  edges: Edge[],
+  linkByEdgeId: ReadonlyMap<
+    string,
+    Pick<TopologyRowSnapshot["links"][number], "srcNode" | "dstNode" | "srcPort" | "dstPort">
+  >,
+  timesyncSnapshot: TimesyncSnapshot | undefined,
+  propagationPlan: TimesyncPropagationPlan,
+  includeAnimation: boolean,
+): Edge[] {
+  return edges.map((edge) => {
+    const link = linkByEdgeId.get(edge.id);
+    if (!link) {
+      return edge;
+    }
+    const kind = classifyTimesyncEdge(link, timesyncSnapshot);
+    const decoration = timesyncEdgeDecoration(kind);
+    const pulsePlan = includeAnimation ? propagationPlan.edges.get(edge.id) : undefined;
+    const pulse = pulsePlan?.pulse ?? timesyncPulseDirection(kind);
+    return {
+      ...edge,
+      animated: Boolean(pulsePlan),
+      className: !pulsePlan
+        ? decoration.className
+        : `${decoration.className} timesync-flow-edge timesync-flow-${pulse}`,
+      markerStart: decoration.markerStart,
+      markerEnd: decoration.markerEnd,
+      data: {
+        ...edge.data,
+        timesyncPulse: pulsePlan ? pulse : "none",
+        timesyncPulseDelaySec: pulsePlan?.delaySec,
+        timesyncPulseTravelSec: pulsePlan?.travelSec,
+        timesyncPulseCycleSec: pulsePlan?.cycleSec,
+      },
+    };
+  });
+}
+
+function timesyncPulseDirection(kind: TimesyncEdgeKind): TsnEdgeData["timesyncPulse"] {
+  switch (kind) {
+    case "tree-master-to-slave":
+      return "forward";
+    case "tree-slave-to-master":
+      return "reverse";
+    default:
+      return "none";
+  }
+}
+
 const NODE_KIND_BADGE: Record<TsnNodeKind, string> = {
   switch: "SW",
   endSystem: "ES",
@@ -803,19 +928,41 @@ function TsnTopologyNode({ data }: NodeProps) {
   };
   const nodeType = nodeData.nodeType ?? "endSystem";
   const timesync = nodeData.timesync;
+  const hasArrivalPulse =
+    nodeType === "switch" && timesync?.arrivalDelaySec !== undefined && !timesync.isGm;
   // time-sync 阶段：节点附时钟树角色 class（GM 高亮 + 角色配色）+ 角色徽标。
-  const className = timesync
-    ? `tsn-node ${nodeType} timesync timesync-${timesync.role}`
-    : `tsn-node ${nodeType}`;
+  const className = [
+    "tsn-node",
+    nodeType,
+    timesync ? "timesync" : "",
+    timesync ? `timesync-${timesync.role}` : "",
+    hasArrivalPulse ? "timesync-arrival-pulse" : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+  const nodeStyle =
+    hasArrivalPulse &&
+    timesync?.arrivalDelaySec !== undefined &&
+    timesync.pulseCycleSec !== undefined
+      ? ({
+          "--timesync-arrival-delay": `${timesync.arrivalDelaySec}s`,
+          "--timesync-cycle-duration": `${timesync.pulseCycleSec}s`,
+        } as CSSProperties)
+      : undefined;
 
   return (
-    <div className={className}>
+    <div className={className} style={nodeStyle}>
       {/* R2：floating 边不锚定 handle；保留一对隐形 handle 满足 React Flow 边合法性。 */}
       <Handle id="s" type="source" position={Position.Top} />
       <Handle id="t" type="target" position={Position.Top} />
       <span className="tsn-node-type mono">{NODE_KIND_BADGE[nodeType]}</span>
       <strong>{nodeData.label}</strong>
       <small className="mono">节点 {nodeData.mid}</small>
+      {timesync?.isGm && (
+        <span className="tsn-node-gm-corner mono" title="主时钟节点">
+          GM
+        </span>
+      )}
     </div>
   );
 }
