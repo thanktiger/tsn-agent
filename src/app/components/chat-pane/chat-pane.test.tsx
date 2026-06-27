@@ -143,7 +143,7 @@ describe("ChatPane", () => {
     expect(screen.getByText("topology.initialize")).toBeInTheDocument();
     expect(screen.getByLabelText("运行中")).toBeInTheDocument();
     const article = screen.getByText("topology.initialize").closest("article");
-    const waiting = screen.getByText(/正在连接智能助手，并结合当前会话上下文/);
+    const waiting = screen.getByText(/正在连接智能助手，并结合当前工程上下文/);
     expect(article).toContainElement(waiting);
     expect(article?.querySelector(".tool-call-list")?.compareDocumentPosition(waiting) ?? 0).toBe(
       Node.DOCUMENT_POSITION_FOLLOWING,

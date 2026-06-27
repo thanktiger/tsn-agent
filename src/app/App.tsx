@@ -38,7 +38,7 @@ import {
 } from "./session-transfer";
 
 const repository: SessionRepository = createSessionRepository();
-const ASSISTANT_CONNECTING_MESSAGE = "正在连接智能助手，并结合当前会话上下文生成下一步规划...";
+const ASSISTANT_CONNECTING_MESSAGE = "正在连接智能助手，并结合当前工程上下文生成下一步规划...";
 const SESSION_TITLE_MAX_CHARS = 24;
 
 export function App() {
@@ -450,7 +450,7 @@ export function App() {
         await repository.setCurrent(imported.id);
         setCurrentSession(imported);
       }
-      setTransferNotice({ kind: "success", text: "会话已导入" });
+      setTransferNotice({ kind: "success", text: "工程已导入" });
     } else if (outcome.status === "error") {
       setTransferNotice({ kind: "error", text: outcome.message });
     }
@@ -462,7 +462,7 @@ export function App() {
         <div className="brand-logo" aria-hidden="true">
           <img src={tsnAgentMark} alt="" />
         </div>
-        <h1 className="brand-name">TSN Agent</h1>
+        <h1 className="brand-name">HIBridge Agent</h1>
         <span className="brand-ver">VER {appVersion}</span>
         <span className={hasTopology ? "badge planned" : "badge draft"}>
           <span className="badge-dot" />
@@ -534,8 +534,8 @@ export function App() {
 
       <ConfirmDialog
         open={deleteConfirmOpen}
-        title="删除当前会话"
-        body={`将删除「${currentSession.title}」及其拓扑数据，删除后无法恢复。该会话的 eval 采集样本不会被删除，如需清除请到「评估采集」面板操作。`}
+        title="删除当前工程"
+        body={`将删除「${currentSession.title}」及其拓扑数据，删除后无法恢复。该工程的 eval 采集样本不会被删除，如需清除请到「评估采集」面板操作。`}
         confirmLabel="删除"
         danger
         onConfirm={() => void confirmDeleteSession()}

@@ -280,7 +280,7 @@ function getAgentRunStatusMessage(phase: AgentRunPhase): string {
     return "智能助手正在持续推理，结果会继续更新";
   }
 
-  return "智能助手正在连接并准备当前会话上下文";
+  return "智能助手正在连接并准备当前工程上下文";
 }
 
 function Step({
@@ -320,7 +320,7 @@ function AgentWaitingIndicator() {
         <span />
         <span />
       </span>
-      <span>正在连接智能助手，并结合当前会话上下文生成下一步规划</span>
+      <span>正在连接智能助手，并结合当前工程上下文生成下一步规划</span>
     </div>
   );
 }

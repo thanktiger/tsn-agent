@@ -1,6 +1,6 @@
 ---
 name: tsn-topology
-description: TSN Agent 拓扑阶段主索引。承载场景无关的领域语义、操作流程与场景路由；各场景的模板选择与推荐参数在 references/<场景id>.md。
+description: HIBridge Agent 拓扑阶段主索引。承载场景无关的领域语义、操作流程与场景路由；各场景的模板选择与推荐参数在 references/<场景id>.md。
 ---
 
 <!-- 消费方式：每次运行注入（主索引，场景无关）。场景细节见 references/，由系统按当前场景自动注入对应文件。 -->

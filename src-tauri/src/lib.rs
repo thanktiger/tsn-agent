@@ -118,7 +118,7 @@ pub fn run() {
             skill_files::restore_factory_skills
         ])
         .build(tauri::generate_context!())
-        .expect("failed to build TSN Agent")
+        .expect("failed to build HIBridge Agent")
         .run(|app_handle, event| {
             if matches!(event, tauri::RunEvent::Exit)
                 && let Some(handle) = app_handle.try_state::<topology_sidecar::SidecarHandle>()

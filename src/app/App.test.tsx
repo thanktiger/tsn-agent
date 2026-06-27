@@ -202,7 +202,7 @@ describe("App", () => {
 
     expect(screen.getByText(`VER ${appVersion}`)).toBeInTheDocument();
     expect(screen.getByRole("navigation", { name: "工作台工具" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "会话" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "工程" })).toBeInTheDocument();
     expect(screen.getByText("描述你的 TSN 需求后生成拓扑图")).toBeInTheDocument();
     expect(screen.getByText("草稿")).toBeInTheDocument();
   });
@@ -426,8 +426,8 @@ describe("App", () => {
       expect(screen.getByText("已根据本轮需求生成拓扑草案。")).toBeInTheDocument();
     });
 
-    await user.click(screen.getByRole("button", { name: "会话" }));
-    const sessionList = screen.getByLabelText("最近会话");
+    await user.click(screen.getByRole("button", { name: "工程" }));
+    const sessionList = screen.getByLabelText("最近工程");
     expect(
       within(sessionList).getAllByText("我需要4个交换机，每个交换机连接5个端系统").length,
     ).toBeGreaterThan(0);
@@ -626,13 +626,13 @@ describe("App", () => {
     const user = userEvent.setup();
     render(<App />);
 
-    await user.click(screen.getByRole("button", { name: "会话" }));
-    await user.click(screen.getByRole("button", { name: "新建会话" }));
+    await user.click(screen.getByRole("button", { name: "工程" }));
+    await user.click(screen.getByRole("button", { name: "新建工程" }));
 
     // 新会话清空输入（不再硬预填），由场景化 placeholder 引导。
     expect(screen.getByLabelText("输入你的 TSN 需求")).toHaveValue("");
 
-    await user.click(screen.getByRole("button", { name: "会话" }));
+    await user.click(screen.getByRole("button", { name: "工程" }));
     await waitFor(() => {
       expect(screen.getAllByText("新的 TSN 规划").length).toBeGreaterThanOrEqual(2);
     });
@@ -640,9 +640,9 @@ describe("App", () => {
 
     // 取消路径：弹确认、不删除。
     await user.click(screen.getByRole("button", { name: "删除当前" }));
-    expect(screen.getByText("删除当前会话")).toBeInTheDocument();
+    expect(screen.getByText("删除当前工程")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "取消" }));
-    expect(screen.queryByText("删除当前会话")).not.toBeInTheDocument();
+    expect(screen.queryByText("删除当前工程")).not.toBeInTheDocument();
     expect(screen.getAllByText("新的 TSN 规划")).toHaveLength(sessionsBefore);
 
     // 确认路径：删除生效，且「会话」抽屉保持打开（仍可见新建会话按钮与列表）。
@@ -652,7 +652,7 @@ describe("App", () => {
     await waitFor(() => {
       expect(screen.getAllByText("新的 TSN 规划").length).toBeLessThan(sessionsBefore);
     });
-    expect(screen.getByRole("button", { name: "新建会话" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "新建工程" })).toBeInTheDocument();
   });
 
   // U2：终止编排 + 「已终止」塑形。run 中途经 onChunk 吐部分内容，触发 onTerminate，

@@ -82,7 +82,7 @@ function WorkspaceToolRail({
   onSelectPanel: (panel: WorkspaceToolPanel) => void;
 }) {
   const tools: Array<{ id: WorkspaceToolPanel; label: string; icon: typeof FolderOpen }> = [
-    { id: "sessions", label: "会话", icon: FolderOpen },
+    { id: "sessions", label: "工程", icon: FolderOpen },
     { id: "skills", label: "Skill", icon: Wrench },
     { id: "settings", label: "设置", icon: Settings },
   ];
@@ -224,10 +224,10 @@ function SessionToolPanel({
     <>
       <button className="new-session-button" type="button" onClick={onNewSession}>
         <Plus size={16} aria-hidden="true" />
-        新建会话
+        新建工程
       </button>
 
-      <div className="session-list" role="group" aria-label="最近会话">
+      <div className="session-list" role="group" aria-label="最近工程">
         {sessions.map((session) => (
           <button
             className={session.id === currentSession.id ? "session-item active" : "session-item"}
@@ -242,7 +242,7 @@ function SessionToolPanel({
             <p className="session-desc">{sessionPreview(session.messages)}</p>
             <span className={session.topologyMutationId ? "badge planned" : "badge draft"}>
               <span className="badge-dot" />
-              {session.topologyMutationId ? "配置草案" : "空会话"}
+              {session.topologyMutationId ? "配置草案" : "空工程"}
             </span>
           </button>
         ))}
@@ -253,7 +253,7 @@ function SessionToolPanel({
           className="btn"
           type="button"
           disabled={transferBusy}
-          title={transferBusy ? "智能助手运行中，暂不可导出" : "把当前会话的拓扑数据导出为文件"}
+          title={transferBusy ? "智能助手运行中，暂不可导出" : "把当前工程的拓扑数据导出为文件"}
           onClick={onExportSession}
         >
           <Download size={15} aria-hidden="true" />
@@ -263,11 +263,11 @@ function SessionToolPanel({
           className="btn"
           type="button"
           disabled={transferBusy}
-          title={transferBusy ? "智能助手运行中，暂不可导入" : "从导出文件导入会话"}
+          title={transferBusy ? "智能助手运行中，暂不可导入" : "从导出文件导入工程"}
           onClick={onImportSession}
         >
           <Upload size={15} aria-hidden="true" />
-          导入会话
+          导入工程
         </button>
         <button className="btn danger" type="button" onClick={onDeleteSession}>
           <Trash2 size={15} aria-hidden="true" />
@@ -309,7 +309,7 @@ function EvalToolPanel({ currentSessionId }: { currentSessionId: string }) {
       <h3 className="settings-eval-section__title">评估采集</h3>
       <p className="tool-panel-summary">
         每次与大模型的交互都原样保存为 eval 样本（不脱敏、含密钥原文），用于离线评估。 数据存在本机
-        eval 目录，删除会话不会删除它——隐私清除请用下方按钮。
+        eval 目录，删除工程不会删除它——隐私清除请用下方按钮。
       </p>
       <div className="drawer-actions three-up">
         <button
@@ -347,12 +347,12 @@ function EvalToolPanel({ currentSessionId }: { currentSessionId: string }) {
           onClick={() =>
             handle(async () => {
               await clearEvalForSession(currentSessionId);
-              return "已清除当前会话的 eval 样本";
+              return "已清除当前工程的 eval 样本";
             })
           }
         >
           <Trash2 size={15} aria-hidden="true" />
-          清除当前会话
+          清除当前工程
         </button>
       </div>
       <div className="drawer-actions">
@@ -577,7 +577,7 @@ function SettingsToolPanel({
         <DetailRow label="当前版本" value={`v${version}`} />
         <DetailRow label="默认规划服务" value={resolvePlannerBaseUrl()} />
         <DetailRow
-          label="会话存储"
+          label="工程存储"
           value={window.__TAURI_INTERNALS__ ? "本机数据库" : "浏览器 localStorage"}
         />
         <DetailRow
@@ -632,7 +632,7 @@ function SettingsToolPanel({
 
 function workspacePanelLabel(panel: WorkspaceToolPanel): string {
   const labels: Record<WorkspaceToolPanel, string> = {
-    sessions: "会话管理",
+    sessions: "工程管理",
     skills: "Skill 能力",
     settings: "工作台设置",
   };
@@ -642,7 +642,7 @@ function workspacePanelLabel(panel: WorkspaceToolPanel): string {
 
 function workspacePanelKicker(panel: WorkspaceToolPanel): string {
   const labels: Record<WorkspaceToolPanel, string> = {
-    sessions: "Sessions",
+    sessions: "Projects",
     skills: "Skills",
     settings: "Settings",
   };

@@ -1,8 +1,8 @@
 [package]
 name = "tsn-agent"
 version = "0.7.1"
-description = "TSN Agent desktop application"
-authors = ["TSN Agent contributors"]
+description = "HIBridge Agent desktop application"
+authors = ["HIBridge Agent contributors"]
 edition = "2024"
 
 [lib]

@@ -1,6 +1,6 @@
 ---
 name: tsn-flow-planning
-description: TSN Agent 流量规划阶段占位指引。流量规划在当前版本暂时下线，预计随 Phase B 在 DB-backed 路径上重建。
+description: HIBridge Agent 流量规划阶段占位指引。流量规划在当前版本暂时下线，预计随 Phase B 在 DB-backed 路径上重建。
 ---
 
 # TSN Flow Planning Skill（暂下线占位）
