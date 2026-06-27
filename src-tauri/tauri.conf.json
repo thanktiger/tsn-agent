@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "HIBridge-Agent",
-  "version": "0.7.1",
+  "version": "0.8.0",
   "identifier": "com.tsnagent.app",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -39,6 +39,13 @@
       "../src-node/dist/tsn-topology-server.mjs": "src-node/tsn-topology-server.mjs",
       "../src-node/dist/claude-runtime/": "claude-runtime/"
     },
-    "targets": ["deb", "rpm", "nsis", "msi", "app", "dmg"]
+    "targets": [
+      "deb",
+      "rpm",
+      "nsis",
+      "msi",
+      "app",
+      "dmg"
+    ]
   }
 }
