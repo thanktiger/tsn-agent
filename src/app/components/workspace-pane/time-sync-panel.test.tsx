@@ -94,7 +94,7 @@ function baseProps(overrides: Partial<TimeSyncPanelProps> = {}): TimeSyncPanelPr
     getSimDefaults: vi.fn(async () => ({
       oscillator: "Random" as const,
       driftPpm: 100,
-      driftRateChangePpm: 1,
+      driftRateChangePpm: 0.3,
       changeIntervalMs: 12.5,
       simTimeS: 60,
     })),
@@ -326,7 +326,7 @@ describe("TimeSyncPanel 覆盖表单（U12）", () => {
 
     await user.click(screen.getByRole("button", { name: /覆盖参数/ }));
     fireEvent.change(screen.getByLabelText("振荡器类型"), { target: { value: "Random" } });
-    fireEvent.change(screen.getByLabelText("漂移率步长（ppm）"), { target: { value: "0.3" } });
+    fireEvent.change(screen.getByLabelText("漂移率步长（ppm）"), { target: { value: "0.5" } });
     fireEvent.change(screen.getByLabelText("变化间隔（ms）"), { target: { value: "25" } });
     fireEvent.change(screen.getByLabelText("仿真时长（s）"), { target: { value: "5" } });
 
@@ -334,7 +334,7 @@ describe("TimeSyncPanel 覆盖表单（U12）", () => {
     await waitFor(() =>
       expect(runTimesyncSim).toHaveBeenCalledWith("s1", {
         oscillator: "Random",
-        driftRateChangePpm: 0.3,
+        driftRateChangePpm: 0.5,
         changeIntervalMs: 25,
         simTimeS: 5,
       }),
@@ -375,7 +375,7 @@ describe("TimeSyncPanel 覆盖参数默认值可见（U6）", () => {
     render(<TimeSyncPanel {...baseProps()} />);
     await waitFor(() =>
       expect(
-        screen.getByText(/振荡器 Random · 步长 1ppm · 间隔 12.5ms · 时长 60s · 默认/),
+        screen.getByText(/振荡器 Random · 步长 0.3ppm · 间隔 12.5ms · 时长 60s · 默认/),
       ).toBeInTheDocument(),
     );
     expect(screen.queryByText(/已覆盖/)).not.toBeInTheDocument();
@@ -387,13 +387,13 @@ describe("TimeSyncPanel 覆盖参数默认值可见（U6）", () => {
     render(<TimeSyncPanel {...baseProps({ runTimesyncSim })} />);
     await waitFor(() => expect(screen.getByText(/振荡器 Random/)).toBeInTheDocument());
     await user.click(screen.getByRole("button", { name: /覆盖参数/ }));
-    // 默认 Random：预填实值，步长输入框初值为默认 1。
-    expect(screen.getByLabelText("漂移率步长（ppm）")).toHaveValue(1);
-    fireEvent.change(screen.getByLabelText("漂移率步长（ppm）"), { target: { value: "0.3" } });
-    expect(screen.getByText(/步长 0.3ppm（已覆盖）/)).toBeInTheDocument();
+    // 默认 Random：预填实值，步长输入框初值为默认 0.3。
+    expect(screen.getByLabelText("漂移率步长（ppm）")).toHaveValue(0.3);
+    fireEvent.change(screen.getByLabelText("漂移率步长（ppm）"), { target: { value: "0.5" } });
+    expect(screen.getByText(/步长 0.5ppm（已覆盖）/)).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "开始仿真" }));
     await waitFor(() =>
-      expect(runTimesyncSim).toHaveBeenCalledWith("s1", { driftRateChangePpm: 0.3 }),
+      expect(runTimesyncSim).toHaveBeenCalledWith("s1", { driftRateChangePpm: 0.5 }),
     );
   });
 
@@ -409,7 +409,7 @@ describe("TimeSyncPanel 覆盖参数默认值可见（U6）", () => {
     );
     await waitFor(() =>
       expect(
-        screen.getByText(/振荡器 Random · 步长 1ppm · 间隔 12.5ms · 时长 60s · 默认/),
+        screen.getByText(/振荡器 Random · 步长 0.3ppm · 间隔 12.5ms · 时长 60s · 默认/),
       ).toBeInTheDocument(),
     );
   });

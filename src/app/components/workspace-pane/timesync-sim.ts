@@ -63,7 +63,7 @@ export interface SimDefaults {
 export const FALLBACK_SIM_DEFAULTS: SimDefaults = {
   oscillator: "Random",
   driftPpm: 100,
-  driftRateChangePpm: 1,
+  driftRateChangePpm: 0.3,
   changeIntervalMs: 12.5,
   simTimeS: 60,
 };

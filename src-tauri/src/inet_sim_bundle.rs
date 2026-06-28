@@ -32,7 +32,8 @@ const NOMINAL_TICK_LENGTH: &str = "10ns";
 pub const DEFAULT_CHANGE_INTERVAL_MS: f64 = 12.5;
 /// RandomDriftOscillator 每次更新的漂移率增量默认（ppm，随机游走步长；可被覆盖表单改）。
 /// 这是晶振频率稳定度的代理——决定稳态同步残差；drift_ppm 反而被 gPTP 速率比补偿、几乎不影响偏差。
-pub const DEFAULT_DRIFT_RATE_CHANGE_PPM: f64 = 1.0;
+/// 默认 0.3：HTTP 软仿实测此值稳态偏差 ~30ns、贴合真机（INET showcase 默认 1.0 是为演示放大的劣质晶振）。
+pub const DEFAULT_DRIFT_RATE_CHANGE_PPM: f64 = 0.3;
 /// RandomDriftOscillator 漂移率随机游走的固定边界（ppm）：initialDriftRate 起点范围 + 上下限。
 /// Random 下不暴露给前端——边界对偏差≈0，仅防长仿真漂移率无界增长。
 const RANDOM_BOUND_PPM: f64 = 100.0;
