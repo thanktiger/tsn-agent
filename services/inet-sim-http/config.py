@@ -35,7 +35,7 @@ NIX_PROFILE_SCRIPT = os.environ.get(
 OPP_ENV_BIN = os.environ.get("INET_SIM_OPP_ENV_BIN", "/home/zhang/.local/bin/opp_env")
 
 # run 目录保留个数（GC 时保留最近 N 个，超出清理）。
-RUN_RETENTION = int(os.environ.get("INET_SIM_RUN_RETENTION", "20"))
+RUN_RETENTION = int(os.environ.get("INET_SIM_RUN_RETENTION", "10"))
 
 # 单条命令超时（秒）。opp_env 首跑编译慢，给足。
 CMD_TIMEOUT_S = int(os.environ.get("INET_SIM_CMD_TIMEOUT", "600"))

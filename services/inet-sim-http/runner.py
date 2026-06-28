@@ -109,6 +109,11 @@ def _execute_run(job: Job, scavetool_filter: str) -> None:
         _set_failed(job, "命令超时")
     except OSError as err:
         _set_failed(job, f"执行出错：{err}")
+    finally:
+        # 每跑完一次就回收旧 run 目录（保留最近 RUN_RETENTION 个）。不再只靠服务启动时
+        # gc——服务长跑不重启会让 /tmp/tsn-agent-runs 随仿真次数无界增长（.vec 文件大）。
+        # 当前 run 刚写完、mtime 最新，必被保留；gc 内部吞 OSError，不影响 result。
+        gc()
 
 
 def _set_result(

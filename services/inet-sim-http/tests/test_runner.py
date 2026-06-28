@@ -114,3 +114,29 @@ def test_gc_keeps_recent_n(monkeypatch):
     remaining = sorted(n for n in os.listdir(base) if n.startswith("run-"))
     assert remaining == ["run-03", "run-04"]
     assert os.path.isdir(other)  # 非 run-* 不动
+
+
+def test_execute_run_gcs_old_runs_each_time(monkeypatch):
+    """每次软仿跑完自动回收旧 run（不再只靠服务启动 gc），防 /tmp 无界增长。"""
+    monkeypatch.setattr(config, "RUN_RETENTION", 2)
+    monkeypatch.setattr(
+        runner, "_run_in_inet_env", _fake_inet_env(scave_out="module,name,vectime,vecvalue\n")
+    )
+    base = config.RUN_BASE_DIR
+    os.makedirs(base, exist_ok=True)
+    # 预置 3 个旧 run（mtime 很旧），模拟此前累积。
+    for i in range(3):
+        d = os.path.join(base, f"run-old{i}")
+        os.makedirs(d)
+        os.utime(d, (i, i))
+    job = _wait_done(_submit())  # 新 run 跑完 → finally gc(retention=2)
+    # gc 在 status=done 之后的 finally 里跑（后台线程），轮询等其生效。
+    deadline = time.time() + 2.0
+    remaining: list[str] = []
+    while time.time() < deadline:
+        remaining = sorted(n for n in os.listdir(base) if n.startswith("run-"))
+        if len(remaining) == 2:
+            break
+        time.sleep(0.02)
+    assert len(remaining) == 2, remaining  # 只留最近 2 个
+    assert os.path.basename(job.run_dir) in remaining  # 刚跑的（最新）必保留
