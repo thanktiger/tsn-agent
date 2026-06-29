@@ -300,6 +300,9 @@ export function WorkspacePane({
     new Map(),
   );
   const draggingRef = useRef(false);
+  // 刚拖完的短暂标记：react-flow 在拖动松手后会紧跟一次 onNodeClick，借此守卫——
+  // 拖动不该弹配置面板，只有真正点击才弹（boss）。
+  const justDraggedRef = useRef(false);
   const dragStartMutationIdRef = useRef(0);
   const dragSessionRef = useRef<string | undefined>(undefined);
   const bufferedNodesRef = useRef<Node[] | undefined>(undefined);
@@ -548,6 +551,11 @@ export function WorkspacePane({
   const handleNodeDragStop = useCallback(
     (event: unknown, node: Node) => {
       draggingRef.current = false;
+      // 守卫紧随的 onNodeClick：拖动松手不弹面板（下一 tick 解除，不影响后续真点击）。
+      justDraggedRef.current = true;
+      window.setTimeout(() => {
+        justDraggedRef.current = false;
+      }, 0);
       const sessionId = currentSessionIdRef.current;
       // 拖动期间发生 session 切换：丢弃本次拖动（不写 overlay、不提交到新 session）。
       if (!sessionId || sessionId !== dragSessionRef.current) {
@@ -558,8 +566,7 @@ export function WorkspacePane({
       const y = Math.round(node.position.y);
       mutatePending((next) => next.set(node.id, { x, y }));
 
-      // 拖毕视同选中该节点（R9），详情面板坐标经 overlay 即时显示新值。
-      onNodeSelect(event, node);
+      // 拖动不弹配置面板（boss）；坐标经 overlay 即时更新，已选中节点的面板仍会反映新值。
 
       // 拖动中缓存的快照现在应用（位置仍被 overlay 保护）。
       if (bufferedNodesRef.current) {
@@ -597,14 +604,18 @@ export function WorkspacePane({
           onRefreshTopology();
         });
     },
-    [
-      mutatePending,
-      onNodeSelect,
-      applySnapshotNodes,
-      commitNodePosition,
-      showSaveFailed,
-      onRefreshTopology,
-    ],
+    [mutatePending, applySnapshotNodes, commitNodePosition, showSaveFailed, onRefreshTopology],
+  );
+
+  // onNodeClick 包一层守卫：拖动松手紧跟的 click 跳过，真正点击才打开配置面板。
+  const handleNodeClick = useCallback(
+    (event: unknown, node: Node) => {
+      if (justDraggedRef.current) {
+        return;
+      }
+      onNodeSelect(event, node);
+    },
+    [onNodeSelect],
   );
 
   const hasTopology = !isEmptyTopologySnapshot(topologySnapshot);
@@ -687,7 +698,7 @@ export function WorkspacePane({
               onNodesChange={handleNodesChange}
               onNodeDragStart={handleNodeDragStart}
               onNodeDragStop={handleNodeDragStop}
-              onNodeClick={onNodeSelect}
+              onNodeClick={handleNodeClick}
             >
               <Background />
               <Controls showInteractive={false} />

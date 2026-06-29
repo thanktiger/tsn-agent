@@ -335,7 +335,7 @@ describe("WorkspacePane 弹出框显隐（U10）", () => {
 });
 
 describe("WorkspacePane 拖动持久化（U4）", () => {
-  it("Covers AE2：拖毕以整数坐标 + 拖动起始 mutationId 调用写入，并选中该节点", async () => {
+  it("Covers AE2：拖毕以整数坐标 + 拖动起始 mutationId 调用写入，且不弹配置面板", async () => {
     const user = userEvent.setup();
     const commitNodePosition = vi.fn(async () => ({ mutationId: 8 }));
     const onNodeSelect = vi.fn();
@@ -358,7 +358,8 @@ describe("WorkspacePane 拖动持久化（U4）", () => {
       y: 96,
       expectedMutationId: 7,
     });
-    expect(onNodeSelect).toHaveBeenCalled();
+    // 拖动松手不弹配置面板（boss）；只有真正点击节点才选中。
+    expect(onNodeSelect).not.toHaveBeenCalled();
   });
 
   it("Covers AE5：写入失败 → 触发快照回正并显示可见提示", async () => {
