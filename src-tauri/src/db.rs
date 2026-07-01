@@ -165,11 +165,63 @@ pub const TASK_SCHEMA_SQL: &str = r#"
         ON task(session_id, created_at DESC);
 "#;
 
+/// 流量规划（2026-07-01，flow-tas U2）：录入流表 `topology_streams` + 综合门控表
+/// `flow_plans`。两表 session-scoped（进 SESSION_SCOPED_TABLES 随会话导出/导入），
+/// 故与 timesync_* 同口径放进 safety-net schema（**不用** `ensure_*` ——那是 `task`
+/// 这类不导出的表专用：export/import 的临时库只跑 `safety_net_schema_sql()` 建表，
+/// 若 flow 表只由 ensure_* 建，导出库无表、`INSERT ... SELECT` 直接失败）。
+///
+/// `topology_streams`（R3 单表 + `class` 判别器 ST/BE/RC）：`max_latency_us` 可空
+/// （NULL=规划期从 docx 窗口推导/回退取周期，非空=用户覆盖）；五元组字段可空（设备级
+/// 流标识，本期规划/软仿只用 talker/listener+pcp+period+frame，五元组留后续设备下发）；
+/// `redundant`/`paths` 为 802.1CB 双平面预留槽（R4/R17，本期只留数据槽、不写 FRER 逻辑）。
+/// talker/listener 逻辑上引用 `topology_nodes.mid`，不写跨表 FK（照 timesync 惯例）。
+///
+/// `flow_plans`（KTD2b 承重事实源）：Z3/Eager 综合出的 GCL，per-(port, gate) 粒度，
+/// 键 `(session_id, stream_seq, node, eth_n, gate_index)`。`durations_ns` 是交替
+/// open/close 时长的 JSON 数组串（单位 ns、和=gateCycleDuration），`offset_ns` 门循环相位，
+/// `solver` 记出处（Z3 带保证 / Eager 无保证，R8）。U7 写、U8 读回 pin、U10 对账共用。
+pub const FLOW_DOMAIN_SCHEMA_SQL: &str = r#"
+    CREATE TABLE IF NOT EXISTS topology_streams (
+        session_id     TEXT    NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        stream_seq     INTEGER NOT NULL,
+        class          TEXT    NOT NULL,
+        pcp            INTEGER NOT NULL,
+        period_us      INTEGER NOT NULL,
+        frame_bytes    INTEGER NOT NULL,
+        count          INTEGER NOT NULL,
+        talker         TEXT    NOT NULL,
+        listener       TEXT    NOT NULL,
+        src_ip         TEXT,
+        dst_ip         TEXT,
+        src_l4_port    INTEGER,
+        dst_l4_port    INTEGER,
+        l4_protocol    TEXT,
+        max_latency_us INTEGER,
+        redundant      INTEGER NOT NULL DEFAULT 0,
+        paths          TEXT,
+        PRIMARY KEY (session_id, stream_seq)
+    );
+
+    CREATE TABLE IF NOT EXISTS flow_plans (
+        session_id     TEXT    NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        stream_seq     INTEGER NOT NULL,
+        node           TEXT    NOT NULL,
+        eth_n          INTEGER NOT NULL,
+        gate_index     INTEGER NOT NULL,
+        initially_open INTEGER NOT NULL DEFAULT 1,
+        offset_ns      INTEGER NOT NULL,
+        durations_ns   TEXT    NOT NULL,
+        solver         TEXT    NOT NULL,
+        PRIMARY KEY (session_id, stream_seq, node, eth_n, gate_index)
+    );
+"#;
+
 /// `connect_app_database` 内 safety-net 用：v1 + v2 schema 的 `CREATE IF NOT EXISTS`
-/// + v3 `DROP diagnostic_logs` + v6 `DROP` 废弃空壳表，均幂等。
+/// + flow 域表 + v3 `DROP diagnostic_logs` + v6 `DROP` 废弃空壳表，均幂等。
 pub fn safety_net_schema_sql() -> String {
     format!(
-        "{SESSION_SCHEMA_SQL}\n{P0_DOMAIN_SCHEMA_SQL}\n{DROP_DIAGNOSTIC_LOGS_SQL}\n{DROP_UNUSED_TABLES_SQL}"
+        "{SESSION_SCHEMA_SQL}\n{P0_DOMAIN_SCHEMA_SQL}\n{FLOW_DOMAIN_SCHEMA_SQL}\n{DROP_DIAGNOSTIC_LOGS_SQL}\n{DROP_UNUSED_TABLES_SQL}"
     )
 }
 
@@ -581,6 +633,42 @@ pub const SESSION_SCOPED_TABLES: &[(&str, &[&str])] = &[
             "report_enable",
             "mean_link_delay_thresh",
             "offset_threshold",
+        ],
+    ),
+    (
+        "topology_streams",
+        &[
+            "session_id",
+            "stream_seq",
+            "class",
+            "pcp",
+            "period_us",
+            "frame_bytes",
+            "count",
+            "talker",
+            "listener",
+            "src_ip",
+            "dst_ip",
+            "src_l4_port",
+            "dst_l4_port",
+            "l4_protocol",
+            "max_latency_us",
+            "redundant",
+            "paths",
+        ],
+    ),
+    (
+        "flow_plans",
+        &[
+            "session_id",
+            "stream_seq",
+            "node",
+            "eth_n",
+            "gate_index",
+            "initially_open",
+            "offset_ns",
+            "durations_ns",
+            "solver",
         ],
     ),
 ];
@@ -1135,6 +1223,131 @@ mod tests {
             (
                 "timesync_nodes",
                 &["session_id", "mid", "master_port", "offset_threshold"][..],
+            ),
+        ] {
+            let cols = SESSION_SCOPED_TABLES
+                .iter()
+                .find(|(t, _)| *t == table)
+                .unwrap_or_else(|| panic!("SESSION_SCOPED_TABLES 缺 {table}"))
+                .1;
+            assert_eq!(cols[0], "session_id", "{table} 首列须为 session_id");
+            for c in required {
+                assert!(cols.contains(c), "{table} 导出清单缺列 {c}");
+            }
+        }
+    }
+
+    /// safety-net schema 建出 flow 两表且列齐（flow-tas U2）——它们 session-scoped、
+    /// 须与 timesync 同口径进 safety-net（export/import 临时库靠它建表）。
+    #[tokio::test]
+    async fn safety_net_creates_flow_tables_with_full_columns() {
+        let pool = fresh_safety_net_pool().await;
+
+        let stream_cols = table_columns(&pool, "topology_streams").await;
+        for c in [
+            "session_id",
+            "stream_seq",
+            "class",
+            "pcp",
+            "period_us",
+            "frame_bytes",
+            "count",
+            "talker",
+            "listener",
+            "max_latency_us",
+            "redundant",
+            "paths",
+        ] {
+            assert!(
+                stream_cols.iter().any(|n| n == c),
+                "topology_streams 缺列 {c}"
+            );
+        }
+        let stream_pk: Vec<String> = sqlx::query(
+            "SELECT name FROM pragma_table_info('topology_streams') WHERE pk > 0 ORDER BY pk",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| r.get::<String, _>("name"))
+        .collect();
+        assert_eq!(
+            stream_pk,
+            vec!["session_id".to_string(), "stream_seq".to_string()]
+        );
+
+        let plan_cols = table_columns(&pool, "flow_plans").await;
+        for c in [
+            "session_id",
+            "stream_seq",
+            "node",
+            "eth_n",
+            "gate_index",
+            "initially_open",
+            "offset_ns",
+            "durations_ns",
+            "solver",
+        ] {
+            assert!(plan_cols.iter().any(|n| n == c), "flow_plans 缺列 {c}");
+        }
+
+        // 再跑一遍 safety_net 幂等。
+        sqlx::query(&safety_net_schema_sql())
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn deleting_session_cascades_to_flow_tables() {
+        let pool = fresh_safety_net_pool().await;
+        sqlx::query("INSERT INTO sessions (id, title, created_at, updated_at, payload) VALUES ('s1','t','t','t','{}')")
+            .execute(&pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO topology_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener) \
+             VALUES ('s1', 0, 'ST', 7, 500, 512, 100, '0', '1')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO flow_plans (session_id, stream_seq, node, eth_n, gate_index, offset_ns, durations_ns, solver) \
+             VALUES ('s1', 0, '1', 2, 0, 100, '[500,500]', 'Z3')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query("DELETE FROM sessions WHERE id = 's1'")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let streams_left: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM topology_streams WHERE session_id = 's1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let plans_left: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM flow_plans WHERE session_id = 's1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(streams_left, 0, "删 session 应级联清 topology_streams");
+        assert_eq!(plans_left, 0, "删 session 应级联清 flow_plans");
+    }
+
+    #[test]
+    fn session_scoped_tables_include_flow_tables() {
+        for (table, required) in [
+            (
+                "topology_streams",
+                &["session_id", "stream_seq", "class", "talker", "listener"][..],
+            ),
+            (
+                "flow_plans",
+                &["session_id", "stream_seq", "node", "eth_n", "gate_index"][..],
             ),
         ] {
             let cols = SESSION_SCOPED_TABLES
