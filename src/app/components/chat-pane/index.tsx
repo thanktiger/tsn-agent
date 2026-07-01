@@ -1,4 +1,4 @@
-import { Fragment, type RefObject } from "react";
+import { Fragment, type RefObject, useEffect, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { ScenarioConfig } from "../../../domain/scenario-config";
@@ -10,6 +10,7 @@ import type {
 import type { ChatMessage } from "../../../sessions/session-repository";
 import { redactProviderNamesForDisplay } from "../../../ui/display-redaction";
 import type { AgentRunPhase } from "../../hooks/use-agent-run-controller";
+import { formatRunningStatus, pickRunningVerb } from "./running-status";
 import { ToolCallCard } from "./tool-call-card";
 
 const STEPPER_STEPS = ["topology", "time-sync", "flow-template"] as const;
@@ -65,6 +66,15 @@ export function ChatPane({
   onConfirm,
   onTerminate,
 }: ChatPaneProps) {
+  // 推理动画提示的动词：进入一轮推理（isAgentRunning 由 false→true）时重选一次，整轮固定；
+  // 秒数每秒变触发的重渲染不会改动词（本 effect 只依赖 isAgentRunning）。
+  const [runningVerb, setRunningVerb] = useState(pickRunningVerb);
+  useEffect(() => {
+    if (isAgentRunning) {
+      setRunningVerb(pickRunningVerb());
+    }
+  }, [isAgentRunning]);
+
   return (
     <section className="chat-pane" aria-label="对话区">
       <div className="project-strip">
@@ -197,20 +207,32 @@ export function ChatPane({
             </button>
           </div>
         )}
+        {isAgentRunning && (
+          // 推理动画提示：输入框正上方一行「✳ 动词中…（Ns · 状态词）」。纯视觉、aria-hidden，
+          // 不做每秒播报（无障碍播报由 pending 消息上的 AgentWaitingIndicator + .messages 的
+          // aria-live 承担），避免读屏每秒刷屏。
+          <div className="composer-running" aria-hidden="true">
+            <span className="composer-running__spin">✳</span>
+            <span>
+              {formatRunningStatus({
+                verb: runningVerb,
+                phase: agentRunPhase ?? "streaming",
+                elapsedSeconds: agentRunElapsedSeconds ?? 0,
+              })}
+            </span>
+          </div>
+        )}
         <div className="composer-box">
           <textarea
             id="intent"
             aria-label="输入你的 TSN 需求"
             value={input}
-            // placeholder 三态：①推理中显示运行状态（含秒数，「终止」按钮另作运行指示）；
-            // ②本会话还没发过需求 → 显示「例如：…」指引（仅教首次如何描述拓扑）；
-            // ③已发过首条需求后即闲置，不再复述指引。
+            // placeholder 两态：①本会话还没发过需求 → 显示「例如：…」指引（教首次如何描述拓扑）；
+            // ②已发过首条需求后即闲置，不再复述指引。（推理运行状态改由输入框上方的动画行承担。）
             placeholder={
-              isAgentRunning && agentRunPhase
-                ? `${getAgentRunStatusMessage(agentRunPhase)} · 已运行 ${agentRunElapsedSeconds ?? 0} 秒`
-                : messages.some((message) => message.role === "user")
-                  ? ""
-                  : `例如：${scenarioConfig.exampleIntent}`
+              messages.some((message) => message.role === "user")
+                ? ""
+                : `例如：${scenarioConfig.exampleIntent}`
             }
             onChange={(event) => onInputChange(event.target.value)}
             onKeyDown={(event) => {
@@ -269,18 +291,6 @@ export function ChatPane({
       </div>
     </section>
   );
-}
-
-function getAgentRunStatusMessage(phase: AgentRunPhase): string {
-  if (phase === "waiting") {
-    return "智能助手仍在处理，可能正在等待工具或子任务返回";
-  }
-
-  if (phase === "streaming") {
-    return "智能助手正在持续推理，结果会继续更新";
-  }
-
-  return "智能助手正在连接并准备当前工程上下文";
 }
 
 function Step({

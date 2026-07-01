@@ -6,6 +6,7 @@ import { getScenarioConfig } from "../../../domain/scenario-config";
 import { createInitialWorkflowState } from "../../../project/project-state";
 import type { ChatMessage } from "../../../sessions/session-repository";
 import { ChatPane, type ChatPaneProps } from "./index";
+import { RUNNING_VERBS } from "./running-status";
 
 function baseProps(overrides: Partial<ChatPaneProps> = {}): ChatPaneProps {
   const workflow = createInitialWorkflowState();
@@ -254,8 +255,8 @@ describe("ChatPane", () => {
     expect(screen.queryByRole("button", { name: "终止推理" })).toBeNull();
   });
 
-  it("shows the phase message and elapsed seconds in the textarea placeholder while running (U3)", () => {
-    const { rerender } = render(
+  it("shows the running animation row above the composer while running, not in the placeholder", () => {
+    const { container, rerender } = render(
       <ChatPane
         {...baseProps({
           isAgentRunning: true,
@@ -264,14 +265,87 @@ describe("ChatPane", () => {
         })}
       />,
     );
-    // 推理态：运行状态走 textarea placeholder（复用闲置的 placeholder 空间）。
-    expect(screen.getByPlaceholderText(/正在持续推理/)).toBeInTheDocument();
-    expect(screen.getByPlaceholderText(/已运行 5 秒/)).toBeInTheDocument();
+    // 推理态：运行状态走输入框上方的动画行（含秒数 + 状态短词 + 动词库里的一个词）。
+    const row = container.querySelector(".composer-running");
+    expect(row).not.toBeNull();
+    expect(row?.textContent).toMatch(/中…（5s · 推理中）/);
+    expect(RUNNING_VERBS.some((verb) => row?.textContent?.includes(verb))).toBe(true);
+    // 运行文案不再落在 placeholder 里。
+    expect(screen.queryByPlaceholderText(/已运行/)).toBeNull();
+    expect(screen.queryByPlaceholderText(/正在持续推理/)).toBeNull();
 
     rerender(<ChatPane {...baseProps({ isAgentRunning: false })} />);
-    // 非推理态且本会话还没发过需求：placeholder 退回场景示例（首次指引）。
-    expect(screen.queryByPlaceholderText(/已运行/)).toBeNull();
+    // 非推理态：动画行消失；本会话还没发过需求，placeholder 退回场景示例（首次指引）。
+    expect(container.querySelector(".composer-running")).toBeNull();
     expect(screen.getByPlaceholderText(/例如：/)).toBeInTheDocument();
+  });
+
+  it("reflects the run phase in the animation row's status word", () => {
+    const { container, rerender } = render(
+      <ChatPane
+        {...baseProps({
+          isAgentRunning: true,
+          agentRunPhase: "connecting",
+          agentRunElapsedSeconds: 1,
+        })}
+      />,
+    );
+    expect(container.querySelector(".composer-running")?.textContent).toMatch(/1s · 连接中/);
+
+    rerender(
+      <ChatPane
+        {...baseProps({
+          isAgentRunning: true,
+          agentRunPhase: "waiting",
+          agentRunElapsedSeconds: 2,
+        })}
+      />,
+    );
+    expect(container.querySelector(".composer-running")?.textContent).toMatch(/2s · 等待工具/);
+  });
+
+  it("falls back to 0s and 推理中 in the row when phase/elapsed are omitted", () => {
+    // agentRunPhase/agentRunElapsedSeconds 是可选 prop；组件用 ?? 'streaming' / ?? 0 兜底。
+    const { container } = render(<ChatPane {...baseProps({ isAgentRunning: true })} />);
+    expect(container.querySelector(".composer-running")?.textContent).toMatch(/0s · 推理中/);
+  });
+
+  it("keeps the verb stable across per-second re-renders within one run", () => {
+    // 动词由 pickRunningVerb()（内部 Math.random）在进入推理时选一次。秒数变化触发的
+    // 重渲染不应重新选词——否则说明 useEffect 依赖里混入了 elapsedSeconds，会每秒闪烁。
+    const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0);
+    const { rerender } = render(
+      <ChatPane
+        {...baseProps({
+          isAgentRunning: true,
+          agentRunPhase: "streaming",
+          agentRunElapsedSeconds: 1,
+        })}
+      />,
+    );
+    const callsAfterMount = randomSpy.mock.calls.length;
+    rerender(
+      <ChatPane
+        {...baseProps({
+          isAgentRunning: true,
+          agentRunPhase: "streaming",
+          agentRunElapsedSeconds: 2,
+        })}
+      />,
+    );
+    expect(randomSpy.mock.calls.length).toBe(callsAfterMount);
+    randomSpy.mockRestore();
+  });
+
+  it("reseeds the verb when a fresh run starts (false→true)", () => {
+    const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0);
+    const { rerender } = render(<ChatPane {...baseProps({ isAgentRunning: true })} />);
+    const callsAfterFirstRun = randomSpy.mock.calls.length;
+    rerender(<ChatPane {...baseProps({ isAgentRunning: false })} />);
+    rerender(<ChatPane {...baseProps({ isAgentRunning: true })} />);
+    // 新一轮推理开始应重新选一次词。
+    expect(randomSpy.mock.calls.length).toBeGreaterThan(callsAfterFirstRun);
+    randomSpy.mockRestore();
   });
 
   it("drops the example-guidance placeholder once the user has sent a request (U3 refine)", () => {
@@ -298,14 +372,14 @@ describe("ChatPane", () => {
     expect(onInputChange).toHaveBeenCalled();
   });
 
-  it("keeps the stage-confirmation card alongside the running placeholder and terminate button (U3)", () => {
+  it("keeps the stage-confirmation card alongside the running animation row and terminate button (U3)", () => {
     const workflow = createInitialWorkflowState();
     const waitingStage = {
       ...workflow.stages[workflow.currentStep],
       status: "waiting_confirmation" as const,
       summary: "已识别 4 个交换机。",
     };
-    render(
+    const { container } = render(
       <ChatPane
         {...baseProps({
           currentStage: waitingStage,
@@ -318,6 +392,6 @@ describe("ChatPane", () => {
 
     expect(screen.getByRole("button", { name: "确认并继续" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "终止推理" })).toBeInTheDocument();
-    expect(screen.getByPlaceholderText(/已运行 3 秒/)).toBeInTheDocument();
+    expect(container.querySelector(".composer-running")?.textContent).toMatch(/3s · 推理中/);
   });
 });

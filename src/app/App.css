@@ -1610,6 +1610,29 @@ textarea:focus-visible {
   align-self: center;
 }
 
+/* 推理动画提示行：输入框正上方一行「✳ 动词中…（Ns · 状态词）」。文案取安静的次要色、
+   图标用 accent 匀速旋转（呼应 AgentWaitingIndicator 的 accent 圆点 + text-secondary 文案）。 */
+.composer-running {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.composer-running__spin {
+  display: inline-block;
+  color: var(--accent);
+  animation: composerSpin 1.1s linear infinite;
+}
+
+@keyframes composerSpin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .composer-box {
   position: relative;
 }
