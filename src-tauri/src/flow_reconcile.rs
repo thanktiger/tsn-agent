@@ -91,6 +91,12 @@ fn raw_open_starts(
 }
 
 /// 对账两组 GCL（synth 综合 vs expected docx 门窗），门循环 cycle_ns。空输入任一方 → 不等价。
+///
+/// `#[allow(dead_code)]`：R9 对账谓词是**测试/验收期**工具（U10 用综合结果对比冻结的 docx
+/// 期望门窗），运行期 `plan_tas` 不内联对账（库里无 docx 靶）。故非测试构建里无生产调用方；
+/// 本 allow 连带把本模块 API（open_intervals_ns 等）标 live。U10 接入后（`#[cfg(test)]` 消费）
+/// 仍需保留（clippy --lib 不含 test cfg）。
+#[allow(dead_code)]
 pub fn reconcile(synth: &[GclEntry], expected: &[GclEntry], cycle_ns: u64) -> ReconcileVerdict {
     let mut notes = Vec::new();
 
