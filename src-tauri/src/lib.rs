@@ -2,6 +2,7 @@ mod backend_e2e;
 mod commands;
 mod db;
 mod eval_command;
+mod flow_reconcile;
 mod flow_route;
 mod flow_sidecar_routes;
 mod flow_verify;
