@@ -83,18 +83,13 @@ export function ChatPane({
 
       <div className="chat-stepper" role="group" aria-label="配置步骤">
         {STEPPER_STEPS.map((step, index, steps) => {
-          // Phase B-α：flow-template 阶段 aria-disabled + tooltip
-          const isFlowStage = step === "flow-template";
+          // U4：flow-template 已解冻——三个阶段一致按 workflow 状态渲染，不再划掉「暂下线」。
           return (
             <Fragment key={step}>
               <Step
                 index={`${index + 1}`}
                 label={scenarioConfig.stageLabels[step]}
                 status={workflow.stages[step].status}
-                disabled={isFlowStage}
-                disabledReason={
-                  isFlowStage ? "流量规划在当前版本暂时下线，预计 Phase B 回归" : undefined
-                }
               />
               {index < steps.length - 1 && (
                 <span
@@ -297,25 +292,15 @@ function Step({
   index,
   label,
   status,
-  disabled,
-  disabledReason,
 }: {
   index: string;
   label: string;
   status: WorkflowStepStatus;
-  /** Phase B-α (plan v3 U9c)：标记暂下线阶段（flow-template）。 */
-  disabled?: boolean;
-  /** tooltip 文案，鼠标 hover + screen reader 都可以读。 */
-  disabledReason?: string;
 }) {
   const className = status === "confirmed" ? "passed" : status;
 
   return (
-    <div
-      className={`stepper-item ${className}${disabled ? " disabled" : ""}`}
-      aria-disabled={disabled || undefined}
-      title={disabled ? disabledReason : undefined}
-    >
+    <div className={`stepper-item ${className}`}>
       <span className="si-num">{index}</span>
       <span className="si-label">{label}</span>
     </div>

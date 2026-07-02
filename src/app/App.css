@@ -1167,21 +1167,6 @@ textarea:focus-visible {
   color: var(--success);
 }
 
-/* Phase B-α (plan v3 U9c)：flow-template / planning-export 暂下线灰态。 */
-.stepper-item.disabled {
-  color: var(--text-muted);
-  opacity: 0.45;
-  cursor: not-allowed;
-  text-decoration: line-through;
-}
-
-.stepper-item.disabled .si-num {
-  border-color: var(--text-muted);
-  color: var(--text-muted);
-  background: transparent;
-}
-
-/* Phase B-α 灰态告知 banner（在 chat-stepper 之上）。 */
 .stepper-item.passed .si-num {
   border-color: var(--success);
   color: #ffffff;
