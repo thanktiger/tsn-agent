@@ -212,13 +212,19 @@ export async function runClaude(userPrompt, options = {}, queryFn = query) {
     cwd,
     // 打包态指向随 app 分发的 claude binary；dev 态 undefined → SDK 默认用 node_modules 平台包。
     ...(claudeBinaryPath ? { pathToClaudeCodeExecutable: claudeBinaryPath } : {}),
-    settingSources: ["user", "project"],
-    // 显式 pin 模型：settingSources 含 "user" 会继承开发者个人 Claude Code 的
-    // 默认模型（如 /model 切到 worker 环境不可用的型号即整轮失败）——产品运行时
-    // 不耦合个人偏好。
+    // 隔离模式（不读任何文件系统 settings）：
+    // - 不含 "user" → 不继承开发者个人 Claude Code 的 enabledPlugins（compound-engineering/
+    //   gstack 等几十个 skill/agent 描述会灌进工具 schema）与个人默认模型/偏好；
+    // - 不含 "project" → 不加载项目 AGENTS.md/CLAUDE.md（那是给开发者看的，非运行时 agent 所需）。
+    // 运行时依赖全部显式传入：model 下方 pin、mcpServers/skills/env 各自显式声明，不靠 settings 文件。
+    settingSources: [],
     model: "claude-sonnet-4-6",
     permissionMode: "dontAsk",
-    tools: { type: "preset", preset: "claude_code" },
+    // 只发 agent 实际用到的内置工具，不用整套 claude_code 预设（预设会把 Bash/Write/
+    // Edit/Glob/Grep/Task/WebFetch/WebSearch/TodoWrite 等全套 schema 发给模型，白吃 token；
+    // allowedTools 只是免确认白名单、不裁剪发送）。Read 用于查阅其它场景 reference（SKILL.md
+    // 明示）；Skill 由 skills 选项管理、列此确保可用；领域写操作全走 mcpServers 的 MCP 工具。
+    tools: ["Read", "Skill"],
     allowedTools: buildAllowedToolsForStage(
       resolvedOptions.stageRunnerInput,
       Boolean(topologyMcpConfig),
@@ -351,6 +357,31 @@ export async function runClaude(userPrompt, options = {}, queryFn = query) {
 
     if (message.type === "result") {
       sessionId = message.session_id ?? sessionId;
+
+      // 观测（临时）：记录本轮真实 token 消耗。result.usage 来自 API 响应，后端无关
+      // （vLLM/DeepSeek 皆可）。独立 jsonl、不进 eval schema；写盘失败静默、不阻断本轮。
+      if (
+        message.usage &&
+        typeof resolvedOptions.evalDir === "string" &&
+        resolvedOptions.evalDir.trim()
+      ) {
+        const u = message.usage;
+        const usageLine =
+          JSON.stringify({
+            t: new Date().toISOString(),
+            stage: evalStage,
+            scenario: evalScenarioId,
+            model: sdkOptions.model,
+            num_turns: message.num_turns ?? null,
+            input_tokens: u.input_tokens ?? null,
+            output_tokens: u.output_tokens ?? null,
+            cache_read_input_tokens: u.cache_read_input_tokens ?? null,
+            cache_creation_input_tokens: u.cache_creation_input_tokens ?? null,
+          }) + "\n";
+        appendFile(join(resolvedOptions.evalDir, "token-usage.jsonl"), usageLine, "utf8").catch(
+          () => {},
+        );
+      }
 
       if (message.structured_output?.assistantText) {
         assistantText = message.structured_output.assistantText;
