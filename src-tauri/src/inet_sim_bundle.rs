@@ -773,8 +773,12 @@ fn build_flow_tas_ini(
         let ident = sidx
             .iter()
             .map(|&i| {
+                // udp != nullptr 守卫：本节点开了 gPTP（hasTimeSynchronization，MASTER/SLAVE 皆
+                // 生成无 UDP 头的 gPTP 控制包），会流经 streamIdentifier 对每个包求 packetFilter。
+                // 裸 udp.destPort 在 gPTP 包上 → udp=nullptr → .destPort 崩（eval_error）。INET 自带
+                // showcase 的 talker 都关了时间同步故无此坑；我们的流 talker 带 gPTP，须短路守卫。
                 format!(
-                    "{{stream: \"{}\", packetFilter: expr(udp.destPort == {})}}",
+                    "{{stream: \"{}\", packetFilter: expr(udp != nullptr && udp.destPort == {})}}",
                     streams[i].class, placements[i].port
                 )
             })
@@ -1381,5 +1385,32 @@ mod tests {
         // synth configuration 里 ST 的 gateIndex=1、BE 的 gateIndex=0。
         assert!(ini.contains("pcp: 7, gateIndex: 1"), "{ini}");
         assert!(ini.contains("pcp: 0, gateIndex: 0"), "{ini}");
+    }
+
+    /// 流识别 packetFilter 必须带 udp != nullptr 短路守卫：talker 开了 gPTP，无 UDP 头的 gPTP
+    /// 控制包会流经 streamIdentifier，裸 udp.destPort 会在其上求空指针成员而崩（真机 eval_error）。
+    #[test]
+    fn stream_filter_guards_against_non_udp_packets() {
+        let (nodes, links, timing) = sample();
+        let b = build_flow_tas_sim_bundle(
+            &nodes,
+            &links,
+            "1",
+            &timing,
+            &SimOverrides::default(),
+            &flow_streams(),
+            FlowTasSchedule::Synth,
+            "s1",
+            7,
+        )
+        .unwrap();
+        let ini = &b.bundle.omnetpp_ini;
+        // 守卫形态在。
+        assert!(
+            ini.contains("packetFilter: expr(udp != nullptr && udp.destPort =="),
+            "{ini}"
+        );
+        // 裸形态（expr( 紧跟 udp.destPort）不得再出现——回归哨兵。
+        assert!(!ini.contains("expr(udp.destPort"), "{ini}");
     }
 }
