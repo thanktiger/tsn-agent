@@ -2064,6 +2064,7 @@ textarea:focus-visible {
 
 .tsn-node {
   position: relative;
+  --tsn-node-type-bg: var(--accent);
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
   grid-template-areas:
@@ -2085,15 +2086,18 @@ textarea:focus-visible {
 /* 节点类型视觉系统：交换机钢蓝、端系统橙、控制器紫——
    与边的平面配色（A 蓝 --plane-a / B 红 --plane-b）保持区分。 */
 .tsn-node.switch {
+  --tsn-node-type-bg: #334155;
   border-color: rgba(51, 65, 85, 0.55);
   background: #f3f6fa;
 }
 
 .tsn-node.endSystem {
+  --tsn-node-type-bg: var(--accent);
   border-color: rgba(250, 84, 28, 0.55);
 }
 
 .tsn-node.controller {
+  --tsn-node-type-bg: #7c3aed;
   border-color: rgba(124, 58, 237, 0.55);
   background: #faf7ff;
 }
@@ -2110,15 +2114,7 @@ textarea:focus-visible {
   color: #ffffff;
   font-size: 10px;
   font-weight: 700;
-  background: var(--accent);
-}
-
-.tsn-node.switch .tsn-node-type {
-  background: #334155;
-}
-
-.tsn-node.controller .tsn-node-type {
-  background: #7c3aed;
+  background: var(--tsn-node-type-bg);
 }
 
 .tsn-node strong {
@@ -2146,10 +2142,6 @@ textarea:focus-visible {
   box-shadow:
     0 0 0 2px rgba(250, 84, 28, 0.16),
     0 0 18px rgba(250, 84, 28, 0.2);
-}
-
-.tsn-node.timesync-gm .tsn-node-type {
-  background: var(--accent);
 }
 
 .tsn-node-gm-corner {

@@ -1062,6 +1062,24 @@ describe("WorkspacePane 时钟同步视图（U11）", () => {
     expect(screen.getByTitle("主时钟节点")).toHaveTextContent("GM");
   });
 
+  it("time-sync 阶段：交换机作为 GM 时保留交换机节点样式", () => {
+    render(
+      <WorkspacePane
+        {...baseProps({
+          topologySnapshot: namedSnapshot(),
+          workflowStep: "time-sync",
+          timesyncSnapshot: timesyncFor("1"),
+        })}
+      />,
+    );
+
+    const flow = screen.getByTestId("rf-mock");
+    const gmNode = within(flow).getByText("SW-1").closest(".tsn-node");
+    expect(gmNode).toHaveClass("switch", "timesync-gm");
+    expect(within(gmNode as HTMLElement).getByText("SW")).toHaveClass("tsn-node-type");
+    expect(within(gmNode as HTMLElement).getByTitle("主时钟节点")).toHaveTextContent("GM");
+  });
+
   it("time-sync 阶段未设 GM 时不展示底部提示", () => {
     render(
       <WorkspacePane
