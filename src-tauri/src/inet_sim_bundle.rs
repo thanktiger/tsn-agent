@@ -566,24 +566,26 @@ fn build_sync_block(
 }
 
 /// 流量类：一个 pcp 对应一个 gateIndex（transmissionGate 下标 = 流量类）。
-struct FlowClassInfo {
-    name: String,
-    pcp: i64,
-    gate_index: usize,
+pub(crate) struct FlowClassInfo {
+    pub(crate) name: String,
+    pub(crate) pcp: i64,
+    pub(crate) gate_index: usize,
 }
 
 /// 单流在 bundle 里的放置：talker/listener 上的 app 下标、UDP 端口、门下标。
-struct FlowPlacement {
-    talker_app: usize,
-    listener_app: usize,
-    port: i64,
-    gate_index: usize,
+/// pub(crate)：U8 verify 据 listener_app 构造 sink app 的 module 路径匹配 per-stream 向量。
+pub(crate) struct FlowPlacement {
+    pub(crate) talker_app: usize,
+    pub(crate) listener_app: usize,
+    pub(crate) port: i64,
+    pub(crate) gate_index: usize,
 }
 
 /// 从流集算：①流量类表（distinct pcp 升序 → gate_index）②每流放置 ③每节点 app 总数。
 /// app 下标 per-node（source app 先、sink app 后，各按 stream_seq）——一个节点可同时是
 /// 发端与收端，app 空间不重叠。端口 = 基址 + 全局稠密下标（source destPort == sink localPort）。
-fn plan_flow_traffic(
+/// pub(crate)：U8 verify 复用同一放置逻辑（绝不各算一份、避免 app 下标漂移）。
+pub(crate) fn plan_flow_traffic(
     streams: &[FlowStreamSpec],
 ) -> (
     Vec<FlowClassInfo>,

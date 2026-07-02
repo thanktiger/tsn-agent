@@ -52,20 +52,20 @@ impl PlanResult {
     }
 }
 
-/// 库内流行（topology_streams 子集，plan 用）。
-struct DbStream {
-    stream_seq: i64,
-    class: String,
-    pcp: i64,
-    period_us: i64,
-    frame_bytes: i64,
-    count: i64,
-    talker: String,
-    listener: String,
-    max_latency_us: Option<i64>,
+/// 库内流行（topology_streams 子集，plan/verify 共用）。
+pub(crate) struct DbStream {
+    pub(crate) stream_seq: i64,
+    pub(crate) class: String,
+    pub(crate) pcp: i64,
+    pub(crate) period_us: i64,
+    pub(crate) frame_bytes: i64,
+    pub(crate) count: i64,
+    pub(crate) talker: String,
+    pub(crate) listener: String,
+    pub(crate) max_latency_us: Option<i64>,
 }
 
-async fn load_streams(
+pub(crate) async fn load_streams(
     pool: &sqlx::Pool<sqlx::Sqlite>,
     session_id: &str,
 ) -> Result<Vec<DbStream>, String> {
