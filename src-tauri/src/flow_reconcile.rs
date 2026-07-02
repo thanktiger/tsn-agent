@@ -289,4 +289,44 @@ mod tests {
         assert!(v.equivalent, "跨界相移应等价：{:?}", v.notes);
         assert_eq!(v.delta_ns, Some(900_000));
     }
+
+    /// U10/R18/R9：docx 案例 4.1.2（双平面单跳 Qbv）真实门窗对账。
+    /// E6 门开 [32us,64us]、SW1 门开 [64us,96us]，1ms 周期。同解等价、真机可能整体相移仍等价、
+    /// 门窗不同判 mismatch。门窗 → GclEntry：offset=开始、durations=[开时长, 闭时长]、io=true。
+    fn docx_case1_expected() -> Vec<GclEntry> {
+        vec![
+            // E6 egress ST 门：开 [32us,64us)。
+            gate("E6", 0, 1, 32_000, vec![32_000, 968_000], true),
+            // SW1 egress ST 门：开 [64us,96us)。
+            gate("SW1", 0, 1, 64_000, vec![32_000, 968_000], true),
+        ]
+    }
+
+    #[test]
+    fn docx_case1_gate_windows_reconcile() {
+        let expected = docx_case1_expected();
+        // 同一组解 → 等价 Δ=0。
+        let same = reconcile(&expected, &expected, CYCLE);
+        assert!(same.equivalent, "docx 门窗同解应等价：{:?}", same.notes);
+        assert_eq!(same.delta_ns, Some(0));
+
+        // 真机综合可能整体相移一常量（如 +10us）→ 仍判等价（R9）。
+        let shifted = vec![
+            gate("E6", 0, 1, 42_000, vec![32_000, 968_000], true),
+            gate("SW1", 0, 1, 74_000, vec![32_000, 968_000], true),
+        ];
+        let v = reconcile(&shifted, &expected, CYCLE);
+        assert!(v.equivalent, "整体相移 +10us 应等价：{:?}", v.notes);
+        assert_eq!(v.delta_ns, Some(990_000)); // shift(expected, 990us) == shifted，即 expected 早 10us
+
+        // 门窗时长不同（E6 开 40us 而非 32us）→ mismatch。
+        let wrong = vec![
+            gate("E6", 0, 1, 32_000, vec![40_000, 960_000], true),
+            gate("SW1", 0, 1, 64_000, vec![32_000, 968_000], true),
+        ];
+        assert!(
+            !reconcile(&wrong, &expected, CYCLE).equivalent,
+            "门窗不同应判 mismatch"
+        );
+    }
 }

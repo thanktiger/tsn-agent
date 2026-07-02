@@ -19,16 +19,33 @@ R18-R20/R24 的验证分两层（plan U10）：
   PASS）+ ST+BE 混合 + 坏 GCL 对照，真打宿主机 `100.104.38.106:19090`。宿主机单运行锁把 8 用例
   ×分钟级 plan+verify 串行化，墙钟成本高，故不进 CI。
 
-## ⚠ 前置：docx 期望值缺口（需 boss 提供）
+## docx 三个 Qbv 用例（唯一事实源，取自 `docs/prototypes/TSN典型组网测试方案_20260527.docx`）
 
-计划要求「docx 8 用例期望值只写一次（共享 Rust const）」作为唯一事实源。**本期实现落地了
-完整录流→规划→验证管道 + 上述 CI 回归，但 docx 的 8 个 Qbv 用例的具体数据（每用例的流集
-参数、per-hop 期望门窗、期望时延）需要 docx 原文**。拿到 docx 后：
-1. 建 `src-tauri/src/flow_docx_fixtures.rs`（或 tests fixture），把 8 用例的 (拓扑, 流集, 期望门窗,
-   期望结果) 写为共享 const（U7 对账单测 + 本清单验收共用、grep 断言无重复硬编码，R20）。
-2. 用 `flow_reconcile::reconcile(synth_gcl, docx_expected_gcl, cycle)` 做对账（R9 等价即通过）。
-3. 双跳拓扑（4ES+4SW）造夹具时**核对 docx 拓扑不含同 plane 等价多路径**（否则触发 U5
-   `AMBIGUOUS_ROUTE`，与「必须通过」冲突，见 plan Open Question）。
+8 个用例里 AS（案例 1/4/7）属时间同步阶段、CB（案例 3/6）本期 xfail，**Qbv 三例（案例 2/5/8）
+是本阶段验收靶**。三例共享同一条 ST 流：
+
+- 五元组：srcIP `192.168.1.1` / dstIP `192.168.1.2` / srcPort `1024` / dstPort `1024` / UDP。
+- 流量周期 `1ms`（=门控周期）、报文 `512B`、发送数 `10000`；通过标准：收=发（0 丢包）、抖动<1us、
+  端到端时延符合调度规划。门控周期恒 1ms。
+
+| 案例 | 拓扑 | GM | ST 路径（平面 A） | 逐跳门窗（每跳 egress 开门 [start,end]，1ms 周期内） |
+|---|---|---|---|---|
+| 4.1.2 | 双平面单跳 6ES(E1-E6)+2SW(SW1/SW2) | E4 | E6→SW1→E3 | E6:[32us,64us]、SW1:[64us,96us] |
+| 4.2.2 | 双平面双跳 4ES(E1-E4)+4SW(SW1-SW4) | E1 | E1→SW1→SW3→E3 | E1:[32us,64us]、SW1:[64us,96us]、SW3:[96us,128us] |
+| 5.1.2 | 5 跳线性 2ES(E1/E2)+5SW(SW1-SW5) | E1 | E1→SW1→SW2→SW3→SW4→SW5→E2（6 跳） | E1:[32,64]、SW1:[64,96]、SW2:[96,128]、SW3:[128,160]、SW4:[160,192]、SW5:[192,224]（us） |
+
+时钟同步：GM 如上，同步周期 `2^-3s`=125ms、链路测量周期 500ms（AS 案例）。
+
+**门窗→GclEntry**：门窗 [a,b]us = 1ms 周期内 [a,b) 开、其余闭。对账（`flow_reconcile`）比的是「每
+端口每门开区间集合，允许全局相移」——门窗即该门的开区间（如 E6 门 = 开区间 (32us,32us 长)）。
+
+**核对**：三例都是**单平面单路径**（ST 走平面 A 一条路径），不触发 U5「同 plane 等价多路径」歧义
+（plan Open Question 消解——docx 双跳也是单条 E1→SW1→SW3→E3，非 A/B 同平面多路径）。CB（案例 3/6）
+才用双平面 A/B，本期 xfail。
+
+**落地建议**（真机验收 + 可选 CI 对账加固）：把上表写成 `src-tauri` 内一个共享 const（case→流集
++ 逐跳期望 GclEntry），U7 对账单测与本清单验收共用、grep 断言无重复硬编码（R20）；`flow_reconcile.rs`
+已有基于本表案例 4.1.2 门窗的对账单测（docx_case1_gate_windows_reconcile）。
 
 ## 验收步骤（每用例）
 
