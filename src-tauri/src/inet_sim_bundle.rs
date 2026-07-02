@@ -589,6 +589,23 @@ pub(crate) struct FlowPlacement {
 /// app 下标 per-node（source app 先、sink app 后，各按 stream_seq）——一个节点可同时是
 /// 发端与收端，app 空间不重叠。端口 = 基址 + 全局稠密下标（source destPort == sink localPort）。
 /// pub(crate)：U8 verify 复用同一放置逻辑（绝不各算一份、避免 app 下标漂移）。
+/// flow-tas 软仿时长（秒）：取各流 count×period 的最大值（至少 1ms）。源按固定间隔持续产包，
+/// sim 时长即决定产包数（INET 源无产包上限参数）——据此让产包数≈用户 count。验证侧用相同公式
+/// 反推每流实发数（floor(sim/period)+1，含 t=0 包）判丢包，无需服务回传发送计数。
+pub(crate) fn flow_sim_time_s(streams: &[FlowStreamSpec]) -> f64 {
+    streams
+        .iter()
+        .map(|s| s.count.max(1) as f64 * s.period_us as f64 / 1_000_000.0)
+        .fold(0.0_f64, f64::max)
+        .max(0.001)
+}
+
+/// 某流在给定 sim 时长下的确定性产包数：floor(sim/period)+1（源在 t=0 也产一个）。
+pub(crate) fn flow_expected_sent(sim_time_s: f64, period_us: i64) -> i64 {
+    let period_s = period_us.max(1) as f64 / 1_000_000.0;
+    (sim_time_s / period_s).floor() as i64 + 1
+}
+
 pub(crate) fn plan_flow_traffic(
     streams: &[FlowStreamSpec],
 ) -> (
@@ -679,7 +696,12 @@ fn build_flow_tas_ini(
     streams: &[FlowStreamSpec],
     schedule: FlowTasSchedule,
 ) -> String {
-    let sim_time = overrides.sim_time_s.unwrap_or(DEFAULT_SIM_TIME_S);
+    // sim 时长按流量推导（非固定 60s）：INET ActivePacketSource 无「产 N 个就停」参数、按
+    // productionInterval 持续产包直到 sim 结束，故 sim 时长决定产包数。取各流 count×period 最大值
+    // → 源产包数≈count（验证侧按可算的实发数判丢包，见 flow_verify_command）。允许 overrides 覆盖。
+    let sim_time = overrides
+        .sim_time_s
+        .unwrap_or_else(|| flow_sim_time_s(streams));
     let mut ini = build_general_header("tsnagent.generated.TsnAgentFlowTasNetwork", sim_time);
     ini.push_str(&build_sync_block(
         mapped, port_eth, gm_ned, timing, overrides,
@@ -1390,6 +1412,44 @@ mod tests {
         // synth configuration 里 ST 的 gateIndex=7、BE 的 gateIndex=0。
         assert!(ini.contains("pcp: 7, gateIndex: 7"), "{ini}");
         assert!(ini.contains("pcp: 0, gateIndex: 0"), "{ini}");
+    }
+
+    /// sim 时长按 count×period 推导（取最大流），最少 1ms；expected_sent = floor(sim/period)+1。
+    #[test]
+    fn sim_time_and_expected_sent_from_count_period() {
+        let streams = vec![
+            FlowStreamSpec {
+                stream_seq: 0,
+                class: "ST".into(),
+                pcp: 7,
+                talker: "1".into(),
+                listener: "2".into(),
+                period_us: 500,
+                frame_bytes: 512,
+                count: 10000,
+                max_latency_us: None,
+                path_fragments: None,
+            },
+            FlowStreamSpec {
+                stream_seq: 1,
+                class: "BE".into(),
+                pcp: 0,
+                talker: "1".into(),
+                listener: "2".into(),
+                period_us: 1000,
+                frame_bytes: 512,
+                count: 100,
+                max_latency_us: None,
+                path_fragments: None,
+            },
+        ];
+        // 最大流 10000×500us=5s；BE 100×1000us=0.1s → 取 5s。
+        assert!((flow_sim_time_s(&streams) - 5.0).abs() < 1e-9);
+        // 5s 下：ST(500us) 产 10001；BE(1000us) 产 5001（远超其 count=100，故须按 sim 反推非 count）。
+        assert_eq!(flow_expected_sent(5.0, 500), 10001);
+        assert_eq!(flow_expected_sent(5.0, 1000), 5001);
+        // 空流兜底 ≥1ms。
+        assert!((flow_sim_time_s(&[]) - 0.001).abs() < 1e-9);
     }
 
     /// 流识别 packetFilter 必须带 udp != nullptr 短路守卫：talker 开了 gPTP，无 UDP 头的 gPTP

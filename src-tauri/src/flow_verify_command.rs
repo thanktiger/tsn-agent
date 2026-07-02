@@ -6,9 +6,11 @@
 //! 绝不渲染绿（R16）。**pin 校验的是 plan 落库那张 GCL**——不 pin 则 verify 可能得另一组合法解。
 //!
 //! 向量名（U1 spike 钉死）：时延 `packetLifeTime:vector`、抖动 `packetJitter:vector`（均落
-//! `.vec`、现 scavetool 路径可取）。**丢包判据的「发送数」**：本期以流的 `count` 为期望值判
-//! 收=发；源是否需按 count 界定发送上限 / 服务是否补导 `.sca` 发送计数，是 plan 记的 Open
-//! Question，留 U10 真机验收钉死（CI 层用冻结 CSV 确定性断言 classify）。
+//! `.vec`、现 scavetool 路径可取）。**丢包判据（U10 收口 plan Open Question）**：INET
+//! ActivePacketSource 无「产 N 个就停」参数、按 productionInterval 持续产到 sim 结束，故
+//! sim 时长按 `count×period` 推导（`flow_sim_time_s`），「实发」由 `floor(sim/period)+1`
+//! 确定性反推（`flow_expected_sent`，无需服务回传发送数）。判 `实发 - 收 ≤ 在途容差`
+//! （容差=⌈实测max时延/period⌉+1）——自由产包源 sim 结束时总有在途尾巴，故不能要求精确相等。
 
 use serde::Serialize;
 use sqlx::Row;
@@ -16,7 +18,7 @@ use sqlx::Row;
 use crate::inet_remote::{RemoteError, RemoteRunner, SimRunOutcome};
 use crate::inet_sim_bundle::{
     FlowStreamSpec, FlowTasSchedule, GclEntry, SimOverrides, build_flow_tas_sim_bundle,
-    plan_flow_traffic,
+    flow_expected_sent, flow_sim_time_s, plan_flow_traffic,
 };
 use crate::inet_sim_command::{load_timing, load_topology};
 
@@ -155,6 +157,7 @@ fn classify(
     specs: &[FlowStreamSpec],
     placements: &[crate::inet_sim_bundle::FlowPlacement],
     node_ned: &std::collections::BTreeMap<String, String>,
+    sim_time_s: f64,
 ) -> Vec<StreamVerdict> {
     let max_of = |name_needle: &str, suffix: &str| -> (usize, f64) {
         // 汇总匹配 module 后缀 + name 的所有样本：返回 (样本数, 最大值 ns)。
@@ -187,11 +190,23 @@ fn classify(
             let (_jn, jitter_max_ns) = max_of("packetJitter", &suffix);
             let window_ns = (s.max_latency_us.unwrap_or(s.period_us) as f64) * 1_000.0;
 
+            // 实发按 sim 时长确定性反推（源固定间隔产到 sim 结束，无产包上限）：floor(sim/period)+1。
+            // 丢包判据：实发 - 收 ≤ 在途容差。容差 = ⌈实测max时延/period⌉+1，界定 sim 结束时仍在途、
+            // 未及送达的尾巴（非真丢）——自由产包源无法做到「产完全部送达」，故不能要求收==实发精确相等。
+            let expected_sent = flow_expected_sent(sim_time_s, s.period_us);
+            let period_ns = (s.period_us.max(1) as f64) * 1_000.0;
+            let in_flight_tol = (latency_max_ns / period_ns).ceil() as i64 + 1;
+
             let mut reasons = Vec::new();
             if received == 0 {
                 reasons.push("无收包（空结果）".to_string());
-            } else if (received as i64) != s.count {
-                reasons.push(format!("收 {received} ≠ 发 {}（丢包）", s.count));
+            } else if (received as i64) > expected_sent {
+                reasons.push(format!("收 {received} > 实发 {expected_sent}（重复/异常）"));
+            } else if expected_sent - (received as i64) > in_flight_tol {
+                reasons.push(format!(
+                    "收 {received} ＜ 实发 {expected_sent}（丢包 {}，超在途容差 {in_flight_tol}）",
+                    expected_sent - received as i64
+                ));
             }
             if jitter_max_ns >= JITTER_LIMIT_NS {
                 reasons.push(format!("抖动 {jitter_max_ns:.0}ns ≥ 1us"));
@@ -207,7 +222,7 @@ fn classify(
                 talker: s.talker.clone(),
                 listener: s.listener.clone(),
                 received,
-                expected: s.count,
+                expected: expected_sent,
                 jitter_max_ns,
                 latency_max_ns,
                 window_ns,
@@ -332,7 +347,15 @@ pub async fn verify_tas_inner<R: RemoteRunner>(
 
     let (_classes, placements, _node_apps) = plan_flow_traffic(&specs);
     let rows = parse_vec_csv(&csv);
-    let per_stream = classify(&rows, &specs, &placements, &sim_bundle.node_ned_names);
+    // 与 bundle 用同一公式（SimOverrides::default 未覆盖 sim_time）反推实发数。
+    let sim_time_s = flow_sim_time_s(&specs);
+    let per_stream = classify(
+        &rows,
+        &specs,
+        &placements,
+        &sim_bundle.node_ned_names,
+        sim_time_s,
+    );
 
     let passed = per_stream.iter().filter(|v| v.pass).count();
     let all_pass = passed == per_stream.len() && !per_stream.is_empty();
@@ -474,6 +497,9 @@ mod tests {
             assert_eq!(r.per_stream.len(), 1);
             assert!(r.per_stream[0].pass);
             assert_eq!(r.per_stream[0].received, 3);
+            // 实发按 sim 时长反推（count×period=1500us → floor(1500/500)+1=4），非用户 count=3；
+            // 收 3 差 1 属在途尾巴（≤容差）→ 仍判通过。
+            assert_eq!(r.per_stream[0].expected, 4);
         });
     }
 
@@ -508,9 +534,9 @@ mod tests {
         tauri::async_runtime::block_on(async {
             let pool = fresh_pool().await;
             seed(&pool).await;
-            // 只收到 2 个（发 3）。
+            // 只收到 1 个（实发≈4：sim=count×period=1500us→floor+1=4）——丢 3 个远超在途容差 → FAIL。
             let csv = format!(
-                "{}TsnAgentFlowTasNetwork.es2.app[0].sink,packetLifeTime:vector,0 0,0.0001 0.00012\nTsnAgentFlowTasNetwork.es2.app[0].sink,packetJitter:vector,0 0,0.0000002 0.0000003\n",
+                "{}TsnAgentFlowTasNetwork.es2.app[0].sink,packetLifeTime:vector,0,0.0001\nTsnAgentFlowTasNetwork.es2.app[0].sink,packetJitter:vector,0,0.0000002\n",
                 header()
             );
             let r = verify_tas_inner(
