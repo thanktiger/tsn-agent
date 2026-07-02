@@ -159,14 +159,21 @@ fn classify(
     node_ned: &std::collections::BTreeMap<String, String>,
     sim_time_s: f64,
 ) -> Vec<StreamVerdict> {
-    let max_of = |name_needle: &str, suffix: &str| -> (usize, f64) {
-        // 汇总匹配 module 后缀 + name 的所有样本：返回 (样本数, 最大值 ns)。
+    // skip_first：抖动 max 跳过每条向量的首样本。INET packetJitter 首样本是第一个包对隐含 0
+    // 参考的差值（≈该包时延，非真实包间抖动），是定义性启动瞬态；跳过后取的是稳态抖动。
+    // 时延/收包数不跳（received 须全量）。
+    let max_of = |name_needle: &str, suffix: &str, skip_first: bool| -> (usize, f64) {
         let mut count = 0usize;
         let mut max_ns = 0.0f64;
         for r in rows {
             if r.name.contains(name_needle) && r.module.contains(suffix) {
-                count += r.values.len();
-                for &v in &r.values {
+                let vals: &[f64] = if skip_first && !r.values.is_empty() {
+                    &r.values[1..]
+                } else {
+                    &r.values
+                };
+                count += vals.len();
+                for &v in vals {
                     let ns = v * 1e9; // 秒 → ns
                     if ns > max_ns {
                         max_ns = ns;
@@ -186,8 +193,8 @@ fn classify(
                 .cloned()
                 .unwrap_or_else(|| s.listener.clone());
             let suffix = format!("{sink_ned}.app[{}]", placements[i].listener_app);
-            let (received, latency_max_ns) = max_of("packetLifeTime", &suffix);
-            let (_jn, jitter_max_ns) = max_of("packetJitter", &suffix);
+            let (received, latency_max_ns) = max_of("packetLifeTime", &suffix, false);
+            let (_jn, jitter_max_ns) = max_of("packetJitter", &suffix, true);
             let window_ns = (s.max_latency_us.unwrap_or(s.period_us) as f64) * 1_000.0;
 
             // 实发按 sim 时长确定性反推（源固定间隔产到 sim 结束，无产包上限）：floor(sim/period)+1。
@@ -509,8 +516,9 @@ mod tests {
         tauri::async_runtime::block_on(async {
             let pool = fresh_pool().await;
             seed(&pool).await;
+            // 高抖动样本放在**非首位**（首样本被 skip_first 跳过——那是定义性启动瞬态）。
             let csv = format!(
-                "{}TsnAgentFlowTasNetwork.es2.app[0].sink,packetLifeTime:vector,0 0 0,0.0001 0.00012 0.00011\nTsnAgentFlowTasNetwork.es2.app[0].sink,packetJitter:vector,0 0 0,0.000002 0.0000003 0.0000001\n",
+                "{}TsnAgentFlowTasNetwork.es2.app[0].sink,packetLifeTime:vector,0 0 0,0.0001 0.00012 0.00011\nTsnAgentFlowTasNetwork.es2.app[0].sink,packetJitter:vector,0 0 0,0.0000001 0.000002 0.0000003\n",
                 header()
             );
             let r = verify_tas_inner(
@@ -525,6 +533,31 @@ mod tests {
             assert_eq!(r.status, "fail", "{r:?}");
             assert!(!r.per_stream[0].pass);
             assert!(r.per_stream[0].reason.as_deref().unwrap().contains("抖动"));
+        });
+    }
+
+    /// 首样本高抖动是定义性启动瞬态（INET packetJitter 首值≈首包时延），应被跳过→不判失败。
+    #[test]
+    fn verify_ignores_first_sample_jitter_spike() {
+        tauri::async_runtime::block_on(async {
+            let pool = fresh_pool().await;
+            seed(&pool).await;
+            // 首抖动样本 2us（>1us）但其余 <1us；跳首后不该触发抖动失败。
+            let csv = format!(
+                "{}TsnAgentFlowTasNetwork.es2.app[0].sink,packetLifeTime:vector,0 0 0,0.0001 0.00012 0.00011\nTsnAgentFlowTasNetwork.es2.app[0].sink,packetJitter:vector,0 0 0,0.000002 0.0000003 0.0000001\n",
+                header()
+            );
+            let r = verify_tas_inner(
+                &pool,
+                "s1",
+                &MockRunner {
+                    outcome: outcome(Some(&csv)),
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(r.status, "ok", "{r:?}");
+            assert!(r.per_stream[0].pass, "首样本抖动尖不该判失败：{r:?}");
         });
     }
 

@@ -909,6 +909,11 @@ fn build_flow_tas_ini(
                     .collect::<Vec<_>>()
                     .join(", ");
                 ini.push_str(&format!("{base}.durations = [{durs}]\n"));
+                // 关隐式保护带：Z3 门窗是零余量（开窗=正好一帧传输时间），而 enableImplicitGuardBand
+                // 默认 true 会禁止「发不完就不许进本窗」的帧——包恰好卡在窗边界即被拒、滑到下一周期
+                // (+一个门周期≈500us)。Z3 已保证帧在窗内放得下，此处关掉这层运行时严格边界检查，
+                // honor Z3 排程。真机实证：关掉后 6 跳链时延 527us→27.66us、漂移尾巴消失。
+                ini.push_str(&format!("{base}.enableImplicitGuardBand = false\n"));
             }
         }
     }
@@ -1323,6 +1328,13 @@ mod tests {
         assert!(
             !ini.contains("Z3GateScheduleConfigurator"),
             "pin 模式不得实例化配置器：{ini}"
+        );
+        // 零余量门窗须关隐式保护带，否则包卡窗边界被拒、滑一个门周期（真机 527us→27us）。
+        assert!(
+            ini.contains(
+                "*.sw1.eth[0].macLayer.queue.transmissionGate[1].enableImplicitGuardBand = false"
+            ),
+            "{ini}"
         );
         // 网络名切到 flow。
         assert!(
