@@ -114,6 +114,219 @@ pub(crate) fn flow_frame_overhead_bytes(has_rc: bool) -> i64 {
     FLOW_FRAME_OVERHEAD_BYTES + if has_rc { FLOW_FRAME_RTAG_BYTES } else { 0 }
 }
 
+/// 门控周期（ns）：与 synth 段 `gateCycleDuration = 1ms` 同一周期（U5 互补关窗按此取补）。
+const GATE_CYCLE_NS: u64 = 1_000_000;
+/// 以太网 MTU（载荷字节）：补集最长连续开窗须容得下一个 MTU 帧的发送时长，否则低优先级门永久锁死。
+const MTU_BYTES: i64 = 1500;
+/// 补集门条目的 solver 标识（U5/KTD5）：pin 写参时据此**不写** enableImplicitGuardBand
+/// （保持 INET 默认 true——帧发不完不许进窗，天然防低优先级帧跨入 ST 窗）；ST 门维持显式 false。
+pub(crate) const COMPLEMENT_SOLVER: &str = "complement";
+
+/// 从 initiallyOpen/offset/durations 还原一条 GCL 的开窗区间（绝对时间，[0,cycle) 内，跨界拆两段）。
+/// INET PeriodicGate 语义：t=0 时排程已前进 offset，即 state(t) = seq((t + offset) mod cycle)，
+/// 故序列坐标 p 的开窗落在绝对时间 (p - offset) mod cycle。durations 空 → 恒 initiallyOpen；
+/// durations 总和 ≠ 门控周期 → 响亮 Err（无法按 1ms 周期取补）。
+fn gcl_open_intervals(g: &GclEntry) -> Result<Vec<(u64, u64)>, VerifyError> {
+    if g.durations_ns.is_empty() {
+        return Ok(if g.initially_open {
+            vec![(0, GATE_CYCLE_NS)]
+        } else {
+            vec![]
+        });
+    }
+    let total: u64 = g.durations_ns.iter().sum();
+    if total != GATE_CYCLE_NS {
+        return Err(VerifyError {
+            code: "gcl_cycle_mismatch".to_string(),
+            message_zh: format!(
+                "端口 {} eth{} 的 ST 门表周期 {total}ns ≠ 门控周期 {GATE_CYCLE_NS}ns，无法推导互补关窗。",
+                g.node, g.eth_n
+            ),
+            node_ref: Some(g.node.clone()),
+        });
+    }
+    let off = g.offset_ns % GATE_CYCLE_NS;
+    let mut open = g.initially_open;
+    let mut pos = 0u64;
+    let mut out: Vec<(u64, u64)> = Vec::new();
+    for &d in &g.durations_ns {
+        if open && d > 0 {
+            let start = (pos + GATE_CYCLE_NS - off) % GATE_CYCLE_NS;
+            if start + d <= GATE_CYCLE_NS {
+                out.push((start, start + d));
+            } else {
+                // offset 回绕：开窗跨周期边界，拆成尾段 + 头段。
+                out.push((start, GATE_CYCLE_NS));
+                out.push((0, start + d - GATE_CYCLE_NS));
+            }
+        }
+        pos += d;
+        open = !open;
+    }
+    Ok(out)
+}
+
+/// 互补关窗推导（U5，R8/KTD5，纯函数）：从 pin 的 ST 门条目（gate_index==ST_PCP）按 (node, eth_n)
+/// 分组，取 ST 开窗区间并集（mod 1ms 门控周期）的补集，对该端口全部非 ST 门（0..queue_count
+/// 除 ST pcp）各生成一条补集 GclEntry（solver=COMPLEMENT_SOLVER）。
+/// - 仅在会话存在 BE/RC 流时生成（KTD5）：纯 ST 会话返回空集，pin ini 与现状位级一致。
+/// - 无 ST 窗的端口不生成条目（各门恒开，R8）；ST 门恒关（无开窗）同样跳过——无窗可防。
+/// - 响亮 Err：端口被 ST 占满 / 补集最长连续开窗（环回计）容不下一个 MTU 帧（MTU+帧开销在
+///   端口速率下的发送时长，帧开销经 flow_frame_overhead_bytes(has_rc) 含 R-TAG）/
+///   ST 门下标超出节点 queue_count（门表与节点配置矛盾）。
+pub(crate) fn complement_gcl(
+    pinned: &[GclEntry],
+    queue_counts: &BTreeMap<String, i64>,
+    port_rates: &BTreeMap<(String, usize), u32>,
+    has_rc: bool,
+    has_be: bool,
+) -> Result<Vec<GclEntry>, VerifyError> {
+    if !has_rc && !has_be {
+        return Ok(vec![]);
+    }
+    let st_gate = crate::flow_verify::ST_PCP as usize;
+    let mut ports: BTreeMap<(String, usize), Vec<&GclEntry>> = BTreeMap::new();
+    for g in pinned.iter().filter(|g| g.gate_index == st_gate) {
+        ports.entry((g.node.clone(), g.eth_n)).or_default().push(g);
+    }
+    let overhead = flow_frame_overhead_bytes(has_rc);
+    let mut out: Vec<GclEntry> = Vec::new();
+    for ((node, eth_n), entries) in ports {
+        let Some(&qc) = queue_counts.get(&node) else {
+            return Err(VerifyError {
+                code: "gcl_node_unmapped".to_string(),
+                message_zh: format!("GCL 条目引用的节点 {node} 不在拓扑映射里，无法推导互补关窗。"),
+                node_ref: Some(node.clone()),
+            });
+        };
+        if (st_gate as i64) >= qc {
+            return Err(VerifyError {
+                code: "st_gate_exceeds_queue_count".to_string(),
+                message_zh: format!(
+                    "节点 {node} 的队列数 {qc} 容不下 ST 门（gate {st_gate}），门表与节点配置矛盾，请检查节点 queue_count 或重新规划。"
+                ),
+                node_ref: Some(node.clone()),
+            });
+        }
+        // ST 开窗区间并集。
+        let mut intervals: Vec<(u64, u64)> = Vec::new();
+        for g in entries {
+            intervals.extend(gcl_open_intervals(g)?);
+        }
+        intervals.sort_unstable();
+        let mut merged: Vec<(u64, u64)> = Vec::new();
+        for (s, e) in intervals {
+            match merged.last_mut() {
+                Some(last) if s <= last.1 => last.1 = last.1.max(e),
+                _ => merged.push((s, e)),
+            }
+        }
+        if merged.is_empty() {
+            continue; // ST 门恒关：该端口无 ST 窗，各门恒开（R8），不生成条目。
+        }
+        // 补集（[0,cycle) 线性坐标）。
+        let mut comp: Vec<(u64, u64)> = Vec::new();
+        let mut cursor = 0u64;
+        for &(s, e) in &merged {
+            if s > cursor {
+                comp.push((cursor, s));
+            }
+            cursor = e;
+        }
+        if cursor < GATE_CYCLE_NS {
+            comp.push((cursor, GATE_CYCLE_NS));
+        }
+        if comp.is_empty() {
+            return Err(VerifyError {
+                code: "st_windows_saturate_port".to_string(),
+                message_zh: format!(
+                    "端口 {node} eth{eth_n} 被 ST 门窗占满，无低优先级传输空间，请缩短 ST 窗或减少该端口 ST 流。"
+                ),
+                node_ref: Some(node.clone()),
+            });
+        }
+        // 环回归并成圆上开窗段 (start, len)：首段起于 0 且尾段止于 cycle 时两段是同一连续窗。
+        let mut segs: Vec<(u64, u64)> = comp.iter().map(|&(s, e)| (s, e - s)).collect();
+        if segs.len() >= 2 {
+            let first = segs[0];
+            let last = *segs.last().unwrap();
+            if first.0 == 0 && last.0 + last.1 == GATE_CYCLE_NS {
+                segs.pop();
+                segs.remove(0);
+                segs.push((last.0, last.1 + first.1));
+            }
+        }
+        // MTU 帧发送时长校验（环回段按归并后长度计）。速率口径与 link_rate 一致（Mbps）。
+        let rate = port_rates
+            .get(&(node.clone(), eth_n))
+            .copied()
+            .unwrap_or(DEFAULT_DATARATE_MBPS);
+        let mtu_tx_ns = ((MTU_BYTES + overhead) as u64 * 8 * 1000).div_ceil(rate as u64);
+        let max_open = segs.iter().map(|&(_, len)| len).max().unwrap_or(0);
+        if max_open < mtu_tx_ns {
+            return Err(VerifyError {
+                code: "complement_window_too_small".to_string(),
+                message_zh: format!(
+                    "端口 {node} eth{eth_n} 的补集窗容不下一个 MTU 帧（最长连续开窗 {max_open}ns < 所需 {mtu_tx_ns}ns），低优先级门会永久锁死，请缩短 ST 窗或合并 ST 窗口。"
+                ),
+                node_ref: Some(node.clone()),
+            });
+        }
+        // 补集 → initiallyOpen/offset/durations：以首个圆上开窗段起点 r 为序列原点（保证
+        // durations 偶数条、逐周期严格重复），offset = (cycle - r) mod cycle。
+        let r = segs[0].0;
+        let mut durations: Vec<u64> = Vec::with_capacity(segs.len() * 2);
+        for i in 0..segs.len() {
+            let (s, len) = segs[i];
+            let end = (s + len) % GATE_CYCLE_NS;
+            let next_s = segs[(i + 1) % segs.len()].0;
+            // 单段时 next=自身：gap = (s + cycle - end) mod cycle = cycle - len，公式统一。
+            let gap = (next_s + GATE_CYCLE_NS - end) % GATE_CYCLE_NS;
+            durations.push(len);
+            durations.push(gap);
+        }
+        let offset_ns = (GATE_CYCLE_NS - r) % GATE_CYCLE_NS;
+        for gate in 0..qc as usize {
+            if gate == st_gate {
+                continue;
+            }
+            out.push(GclEntry {
+                node: node.clone(),
+                eth_n,
+                gate_index: gate,
+                initially_open: true,
+                offset_ns,
+                durations_ns: durations.clone(),
+                solver: COMPLEMENT_SOLVER.to_string(),
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// (mid, ethN) → 链路速率 Mbps（U5 互补关窗 MTU 校验用）。速率取 link_rate（speed 列优先、
+/// styles_json.speed 兜底、再兜底 DEFAULT_DATARATE_MBPS），与 NED 连线用的口径同源。
+fn build_port_rate_map(
+    links: &[VerifyLink],
+    port_eth: &BTreeMap<String, BTreeMap<i64, usize>>,
+) -> BTreeMap<(String, usize), u32> {
+    let mut out: BTreeMap<(String, usize), u32> = BTreeMap::new();
+    for l in links {
+        let rate = link_rate(l);
+        if let Some(p) = l.src_port
+            && let Some(k) = port_eth.get(&l.src_node).and_then(|m| m.get(&p))
+        {
+            out.insert((l.src_node.clone(), *k), rate);
+        }
+        if let Some(p) = l.dst_port
+            && let Some(k) = port_eth.get(&l.dst_node).and_then(|m| m.get(&p))
+        {
+            out.insert((l.dst_node.clone(), *k), rate);
+        }
+    }
+    out
+}
+
 /// 覆盖表单（R4）：振荡器类型 / 漂移幅度 / sim 时长。缺省走 R3(a) 固定默认。
 #[derive(Debug, Clone, Default)]
 pub struct SimOverrides {
@@ -1255,11 +1468,15 @@ fn build_flow_tas_ini(
                     .collect::<Vec<_>>()
                     .join(", ");
                 ini.push_str(&format!("{base}.durations = [{durs}]\n"));
-                // 关隐式保护带：Z3 门窗是零余量（开窗=正好一帧传输时间），而 enableImplicitGuardBand
-                // 默认 true 会禁止「发不完就不许进本窗」的帧——包恰好卡在窗边界即被拒、滑到下一周期
-                // (+一个门周期≈500us)。Z3 已保证帧在窗内放得下，此处关掉这层运行时严格边界检查，
-                // honor Z3 排程。真机实证：关掉后 6 跳链时延 527us→27.66us、漂移尾巴消失。
-                ini.push_str(&format!("{base}.enableImplicitGuardBand = false\n"));
+                // 关隐式保护带（仅 ST 门）：Z3 门窗是零余量（开窗=正好一帧传输时间），而
+                // enableImplicitGuardBand 默认 true 会禁止「发不完就不许进本窗」的帧——包恰好卡在
+                // 窗边界即被拒、滑到下一周期(+一个门周期≈500us)。Z3 已保证帧在窗内放得下，此处关掉
+                // 这层运行时严格边界检查，honor Z3 排程。真机实证：关掉后 6 跳链 527us→27.66us。
+                // 补集门（solver=complement，U5/KTD5）**不写**该行——保持 INET 默认 true：帧发不完
+                // 不许进窗，天然防低优先级帧跨入 ST 窗。
+                if g.solver != COMPLEMENT_SOLVER {
+                    ini.push_str(&format!("{base}.enableImplicitGuardBand = false\n"));
+                }
             }
         }
     }
@@ -1290,6 +1507,27 @@ pub fn build_flow_tas_sim_bundle(
     let (submodules, connections) =
         build_submodules_and_connections(nodes, &mapped, &port_eth, links, &splits);
     let network_ned = build_network_ned("TsnAgentFlowTasNetwork", &submodules, &connections);
+
+    // 互补关窗（U5/KTD5，仅 pin）：会话存在 BE/RC 流才从 ST 门表推导补集条目追加进 pin 集；
+    // 纯 ST 会话补集恒空、ini 位级不变。BE/RC 存在性从全流集判定（verify 传入全流集；
+    // has_rc 兼看 overrides——与帧开销的会话级口径同源）。推导失败（占满/容不下 MTU 帧）响亮返错。
+    let pin_with_complement: Vec<GclEntry>;
+    let schedule = match schedule {
+        FlowTasSchedule::Pin(gcl) => {
+            let has_rc = overrides.has_rc || streams.iter().any(|s| s.class == "RC");
+            let has_be = streams.iter().any(|s| s.class == "BE");
+            let queue_counts: BTreeMap<String, i64> = mapped
+                .iter()
+                .map(|(mid, m)| ((*mid).to_string(), m.queue_count))
+                .collect();
+            let port_rates = build_port_rate_map(links, &port_eth);
+            let comp = complement_gcl(gcl, &queue_counts, &port_rates, has_rc, has_be)
+                .map_err(|e| vec![e])?;
+            pin_with_complement = gcl.iter().cloned().chain(comp).collect();
+            FlowTasSchedule::Pin(&pin_with_complement)
+        }
+        FlowTasSchedule::Synth => FlowTasSchedule::Synth,
+    };
 
     let gm_ned = &mapped[gm_mid].ned_name;
     let omnetpp_ini = build_flow_tas_ini(
@@ -2196,5 +2434,288 @@ mod tests {
         );
         // 裸形态（expr( 紧跟 udp.destPort）不得再出现——回归哨兵。
         assert!(!ini.contains("expr(udp.destPort"), "{ini}");
+    }
+
+    // ---------- U5：互补关窗推导（R8/AE4 保护前提，KTD5）----------
+
+    /// ST 门（gate7）GclEntry 简写。
+    fn st_gate7(node: &str, eth_n: usize, init: bool, offset: u64, durs: Vec<u64>) -> GclEntry {
+        GclEntry {
+            node: node.into(),
+            eth_n,
+            gate_index: 7,
+            initially_open: init,
+            offset_ns: offset,
+            durations_ns: durs,
+            solver: "Z3".into(),
+        }
+    }
+    fn qc_map(pairs: &[(&str, i64)]) -> BTreeMap<String, i64> {
+        pairs.iter().map(|(n, q)| (n.to_string(), *q)).collect()
+    }
+    fn rate_map(pairs: &[(&str, usize, u32)]) -> BTreeMap<(String, usize), u32> {
+        pairs
+            .iter()
+            .map(|(n, e, r)| ((n.to_string(), *e), *r))
+            .collect()
+    }
+
+    /// Covers R8（U5①⑥域）：单 ST 窗端口（开 [0,300us)）→ 每个非 ST 门（0..6）一条补集，
+    /// 补集 = 周期减窗口：开 [300us,1ms)，表达为 offset=700000（序列原点=补集窗起点 300000）、
+    /// durations=[700000,300000]。gate7 不生成；queue_count=8 的门下标域正确。
+    #[test]
+    fn complement_single_st_window_hand_computed() {
+        let pinned = vec![st_gate7("0", 0, true, 0, vec![300_000, 700_000])];
+        let out = complement_gcl(
+            &pinned,
+            &qc_map(&[("0", 8)]),
+            &rate_map(&[("0", 0, 1000)]),
+            false,
+            true,
+        )
+        .unwrap();
+        let gates: Vec<usize> = out.iter().map(|e| e.gate_index).collect();
+        assert_eq!(gates, vec![0, 1, 2, 3, 4, 5, 6], "0..queue_count 除 gate7");
+        for e in &out {
+            assert_eq!(e.node, "0");
+            assert_eq!(e.eth_n, 0);
+            assert!(e.initially_open, "序列原点=补集窗起点，恒以开态起");
+            assert_eq!(e.offset_ns, 700_000, "offset=(cycle-300000) mod cycle");
+            assert_eq!(e.durations_ns, vec![700_000, 300_000]);
+            assert_eq!(e.solver, COMPLEMENT_SOLVER);
+        }
+    }
+
+    /// Covers R8（U5②）：同端口两条 ST 流两窗、其一跨 1ms 周期边界（offset 回绕）→
+    /// 并集 [900k,1M)∪[0,100k)∪[400k,500k) 的补集 = [100k,400k)∪[500k,900k)，
+    /// 表达为 offset=900000、durations=[300k,100k,400k,200k]（逐 ns 手算）。
+    #[test]
+    fn complement_union_multi_windows_with_wraparound() {
+        let pinned = vec![
+            // seq 开 [0,200k)，offset=100k → 绝对开窗 [900k,1M)∪[0,100k)（跨界拆两段）。
+            st_gate7("0", 1, true, 100_000, vec![200_000, 800_000]),
+            // seq 开 [0,100k)，offset=600k → 绝对开窗 [400k,500k)。
+            st_gate7("0", 1, true, 600_000, vec![100_000, 900_000]),
+        ];
+        let out = complement_gcl(
+            &pinned,
+            &qc_map(&[("0", 8)]),
+            &rate_map(&[("0", 1, 1000)]),
+            false,
+            true,
+        )
+        .unwrap();
+        assert_eq!(out.len(), 7);
+        for e in &out {
+            assert!(e.initially_open);
+            assert_eq!(e.offset_ns, 900_000, "序列原点=首个补集窗起点 100000");
+            assert_eq!(
+                e.durations_ns,
+                vec![300_000, 100_000, 400_000, 200_000],
+                "开300k/关100k/开400k/关200k，总和=1ms"
+            );
+        }
+    }
+
+    /// Covers R8（U5③）：补集碎片全部短于 MTU 帧发送时长（1Gbps 下 (1500+58)B→12464ns，
+    /// 碎片各 5000ns）→ 响亮 Err，低优先级门不许永久锁死。
+    #[test]
+    fn complement_err_when_fragments_below_mtu_frame() {
+        let pinned = vec![st_gate7(
+            "0",
+            0,
+            true,
+            0,
+            vec![495_000, 5_000, 495_000, 5_000],
+        )];
+        let err = complement_gcl(
+            &pinned,
+            &qc_map(&[("0", 8)]),
+            &rate_map(&[("0", 0, 1000)]),
+            false,
+            true,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, "complement_window_too_small");
+        assert!(err.message_zh.contains("eth0"), "{}", err.message_zh);
+        assert!(err.message_zh.contains("12464"), "{}", err.message_zh);
+    }
+
+    /// Covers R8（U5④）：ST 开窗占满整周期 → 补集为空，响亮 Err。
+    #[test]
+    fn complement_err_when_st_saturates_port() {
+        let pinned = vec![st_gate7("0", 0, true, 0, vec![1_000_000])];
+        let err = complement_gcl(
+            &pinned,
+            &qc_map(&[("0", 8)]),
+            &rate_map(&[("0", 0, 1000)]),
+            false,
+            true,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, "st_windows_saturate_port");
+        assert!(err.message_zh.contains("占满"), "{}", err.message_zh);
+    }
+
+    /// Covers KTD5（U5⑤/⑦域）：纯 ST 会话（无 BE/RC）→ 补集恒空；pin bundle 的 ini 只含
+    /// gate7 的 4 行 transmissionGate 参数（initiallyOpen/offset/durations/guard band）——
+    /// 与 U5 之前的 pin 输出逐行一致（位级回归口径）。
+    #[test]
+    fn complement_empty_for_pure_st_session_pin_ini_unchanged() {
+        // 纯函数：生成门条件不满足 → 空集（连 Err 校验都不触发）。
+        let pinned = vec![st_gate7("0", 1, true, 0, vec![300_000, 700_000])];
+        assert!(
+            complement_gcl(
+                &pinned,
+                &qc_map(&[("0", 8)]),
+                &rate_map(&[("0", 1, 1000)]),
+                false,
+                false
+            )
+            .unwrap()
+            .is_empty()
+        );
+        // bundle：纯 ST 流集 → ini 恰 4 行 transmissionGate（全在 gate7），无补集痕迹。
+        let (nodes, links, timing) = sample();
+        let streams = vec![FlowStreamSpec {
+            max_latency_us: Some(300),
+            ..spec(1, "ST", 7, "1", "2", 250, 500, 10000)
+        }];
+        let b = build_flow_tas_sim_bundle(
+            &nodes,
+            &links,
+            "1",
+            &timing,
+            &SimOverrides::default(),
+            &streams,
+            FlowTasSchedule::Pin(&pinned),
+            "s1",
+            7,
+        )
+        .unwrap();
+        let ini = &b.bundle.omnetpp_ini;
+        assert_eq!(
+            ini.matches(".macLayer.queue.transmissionGate[").count(),
+            4,
+            "纯 ST 会话 pin 段只该有 gate7 的 4 行：{ini}"
+        );
+        assert!(ini.contains("transmissionGate[7].enableImplicitGuardBand = false"));
+        assert!(!ini.contains("transmissionGate[0]"), "{ini}");
+    }
+
+    /// Covers R8（U5⑥⑧ ini 面）：混流会话（ST+BE）→ ST 门带 enableImplicitGuardBand=false，
+    /// 补集门（0..6）有 initiallyOpen/offset/durations 但**无**该行（保持 INET 默认 true）；
+    /// 无 ST 窗的端口（sw1 eth0）不生成任何 transmissionGate 条目（各门恒开）。
+    #[test]
+    fn pin_complement_gates_omit_implicit_guard_band() {
+        let (nodes, links, timing) = sample();
+        let pinned = vec![st_gate7("0", 1, true, 0, vec![300_000, 700_000])];
+        let b = build_flow_tas_sim_bundle(
+            &nodes,
+            &links,
+            "1",
+            &timing,
+            &SimOverrides::default(),
+            &flow_streams(), // BE + ST 混流
+            FlowTasSchedule::Pin(&pinned),
+            "s1",
+            7,
+        )
+        .unwrap();
+        let ini = &b.bundle.omnetpp_ini;
+        // ST 门维持显式关隐式保护带（真机验证关键行，勿回退）。
+        assert!(
+            ini.contains(
+                "*.sw1.eth[1].macLayer.queue.transmissionGate[7].enableImplicitGuardBand = false"
+            ),
+            "{ini}"
+        );
+        // 补集门 0..6 全在、参数为手算补集，且不带 enableImplicitGuardBand 行。
+        for gate in 0..7 {
+            let base = format!("*.sw1.eth[1].macLayer.queue.transmissionGate[{gate}]");
+            assert!(
+                ini.contains(&format!("{base}.initiallyOpen = true")),
+                "{ini}"
+            );
+            assert!(ini.contains(&format!("{base}.offset = 700000ns")), "{ini}");
+            assert!(
+                ini.contains(&format!("{base}.durations = [700000ns, 300000ns]")),
+                "{ini}"
+            );
+            assert!(
+                !ini.contains(&format!("{base}.enableImplicitGuardBand")),
+                "补集门不得写 enableImplicitGuardBand（保持默认 true）：{ini}"
+            );
+        }
+        // 无 ST 窗端口零条目（R8：各门恒开）。
+        assert!(
+            !ini.contains("eth[0].macLayer.queue.transmissionGate"),
+            "无 ST 窗端口不得生成补集：{ini}"
+        );
+    }
+
+    /// Covers U5⑦：queue_count=4 的节点带 gate7 ST 条目 → 门表与节点配置矛盾，响亮 Err
+    /// （口径：Err 而非跳过——该 pin 在 INET 里本身就越界，静默跳过会掩盖坏配置）。
+    #[test]
+    fn complement_err_when_st_gate_exceeds_queue_count() {
+        let pinned = vec![st_gate7("0", 0, true, 0, vec![300_000, 700_000])];
+        let err = complement_gcl(
+            &pinned,
+            &qc_map(&[("0", 4)]),
+            &rate_map(&[("0", 0, 1000)]),
+            false,
+            true,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, "st_gate_exceeds_queue_count");
+        assert!(err.message_zh.contains("队列数 4"), "{}", err.message_zh);
+    }
+
+    /// Covers R8（U5⑧ 纯函数面）：混流会话里只有 ("0",eth1) 有 ST 窗 → 其余节点/端口
+    /// （含 queue_counts 里的 "3"、同节点 eth0）不生成任何条目。
+    #[test]
+    fn complement_only_for_ports_with_st_windows() {
+        let pinned = vec![st_gate7("0", 1, true, 0, vec![300_000, 700_000])];
+        let out = complement_gcl(
+            &pinned,
+            &qc_map(&[("0", 8), ("3", 8)]),
+            &rate_map(&[("0", 1, 1000), ("0", 0, 1000), ("3", 0, 1000)]),
+            true,
+            true,
+        )
+        .unwrap();
+        assert_eq!(out.len(), 7);
+        assert!(
+            out.iter().all(|e| e.node == "0" && e.eth_n == 1),
+            "只有带 ST 窗的端口生成补集：{out:?}"
+        );
+    }
+
+    /// Covers KTD5 帧开销口径：MTU 校验用 flow_frame_overhead_bytes(has_rc)——补集窗 12480ns
+    /// 在无 RC（需 12464ns）时通过、有 RC（+4B R-TAG → 需 12496ns）时响亮 Err。
+    #[test]
+    fn complement_mtu_check_includes_rtag_overhead_when_rc() {
+        let pinned = vec![st_gate7("0", 0, true, 0, vec![987_520, 12_480])];
+        let qc = qc_map(&[("0", 8)]);
+        let rates = rate_map(&[("0", 0, 1000)]);
+        assert!(complement_gcl(&pinned, &qc, &rates, false, true).is_ok());
+        let err = complement_gcl(&pinned, &qc, &rates, true, false).unwrap_err();
+        assert_eq!(err.code, "complement_window_too_small");
+        assert!(err.message_zh.contains("12496"), "{}", err.message_zh);
+    }
+
+    /// ST 门表周期 ≠ 1ms 门控周期 → 无法取补，响亮 Err（防对错周期做补集算术）。
+    #[test]
+    fn complement_err_on_cycle_mismatch() {
+        let pinned = vec![st_gate7("0", 0, true, 0, vec![300_000])];
+        let err = complement_gcl(
+            &pinned,
+            &qc_map(&[("0", 8)]),
+            &rate_map(&[("0", 0, 1000)]),
+            false,
+            true,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, "gcl_cycle_mismatch");
     }
 }

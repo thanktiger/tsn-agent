@@ -795,6 +795,50 @@ mod tests {
         });
     }
 
+    /// Covers R8/AE4（U5 接线）：混流会话（ST+BE）→ verify 提交的 pin ini 带补集门
+    /// （从全流集判 BE 存在性，经 build_flow_tas_sim_bundle 推导）：非 ST 门有补集参数但
+    /// **不带** enableImplicitGuardBand 行；ST 门维持显式 false。纯 ST 会话由
+    /// verify_pin_filters_non_st_gate_entries 反向锁定（无 transmissionGate[0]）。
+    #[test]
+    fn verify_mixed_session_emits_complement_gates() {
+        tauri::async_runtime::block_on(async {
+            let pool = fresh_pool().await;
+            seed(&pool).await; // ST 流 + gate7 GCL（sw1 eth1 开 [0,300us)）。
+            sqlx::query("INSERT INTO topology_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener, max_latency_us) VALUES ('s1', 1, 'BE', 0, 500, 512, 3, '1', '2', 400)")
+                .execute(&pool).await.unwrap();
+            // 两个 sink（es2.app[0]=ST、app[1]=BE）都给健康向量。
+            let csv = format!(
+                "{}TsnAgentFlowTasNetwork.es2.app[0].sink,packetLifeTime:vector,0 0 0,0.0001 0.00012 0.00011\nTsnAgentFlowTasNetwork.es2.app[0].sink,packetJitter:vector,0 0 0,0.0000002 0.0000003 0.0000001\nTsnAgentFlowTasNetwork.es2.app[1].sink,packetLifeTime:vector,0 0 0,0.0001 0.00012 0.00011\nTsnAgentFlowTasNetwork.es2.app[1].sink,packetJitter:vector,0 0 0,0.0000002 0.0000003 0.0000001\n",
+                header()
+            );
+            let runner = CapturingRunner {
+                outcome: outcome(Some(&csv)),
+                ini: std::sync::Mutex::new(None),
+            };
+            let r = verify_tas_inner(&pool, "s1", &runner).await.unwrap();
+            assert_eq!(r.status, "ok", "{r:?}");
+            let ini = runner.ini.lock().unwrap().clone().unwrap();
+            // ST 门：显式关隐式保护带（真机验证关键行）。
+            assert!(
+                ini.contains("*.sw1.eth[1].macLayer.queue.transmissionGate[7].enableImplicitGuardBand = false"),
+                "{ini}"
+            );
+            // 补集门：gate0（BE/gPTP）带补集窗参数、无 guard band 行（保持 INET 默认 true）。
+            assert!(
+                ini.contains("*.sw1.eth[1].macLayer.queue.transmissionGate[0].durations = [700000ns, 300000ns]"),
+                "{ini}"
+            );
+            assert!(
+                ini.contains("*.sw1.eth[1].macLayer.queue.transmissionGate[0].offset = 700000ns"),
+                "{ini}"
+            );
+            assert!(
+                !ini.contains("transmissionGate[0].enableImplicitGuardBand"),
+                "补集门不得写 enableImplicitGuardBand：{ini}"
+            );
+        });
+    }
+
     /// Covers G1.3（U3⑥）：存量 ST@pcp3 流（录入闸收紧前旧库）→ verify 入口响亮拒绝。
     #[test]
     fn verify_rejects_stale_stream_with_wrong_pcp() {
