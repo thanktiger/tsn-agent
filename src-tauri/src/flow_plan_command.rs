@@ -65,6 +65,12 @@ pub(crate) struct DbStream {
     pub(crate) talker: String,
     pub(crate) listener: String,
     pub(crate) max_latency_us: Option<i64>,
+    /// KTD6 凭证列（U2 录入时落）：仅展示，装配一律重推导（verify 侧重跑不相交断言）。
+    #[allow(dead_code)]
+    pub(crate) redundant: i64,
+    /// KTD6 凭证列：录入时预存的 A/B 路径快照 JSON。仅展示凭证，不作装配输入。
+    #[allow(dead_code)]
+    pub(crate) paths: Option<String>,
 }
 
 pub(crate) async fn load_streams(
@@ -72,7 +78,7 @@ pub(crate) async fn load_streams(
     session_id: &str,
 ) -> Result<Vec<DbStream>, String> {
     let rows = sqlx::query(
-        "SELECT stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener, max_latency_us \
+        "SELECT stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener, max_latency_us, redundant, paths \
          FROM topology_streams WHERE session_id = ? ORDER BY stream_seq",
     )
     .bind(session_id)
@@ -91,6 +97,8 @@ pub(crate) async fn load_streams(
             talker: r.get("talker"),
             listener: r.get("listener"),
             max_latency_us: r.get("max_latency_us"),
+            redundant: r.get("redundant"),
+            paths: r.get("paths"),
         })
         .collect())
 }
@@ -260,6 +268,8 @@ pub async fn plan_tas_inner<P: InetSimPlanClient>(
     }
 
     // R4/KTD4：Z3 只喂 ST——RC/BE 完全不进 synth bundle（app/识别/编码都不出现）。
+    // 会话是否有 RC 从**全流集**判（帧开销 +4B R-TAG 经 overrides.has_rc 传给 builder，U4）。
+    let has_rc = streams.iter().any(|s| s.class == "RC");
     let st_streams: Vec<&DbStream> = streams.iter().filter(|s| s.class == "ST").collect();
     if st_streams.is_empty() {
         // R5：无 ST 流 → 跳过求解器，清掉可能的存量 GCL，产出「无需门控」的合法空结果。
@@ -330,6 +340,8 @@ pub async fn plan_tas_inner<P: InetSimPlanClient>(
             count: s.count,
             max_latency_us: s.max_latency_us,
             path_fragments,
+            frer_trees: None, // synth 无 FRER 段（RC 不进 bundle）；has_rc 只影响帧开销。
+            pin_links: None,
         });
     }
 
@@ -338,7 +350,10 @@ pub async fn plan_tas_inner<P: InetSimPlanClient>(
         &links,
         &gm_mid,
         &timing,
-        &SimOverrides::default(),
+        &SimOverrides {
+            has_rc,
+            ..Default::default()
+        },
         &specs,
         FlowTasSchedule::Synth,
         session_id,

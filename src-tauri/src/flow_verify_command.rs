@@ -52,7 +52,7 @@ pub struct StreamVerdict {
 #[serde(rename_all = "camelCase")]
 pub struct VerifyTasResult {
     pub caliber: String,
-    /// ok | no_plan | no_streams | pcp_mismatch | no_gm | bundle_error | unreachable | load_failed | empty | fail
+    /// ok | no_plan | no_streams | pcp_mismatch | no_gm | route_error | bundle_error | unreachable | load_failed | empty | fail
     pub status: String,
     pub per_stream: Vec<StreamVerdict>,
     pub overall: String,
@@ -293,9 +293,54 @@ pub async fn verify_tas_inner<R: RemoteRunner>(
         .into_iter()
         .filter(|g| g.gate_index == crate::flow_verify::ST_PCP as usize)
         .collect();
-    let specs: Vec<FlowStreamSpec> = db_streams
+
+    let (nodes, links) = load_topology(pool, session_id).await?;
+
+    // 路径推导（KTD6）：预存 paths 仅凭证——RC 一律重跑 derive_redundant_routes + 不相交断言
+    // （拓扑在录流后被改动时以重推导为准；断言失败响亮报错不装配）。ST/BE 双平面锁平面 A、
+    // 单平面 None：有 RC 时 ST 单树进 FRER configurator；无 RC 双平面时 link_seqs 供转发钉死。
+    let dual_plane = links
         .iter()
-        .map(|s| FlowStreamSpec {
+        .any(|l| crate::flow_route::link_plane(l).is_some());
+    let has_rc = db_streams.iter().any(|s| s.class == "RC");
+    let route_fail = |seq: i64, errs: Vec<crate::topology_verify::VerifyError>| {
+        let msg = errs
+            .iter()
+            .map(|e| e.message_zh.clone())
+            .collect::<Vec<_>>()
+            .join("；");
+        VerifyTasResult::simple(
+            "route_error",
+            "流路径推导失败（不可达/歧义/冗余不相交断言失败），未装配验证工程。",
+            Some(format!("流 {seq}：{msg}")),
+        )
+    };
+    let mut specs: Vec<FlowStreamSpec> = Vec::new();
+    for s in &db_streams {
+        let (frer_trees, pin_links) = if s.class == "RC" {
+            match crate::flow_route::derive_redundant_routes(&s.talker, &s.listener, &nodes, &links)
+            {
+                Ok((a, b)) => (Some(vec![a.node_path, b.node_path]), None),
+                Err(errs) => return Ok(route_fail(s.stream_seq, errs)),
+            }
+        } else if dual_plane && (!has_rc || s.class == "ST") {
+            match crate::flow_route::derive_route(
+                &crate::flow_route::RouteRequest {
+                    talker: &s.talker,
+                    listener: &s.listener,
+                    plane: Some("A"),
+                },
+                &nodes,
+                &links,
+            ) {
+                Ok(r) if has_rc => (Some(vec![r.node_path]), None),
+                Ok(r) => (None, Some(r.link_seqs)),
+                Err(errs) => return Ok(route_fail(s.stream_seq, errs)),
+            }
+        } else {
+            (None, None) // 单平面沿现状；RC 会话的 BE 留在 FRER 之外（untagged pcp0）。
+        };
+        specs.push(FlowStreamSpec {
             stream_seq: s.stream_seq,
             class: s.class.clone(),
             pcp: s.pcp,
@@ -306,10 +351,10 @@ pub async fn verify_tas_inner<R: RemoteRunner>(
             count: s.count,
             max_latency_us: s.max_latency_us,
             path_fragments: None, // pin 模式不需 pathFragments（门已写死、配置器禁）。
-        })
-        .collect();
-
-    let (nodes, links) = load_topology(pool, session_id).await?;
+            frer_trees,
+            pin_links,
+        });
+    }
     let gm_mid: Option<String> =
         sqlx::query_scalar("SELECT gm_mid FROM timesync_domain WHERE session_id = ?")
             .bind(session_id)
@@ -331,7 +376,10 @@ pub async fn verify_tas_inner<R: RemoteRunner>(
         &links,
         &gm_mid,
         &timing,
-        &SimOverrides::default(),
+        &SimOverrides {
+            has_rc,
+            ..Default::default()
+        },
         &specs,
         FlowTasSchedule::Pin(&gcl),
         session_id,
@@ -769,6 +817,105 @@ mod tests {
             assert_eq!(r.status, "pcp_mismatch", "{r:?}");
             assert!(r.overall.contains("流 0"), "{r:?}");
             assert!(r.overall.contains("删除重录"), "{r:?}");
+        });
+    }
+
+    // ---------- U4：RC 重推导（凭证不作输入）/ 断言失败响亮不装配 ----------
+
+    /// 双平面 seed：es1(1) —A— sw1(0) —A— es2(2)；—B— sw2(3) —B—。GM=sw1(0)。
+    /// 一条 RC 流 es1→es2，paths 凭证由调用方传（模拟录入时预存）。
+    async fn seed_dual_plane_rc(pool: &sqlx::Pool<sqlx::Sqlite>, paths: &str) {
+        for (mid, ty, ord) in [
+            ("0", "switch", 0),
+            ("1", "endSystem", 1),
+            ("2", "endSystem", 2),
+            ("3", "switch", 3),
+        ] {
+            sqlx::query("INSERT INTO topology_nodes (session_id, mid, name, x, y, node_type, port_count, queue_count, insert_order) VALUES ('s1', ?, NULL, 0, 0, ?, 8, 8, ?)")
+                .bind(mid).bind(ty).bind(ord).execute(pool).await.unwrap();
+        }
+        for (seq, src, sp, dst, dp, plane) in [
+            (0, "1", 0, "0", 0, "A"),
+            (1, "0", 1, "2", 0, "A"),
+            (2, "1", 1, "3", 0, "B"),
+            (3, "3", 1, "2", 1, "B"),
+        ] {
+            sqlx::query("INSERT INTO topology_links (session_id, link_seq, name, src_node, dst_node, src_port, dst_port, speed, styles_json) VALUES ('s1', ?, NULL, ?, ?, ?, ?, 1000, ?)")
+                .bind(seq).bind(src).bind(dst).bind(sp).bind(dp)
+                .bind(format!(r#"{{"plane":"{plane}"}}"#))
+                .execute(pool).await.unwrap();
+        }
+        sqlx::query("INSERT INTO timesync_domain (session_id, gm_mid) VALUES ('s1', '0')")
+            .execute(pool)
+            .await
+            .unwrap();
+        for mid in ["0", "1", "2", "3"] {
+            sqlx::query("INSERT INTO timesync_nodes (session_id, mid, master_port, slave_port) VALUES ('s1', ?, '[]', '[]')")
+                .bind(mid).execute(pool).await.unwrap();
+        }
+        sqlx::query("INSERT INTO topology_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener, max_latency_us, redundant, paths) VALUES ('s1', 0, 'RC', 6, 500, 512, 3, '1', '2', 400, 1, ?)")
+            .bind(paths).execute(pool).await.unwrap();
+    }
+
+    /// Covers G1.2（U4④/KTD6）：paths 凭证与重推导不一致（凭证是拓扑改动前的过期快照）→
+    /// 以重推导为准可跑——装配 trees 用重推导结果，凭证不作输入；且 RC 会话 ini 带 FRER 段。
+    #[test]
+    fn verify_rc_rederives_paths_ignoring_stale_credential() {
+        tauri::async_runtime::block_on(async {
+            let pool = fresh_pool().await;
+            // 过期凭证：node_path 指向已不存在的节点 9（拓扑录流后被改过）。
+            let stale = r#"{"a":{"node_path":["1","9","2"],"link_seqs":[9]},"b":{"node_path":["1","8","2"],"link_seqs":[8]}}"#;
+            seed_dual_plane_rc(&pool, stale).await;
+            let csv = format!(
+                "{}TsnAgentFlowTasNetwork.es2.app[0].sink,packetLifeTime:vector,0 0 0,0.0001 0.00012 0.00011\nTsnAgentFlowTasNetwork.es2.app[0].sink,packetJitter:vector,0 0 0,0.0000002 0.0000003 0.0000001\n",
+                header()
+            );
+            let runner = CapturingRunner {
+                outcome: outcome(Some(&csv)),
+                ini: std::sync::Mutex::new(None),
+            };
+            let r = verify_tas_inner(&pool, "s1", &runner).await.unwrap();
+            assert_ne!(r.status, "route_error", "重推导可行不得报错：{r:?}");
+            assert_eq!(r.status, "ok", "{r:?}");
+            let ini = runner.ini.lock().unwrap().clone().unwrap();
+            // FRER 段在，trees 是重推导的真路径（含拆分内嵌桥），不是过期凭证里的节点 9/8。
+            assert!(ini.contains("*.*.hasStreamRedundancy = true"), "{ini}");
+            assert!(
+                ini.contains("trees: [[[\"es1\",\"esb1\",\"sw1\",\"esb2\",\"es2\"]],[[\"es1\",\"esb1\",\"sw2\",\"esb2\",\"es2\"]]]"),
+                "{ini}"
+            );
+            assert!(!ini.contains("\"9\""), "过期凭证不得进装配：{ini}");
+        });
+    }
+
+    /// Covers U4⑤：拓扑改成 A/B 相交（两平面共用中间节点）→ 重推导断言失败，响亮报错
+    /// route_error、不装配（runner 不被调用）——预存凭证再合法也救不了。
+    #[test]
+    fn verify_rc_rederivation_failure_is_loud_and_blocks_assembly() {
+        tauri::async_runtime::block_on(async {
+            let pool = fresh_pool().await;
+            // 合法形状的旧凭证（录入时曾不相交）。
+            let old = r#"{"a":{"node_path":["1","0","2"],"link_seqs":[0,1]},"b":{"node_path":["1","3","2"],"link_seqs":[2,3]}}"#;
+            seed_dual_plane_rc(&pool, old).await;
+            // 拓扑已改：平面 B 改为也经 sw1(0)（并行链路）→ A/B 共用中间节点。
+            sqlx::query("UPDATE topology_links SET src_node='1', dst_node='0', src_port=2, dst_port=2 WHERE session_id='s1' AND link_seq=2")
+                .execute(&pool).await.unwrap();
+            sqlx::query("UPDATE topology_links SET src_node='0', dst_node='2', src_port=3, dst_port=2 WHERE session_id='s1' AND link_seq=3")
+                .execute(&pool).await.unwrap();
+            let runner = CapturingRunner {
+                outcome: outcome(None),
+                ini: std::sync::Mutex::new(None),
+            };
+            let r = verify_tas_inner(&pool, "s1", &runner).await.unwrap();
+            assert_eq!(r.status, "route_error", "{r:?}");
+            assert!(
+                r.message.as_deref().unwrap().contains("流 0"),
+                "响亮指认流：{r:?}"
+            );
+            assert!(
+                runner.ini.lock().unwrap().is_none(),
+                "断言失败不得装配/提交软仿"
+            );
         });
     }
 
