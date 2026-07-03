@@ -116,6 +116,18 @@ describe("FlowPanel", () => {
     expect(screen.getByRole("button", { name: "软仿验证" }).hasAttribute("disabled")).toBe(false);
   });
 
+  it("Covers AE5：no_gating（流集无 ST 流）后软仿验证按钮放行且文案可见", () => {
+    const noGating = planOk({
+      status: "no_gating",
+      solver: undefined,
+      gateCount: 0,
+      overall: "流集无 ST 流，无需门控综合；可直接验证。",
+    });
+    render(<FlowPanel {...baseProps({ planState: { status: "done", result: noGating } })} />);
+    expect(screen.getByRole("button", { name: "软仿验证" }).hasAttribute("disabled")).toBe(false);
+    expect(screen.getByText(/无需门控综合/)).toBeTruthy();
+  });
+
   it("验证结果渲染逐流表（收/发 + 判定）", () => {
     render(
       <FlowPanel {...baseProps({ verifyState: { status: "done", result: verifyResult() } })} />,

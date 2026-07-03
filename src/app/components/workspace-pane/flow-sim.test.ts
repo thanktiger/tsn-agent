@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   isZ3Guaranteed,
   type PlanResult,
+  planAllowsVerify,
   planSucceeded,
   showVerifyTable,
   type VerifyTasResult,
@@ -35,6 +36,15 @@ describe("flow-sim helpers", () => {
     expect(planSucceeded(plan())).toBe(true);
     expect(planSucceeded(plan({ status: "solver_failed", gateCount: 0 }))).toBe(false);
     expect(planSucceeded(plan({ status: "ok", gateCount: 0 }))).toBe(false);
+  });
+
+  it("planAllowsVerify：有门控表或 no_gating（无 ST 流，R5/AE5）均放行验证", () => {
+    expect(planAllowsVerify(plan())).toBe(true);
+    expect(planAllowsVerify(plan({ status: "no_gating", solver: undefined, gateCount: 0 }))).toBe(
+      true,
+    );
+    expect(planAllowsVerify(plan({ status: "solver_failed", gateCount: 0 }))).toBe(false);
+    expect(planAllowsVerify(plan({ status: "ok", gateCount: 0 }))).toBe(false);
   });
 
   it("isZ3Guaranteed 区分 Z3 带保证 / Eager 兜底", () => {
