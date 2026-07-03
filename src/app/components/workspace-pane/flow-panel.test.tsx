@@ -2,7 +2,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import { FlowPanel, type FlowPanelProps } from "./flow-panel";
-import type { PlanResult, VerifyTasResult } from "./flow-sim";
+import type { PlanResult, StreamVerdict, VerifyTasResult } from "./flow-sim";
 
 function planOk(overrides: Partial<PlanResult> = {}): PlanResult {
   return {
@@ -35,6 +35,73 @@ function verifyResult(overrides: Partial<VerifyTasResult> = {}): VerifyTasResult
     ],
     ...overrides,
   };
+}
+
+/** U7 多轮夹具：健康轮三类全绿 + 断A轮（RC 判/ST 报告态/untested）+ 断B轮 busy。 */
+function verdict(overrides: Partial<StreamVerdict> = {}): StreamVerdict {
+  return {
+    streamSeq: 0,
+    class: "RC",
+    talker: "1",
+    listener: "2",
+    received: 2001,
+    expected: 2001,
+    jitterMaxNs: 120,
+    latencyMaxNs: 100000,
+    windowNs: 400000,
+    pass: true,
+    judged: true,
+    ...overrides,
+  };
+}
+
+function roundsResult(): VerifyTasResult {
+  return verifyResult({
+    overall:
+      "健康轮：3 个达标 / 0 个未达标；断A轮：1 个达标 / 0 个未达标（另 1 个仅报告）；断B轮：busy",
+    rounds: [
+      {
+        round: "healthy",
+        status: "ok",
+        perStream: [
+          verdict(),
+          verdict({ streamSeq: 1, class: "ST" }),
+          verdict({ streamSeq: 2, class: "BE", received: 1000, deliveryRatio: 0.5 }),
+        ],
+        annotations: [],
+        untestedStreams: [],
+        gptpDiag: {
+          convergedNodes: 3,
+          totalNodes: 4,
+          thresholdSummary: "1000ns",
+          worstNode: "es2",
+          worstOffsetNs: 1500,
+        },
+      },
+      {
+        round: "fault_a",
+        status: "ok",
+        perStream: [
+          verdict(),
+          verdict({
+            streamSeq: 1,
+            class: "ST",
+            judged: false,
+            note: "仅健康轮判（故障轮不判）",
+          }),
+        ],
+        annotations: ["断链：t=400ms 单向断开链路 0（上游节点 1 出向）"],
+        untestedStreams: ["流 3：未测容错（断点不在其该平面路径上）"],
+      },
+      {
+        round: "fault_b",
+        status: "busy",
+        perStream: [],
+        annotations: ["软仿服务占用"],
+        untestedStreams: [],
+      },
+    ],
+  });
 }
 
 function baseProps(overrides: Partial<FlowPanelProps> = {}): FlowPanelProps {
@@ -141,6 +208,63 @@ describe("FlowPanel", () => {
     render(<FlowPanel {...baseProps({ verifyState: { status: "done", result: empty } })} />);
     expect(screen.queryByRole("table")).toBeNull();
     expect(screen.getByText(/结果为空/)).toBeTruthy();
+  });
+
+  it("U7：有 rounds 按轮分组渲染（健康轮/断A轮/断B轮小节 + 顶层摘要串联）", () => {
+    render(
+      <FlowPanel {...baseProps({ verifyState: { status: "done", result: roundsResult() } })} />,
+    );
+    expect(screen.getByText(/健康轮 · 通过/)).toBeTruthy();
+    expect(screen.getByText(/断A轮 · 通过/)).toBeTruthy();
+    expect(screen.getByText(/断B轮 · 服务占用（稍后重试）/)).toBeTruthy();
+    // 顶层摘要沿 U6 overall 串联。
+    expect(screen.getByText(/健康轮：3 个达标/)).toBeTruthy();
+  });
+
+  it("U7：多轮表带「类别」列，RC 行时延/抖动标「首达路实测」", () => {
+    render(
+      <FlowPanel {...baseProps({ verifyState: { status: "done", result: roundsResult() } })} />,
+    );
+    expect(screen.getAllByText("类别").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("RC").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("BE").length).toBeGreaterThan(0);
+    // RC 行两列（抖动/时延）都带首达路标注；ST/BE 行不带。
+    expect(screen.getAllByText(/首达路实测/).length).toBe(4); // 健康轮 + 断A轮各 2 格。
+  });
+
+  it("U7/R13：BE 行达标旁并列送达率", () => {
+    render(
+      <FlowPanel {...baseProps({ verifyState: { status: "done", result: roundsResult() } })} />,
+    );
+    expect(screen.getByText("达标（送达率 50%）")).toBeTruthy();
+  });
+
+  it("U7/R15：gPTP 诊断行文案逐轮渲染（只报告）", () => {
+    render(
+      <FlowPanel {...baseProps({ verifyState: { status: "done", result: roundsResult() } })} />,
+    );
+    expect(
+      screen.getByText("gPTP 收敛：3/4 节点 ≤ 阈值（1000ns），最差 1500 ns @es2"),
+    ).toBeTruthy();
+  });
+
+  it("U7/KTD8：报告态行显示 note、untested 流标记与断链标注可见", () => {
+    render(
+      <FlowPanel {...baseProps({ verifyState: { status: "done", result: roundsResult() } })} />,
+    );
+    expect(screen.getByText("仅健康轮判（故障轮不判）")).toBeTruthy();
+    expect(screen.getByText(/流 3：未测容错/)).toBeTruthy();
+    expect(screen.getByText(/断链：t=400ms/)).toBeTruthy();
+  });
+
+  it("U7：无 rounds 老结果渲染现状不变（无轮小节、无类别列）", () => {
+    render(
+      <FlowPanel {...baseProps({ verifyState: { status: "done", result: verifyResult() } })} />,
+    );
+    expect(screen.queryByText(/健康轮/)).toBeNull();
+    expect(screen.queryByText("类别")).toBeNull();
+    expect(screen.getByText("3/3")).toBeTruthy();
+    expect(screen.getByText("达标")).toBeTruthy();
   });
 
   it("会话切换后迟到结果被丢弃", async () => {

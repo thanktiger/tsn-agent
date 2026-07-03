@@ -19,7 +19,13 @@
 //! link_seq；时钟树边/ST 路由重叠响亮标注不改选，KTD2）；`t_break = max(0.4×最小 RC 活跃窗,
 //! 200ms 收敛下限)`，断后被覆盖流应发帧数 <20 整体响亮报错（KTD7）。单轮失败（load_failed/
 //! unreachable/busy）继续余轮拿全量信息；顶层 status/per_stream 恒为健康轮结果（前端向后
-//! 兼容，U7 接多轮渲染），`rounds` 携带全轮。本单元各轮同一判据（U7 做分级）。
+//! 兼容），`rounds` 携带全轮。
+//!
+//! **U7 分级判据（R11–R13）+ gPTP 收敛诊断行（R15）**：classify 按类分叉——ST 三项仅健康轮判
+//! （FAIL reason 附「重新规划」提示，KTD4）；RC 每轮判去重后收=实发±在途容差（容差逐轮自计），
+//! 收>实发即重复帧 FAIL，故障轮只判被断链覆盖的流；BE 仅健康轮判 received>0，送达率随行报告。
+//! 故障轮 ST/BE 与未覆盖 RC 只报告不判（judged=false + note）。每轮 CSV 另过
+//! `parse_timechanged_csv` 生成 gPTP 收敛诊断（只报告不参与任何 verdict）。
 
 use serde::Serialize;
 use sqlx::Row;
@@ -27,26 +33,35 @@ use std::collections::{BTreeMap, HashSet};
 
 use crate::inet_remote::{RemoteError, RemoteRunner, SimRunOutcome};
 use crate::inet_sim_bundle::{
-    FaultSpec, FlowStreamSpec, FlowTasSchedule, GclEntry, SimOverrides, build_flow_tas_sim_bundle,
-    flow_expected_sent, flow_sim_time_s, plan_flow_traffic,
+    FaultSpec, FlowStreamSpec, FlowTasSchedule, GclEntry, SimNodeTiming, SimOverrides,
+    build_flow_tas_sim_bundle, flow_expected_sent, flow_sim_time_s, plan_flow_traffic,
 };
-use crate::inet_sim_command::{load_timing, load_topology};
+use crate::inet_sim_command::{
+    CONVERGENCE_THRESHOLD_NS, load_timing, load_topology, parse_timechanged_csv, series_ned_name,
+    steady_state_offset,
+};
 
 pub const CALIBER_FLOW_TAS_VERIFIED: &str = "flow_tas_verified";
 /// 抖动上限 1us（R15）。
 const JITTER_LIMIT_NS: f64 = 1_000.0;
-/// per-packet 时延 + 抖动向量 filter（U1 spike 钉死向量名）。
-const FLOW_VERIFY_FILTER: &str = "name=~\"packetLifeTime:vector\" OR name=~\"packetJitter:vector\"";
+/// per-packet 时延 + 抖动向量 + clock timeChanged 向量 filter（U1 spike 钉死流量向量名；
+/// 时钟子句与 timesync 的 TIMECHANGED_FILTER 同形，R15 诊断行取数——同一份 CSV 流量向量走
+/// `parse_vec_csv`、时钟向量走 `parse_timechanged_csv`）。
+const FLOW_VERIFY_FILTER: &str = "name=~\"packetLifeTime:vector\" OR name=~\"packetJitter:vector\" OR (module=~\"**.clock\" AND name=~\"timeChanged:vector\")";
 /// 断链时刻的 gPTP 收敛下限（KTD7；spike 在 400ms 断链验证过 gPTP 存活，200ms 为收敛底线）。
 const FAULT_T_BREAK_FLOOR_NS: u64 = 200_000_000;
 /// 断后被覆盖 RC 流的最小应发帧数（KTD7 绝对帧量尾量守卫）。
 const FAULT_MIN_FRAMES_AFTER_BREAK: i64 = 20;
 
-/// 单流实测判决。
+/// 单流实测判决。U7 additive 新增：class（分级判据）、judged（该轮是否下判——故障轮 ST/BE
+/// 与未被断链覆盖的 RC 只报告不判，judged=false 时 pass 恒 true 不阻塞轮次聚合、note 说明
+/// 报告态）、delivery_ratio（BE 送达率=收/实发，只展示不判，R13）。
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct StreamVerdict {
     pub stream_seq: i64,
+    /// 流类别（ST/RC/BE）。
+    pub class: String,
     pub talker: String,
     pub listener: String,
     pub received: usize,
@@ -55,12 +70,35 @@ pub struct StreamVerdict {
     pub latency_max_ns: f64,
     pub window_ns: f64,
     pub pass: bool,
+    /// 该轮是否对此流下判（U7 分级）。
+    pub judged: bool,
+    /// BE 送达率（收/实发）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delivery_ratio: Option<f64>,
+    /// 报告态备注（「仅健康轮判」/「未测容错」）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
 }
 
+/// 每轮 gPTP 收敛诊断（R15，只报告、不参与任何 verdict）：复用 timesync 判据三件套
+/// （parse_timechanged_csv / steady_state_offset / 逐节点 offset_threshold，缺省回退
+/// 1000ns 全局兜底）。故障轮断链下游时钟劣化属预期，照实报告（断链标注在 annotations）。
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct GptpDiag {
+    pub converged_nodes: usize,
+    pub total_nodes: usize,
+    /// 阈值概览：各节点生效阈值全相同 → 「1000ns」；逐节点混合 → 「200–1000ns」。
+    pub threshold_summary: String,
+    /// 稳态 offset 最大的节点（ned 名）。
+    pub worst_node: String,
+    pub worst_offset_ns: f64,
+}
+
 /// 单轮验证结果（U6 断链故障轮编排，R9/AE2）。healthy 轮无断链；fault_a/fault_b 各断该平面
-/// 覆盖最多 RC 流的一条链路（KTD8）。本单元各轮同一判据（U7 做分级与结构化渲染）。
+/// 覆盖最多 RC 流的一条链路（KTD8）。U7：per_stream 按类分级判决 + gPTP 诊断行。
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct VerifyRound {
@@ -68,13 +106,16 @@ pub struct VerifyRound {
     pub round: String,
     /// ok | fail | empty | load_failed | unreachable | busy | bundle_error。
     /// busy = 服务端 409 单运行锁（环境冲突，不判验证 FAIL）；顶层 status 仍归 unreachable
-    /// 保持既有前端词表。
+    /// 保持既有前端词表。ok/fail 只看该轮**下判**的流（judged=false 的报告态不计）。
     pub status: String,
     pub per_stream: Vec<StreamVerdict>,
     /// 响亮标注（KTD2）：断点描述 / 时钟树边重叠 / ST 路由重叠 / 运行错误详情。
     pub annotations: Vec<String>,
-    /// 该轮未被断链途经的 RC 流（「未测容错」字符串，U7 结构化；KTD8）。
+    /// 该轮未被断链途经的 RC 流（「未测容错」字符串；KTD8。per_stream 行同时带 note）。
     pub untested_streams: Vec<String>,
+    /// gPTP 收敛诊断行（R15，只报告不判）。取不到时钟向量（旧结果/该轮失败）→ None。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gptp_diag: Option<GptpDiag>,
 }
 
 /// 验证结果（前端/agent 消费）。KTD7 诚实边界：caliber 恒 flow_tas_verified（仿真实测·非 T10）。
@@ -188,14 +229,24 @@ fn parse_vec_csv(csv: &str) -> Vec<VecRow> {
     out
 }
 
-/// 逐流分型：按 sink app module 后缀匹配 per-stream 时延/抖动向量，判 收=发 / jitter<1us /
-/// 时延≤窗口。空/短 → 该流 FAIL（R16）。
+/// 逐流分型（U7 分级判据，R11–R13）：按 sink app module 后缀匹配 per-stream 时延/抖动向量。
+/// - ST：三项判据不动（收=实发±在途容差 / 稳态抖动<1us 跳首样本 / 时延≤窗口），仅健康轮判；
+///   FAIL reason 末尾附「若近期改过 ST 流请重新规划」（KTD4，plan 过期指纹的文案替代）。
+/// - RC：每轮判「去重后收=实发±在途容差」——容差逐轮自计（该轮该流 sink 实测 max 时延套
+///   现行公式：健康轮自然是首达路、故障轮自然是存活路，R12「按较长一路计」由此实现）；
+///   收>实发 → FAIL 重复帧未消除。时延/抖动只报告不判（展示层标「首达路实测」）。
+///   故障轮只判被断链覆盖的流（`fault_covered`），未覆盖只报告（KTD8）。
+/// - BE：received>0 即 PASS（仅健康轮判）；送达率（收/实发）随行报告（R13）。
+///
+/// 空/短向量 → 下判的流该轮 FAIL（R16，含故障轮被覆盖 RC）；不判的流 judged=false + note，
+/// pass 恒 true（报告态不阻塞轮次聚合）。
 fn classify(
     rows: &[VecRow],
     specs: &[FlowStreamSpec],
     placements: &[crate::inet_sim_bundle::FlowPlacement],
     node_ned: &std::collections::BTreeMap<String, String>,
     sim_time_s: f64,
+    fault_covered: Option<&HashSet<i64>>,
 ) -> Vec<StreamVerdict> {
     // skip_first：抖动 max 跳过每条向量的首样本。INET packetJitter 首样本是第一个包对隐含 0
     // 参考的差值（≈该包时延，非真实包间抖动），是定义性启动瞬态；跳过后取的是稳态抖动。
@@ -238,32 +289,82 @@ fn classify(
             // 实发按 sim 时长确定性反推（源固定间隔产到 sim 结束，无产包上限）：floor(sim/period)+1。
             // 丢包判据：实发 - 收 ≤ 在途容差。容差 = ⌈实测max时延/period⌉+1，界定 sim 结束时仍在途、
             // 未及送达的尾巴（非真丢）——自由产包源无法做到「产完全部送达」，故不能要求收==实发精确相等。
+            // 容差对 RC 亦逐轮自计（该轮实测时延即该轮实际生效路径的时延，R12）。
             let expected_sent = flow_expected_sent(sim_time_s, s.period_us);
             let period_ns = (s.period_us.max(1) as f64) * 1_000.0;
             let in_flight_tol = (latency_max_ns / period_ns).ceil() as i64 + 1;
 
+            // 该轮是否下判（U7 分级）：健康轮全类判；故障轮只判被断链覆盖的 RC 流。
+            let judged = match fault_covered {
+                None => true,
+                Some(covered) => s.class == "RC" && covered.contains(&s.stream_seq),
+            };
+            let note = if judged {
+                None
+            } else if s.class == "RC" {
+                Some("未测容错（断点不在其该平面路径上）".to_string())
+            } else {
+                Some("仅健康轮判（故障轮不判）".to_string())
+            };
+            // BE 送达率（收/实发）：只展示不判（R13）；故障轮照实报告。
+            let delivery_ratio =
+                (s.class == "BE").then(|| received as f64 / expected_sent.max(1) as f64);
+
             let mut reasons = Vec::new();
-            if received == 0 {
-                reasons.push("无收包（空结果）".to_string());
-            } else if (received as i64) > expected_sent {
-                reasons.push(format!("收 {received} > 实发 {expected_sent}（重复/异常）"));
-            } else if expected_sent - (received as i64) > in_flight_tol {
-                reasons.push(format!(
-                    "收 {received} ＜ 实发 {expected_sent}（丢包 {}，超在途容差 {in_flight_tol}）",
-                    expected_sent - received as i64
-                ));
-            }
-            if jitter_max_ns >= JITTER_LIMIT_NS {
-                reasons.push(format!("抖动 {jitter_max_ns:.0}ns ≥ 1us"));
-            }
-            if received > 0 && latency_max_ns > window_ns {
-                reasons.push(format!(
-                    "时延 {latency_max_ns:.0}ns > 窗口 {window_ns:.0}ns"
-                ));
+            if judged {
+                match s.class.as_str() {
+                    "RC" => {
+                        // 去重后收=实发±在途容差（R12）；收>实发 = 消除点没吞掉重复帧。
+                        if received == 0 {
+                            reasons.push("无收包（空结果）".to_string());
+                        } else if (received as i64) > expected_sent {
+                            reasons.push(format!(
+                                "收 {received} > 实发 {expected_sent}（重复帧未消除）"
+                            ));
+                        } else if expected_sent - (received as i64) > in_flight_tol {
+                            reasons.push(format!(
+                                "收 {received} ＜ 实发 {expected_sent}（丢包 {}，超在途容差 {in_flight_tol}）",
+                                expected_sent - received as i64
+                            ));
+                        }
+                    }
+                    "BE" => {
+                        // 有收包即过（R13）；时延/抖动/丢包只报告。
+                        if received == 0 {
+                            reasons.push("无收包（BE 要求有收包）".to_string());
+                        }
+                    }
+                    _ => {
+                        // ST 三项（R11 现行不动；未知类兜底同 ST——录入闸/入口校验后不该出现）。
+                        if received == 0 {
+                            reasons.push("无收包（空结果）".to_string());
+                        } else if (received as i64) > expected_sent {
+                            reasons.push(format!("收 {received} > 实发 {expected_sent}（重复/异常）"));
+                        } else if expected_sent - (received as i64) > in_flight_tol {
+                            reasons.push(format!(
+                                "收 {received} ＜ 实发 {expected_sent}（丢包 {}，超在途容差 {in_flight_tol}）",
+                                expected_sent - received as i64
+                            ));
+                        }
+                        if jitter_max_ns >= JITTER_LIMIT_NS {
+                            reasons.push(format!("抖动 {jitter_max_ns:.0}ns ≥ 1us"));
+                        }
+                        if received > 0 && latency_max_ns > window_ns {
+                            reasons.push(format!(
+                                "时延 {latency_max_ns:.0}ns > 窗口 {window_ns:.0}ns"
+                            ));
+                        }
+                        // KTD4：plan 过期指纹本期以文案替代——ST FAIL 附重新规划提示。
+                        if s.class == "ST" && !reasons.is_empty() {
+                            reasons.push("若近期改过 ST 流请重新规划".to_string());
+                        }
+                    }
+                }
             }
             let pass = reasons.is_empty();
             StreamVerdict {
                 stream_seq: s.stream_seq,
+                class: s.class.clone(),
                 talker: s.talker.clone(),
                 listener: s.listener.clone(),
                 received,
@@ -272,6 +373,9 @@ fn classify(
                 latency_max_ns,
                 window_ns,
                 pass,
+                judged,
+                delivery_ratio,
+                note,
                 reason: if pass {
                     None
                 } else {
@@ -280,6 +384,73 @@ fn classify(
             }
         })
         .collect()
+}
+
+/// gPTP 收敛诊断（R15，只报告不判）：同一份 CSV 过 `parse_timechanged_csv` 取 clock 向量，
+/// `steady_state_offset` 对 GM 插值算逐节点稳态 offset，与逐节点 offset_threshold（mid 经
+/// node_ned_names 桥接到 ned；缺省回退 1000ns 全局兜底，与 timesync 软仿同口径）比对。
+/// 双宿拆分的内嵌桥（esb*）不在 node_ned_names——其 clock **单列**为独立节点计数、阈值走
+/// 缺省（最小惊讶：报告仿真里真实存在的时钟，不并入宿主端系统）。取不到时钟向量 / 无 GM
+/// 序列 / 无稳态样本 → None（诊断行缺席，不臆造）。
+fn gptp_diag_from_csv(
+    csv: &str,
+    gm_ned: &str,
+    node_ned_names: &BTreeMap<String, String>,
+    timing: &[SimNodeTiming],
+) -> Option<GptpDiag> {
+    let series = parse_timechanged_csv(csv).ok()?;
+    let gm_marker = format!("{gm_ned}.clock");
+    let gm_series = series.iter().find(|s| s.module.ends_with(&gm_marker))?;
+    // ned 名 → 逐节点阈值（ns）：timesync_nodes.offset_threshold 按 mid keyed，经 bundle 的
+    // mid→ned 映射桥接（与 run_timesync_sim_inner 同法）。
+    let thresholds: BTreeMap<String, f64> = timing
+        .iter()
+        .filter_map(|t| {
+            let ned = node_ned_names.get(&t.mid)?;
+            let threshold = t.offset_threshold_ns?;
+            Some((ned.clone(), threshold as f64))
+        })
+        .collect();
+    let mut total = 0usize;
+    let mut converged = 0usize;
+    let mut th_lo = f64::INFINITY;
+    let mut th_hi = f64::NEG_INFINITY;
+    let mut worst: Option<(String, f64)> = None;
+    for s in &series {
+        if std::ptr::eq(s, gm_series) {
+            continue;
+        }
+        let Some((max_ns, _mean_ns)) = steady_state_offset(s, gm_series) else {
+            continue;
+        };
+        let ned = series_ned_name(&s.module).unwrap_or(&s.module).to_string();
+        let threshold = thresholds
+            .get(&ned)
+            .copied()
+            .unwrap_or(CONVERGENCE_THRESHOLD_NS);
+        total += 1;
+        if max_ns <= threshold {
+            converged += 1;
+        }
+        th_lo = th_lo.min(threshold);
+        th_hi = th_hi.max(threshold);
+        if worst.as_ref().is_none_or(|(_, w)| max_ns > *w) {
+            worst = Some((ned, max_ns));
+        }
+    }
+    let (worst_node, worst_offset_ns) = worst?;
+    let threshold_summary = if (th_hi - th_lo).abs() < f64::EPSILON {
+        format!("{th_lo:.0}ns")
+    } else {
+        format!("{th_lo:.0}–{th_hi:.0}ns")
+    };
+    Some(GptpDiag {
+        converged_nodes: converged,
+        total_nodes: total,
+        threshold_summary,
+        worst_node,
+        worst_offset_ns,
+    })
 }
 
 /// 断链时刻（ns）：max(0.4 × 最小 RC 活跃窗, 200ms gPTP 收敛下限)（KTD7）。
@@ -383,11 +554,18 @@ fn select_break_point(
 }
 
 /// 单轮机器词 → overall 串联用的摘要（ok/fail 给达标计数，其余给状态词本身）。
+/// U7：只计该轮**下判**的流；报告态（judged=false）单列尾注，不混进达标/未达标。
 fn round_summary(status: &str, per_stream: &[StreamVerdict]) -> String {
     match status {
         "ok" | "fail" => {
-            let passed = per_stream.iter().filter(|v| v.pass).count();
-            format!("{passed} 个达标 / {} 个未达标", per_stream.len() - passed)
+            let judged = per_stream.iter().filter(|v| v.judged).count();
+            let passed = per_stream.iter().filter(|v| v.judged && v.pass).count();
+            let mut s = format!("{passed} 个达标 / {} 个未达标", judged - passed);
+            let reported = per_stream.len() - judged;
+            if reported > 0 {
+                s.push_str(&format!("（另 {reported} 个仅报告）"));
+            }
+            s
         }
         s => s.to_string(),
     }
@@ -605,10 +783,16 @@ pub async fn verify_tas_inner<R: RemoteRunner>(
     let sim_time_s = flow_sim_time_s(&specs);
 
     // 单轮执行（KTD3：三轮=三次独立 bundle + 顺序提交共用此路径）：装 bundle（fault=None 即
-    // 健康轮，产物与 U5 后现状位级一致）→ 跑 → classify（本单元各轮同一判据，U7 分级）。
-    // 返回 (round status, per_stream, 详情)。busy=服务端 409 单运行锁（凭 BUSY_MESSAGE 文案
-    // 判别，环境冲突不与验证 FAIL 混淆；其余 Unreachable 归 unreachable 兜底）。
-    let run_round = |fault: Option<FaultSpec>| -> (String, Vec<StreamVerdict>, Option<String>) {
+    // 健康轮，产物与 U5 后现状位级一致）→ 跑 → classify（U7 分级：故障轮带被断链覆盖的 RC
+    // 流集，只判它们）→ gPTP 诊断（R15，只报告）。返回 (round status, per_stream, 详情, 诊断)。
+    // busy=服务端 409 单运行锁（凭 BUSY_MESSAGE 文案判别，环境冲突不与验证 FAIL 混淆；
+    // 其余 Unreachable 归 unreachable 兜底）。
+    type RoundOutput = (String, Vec<StreamVerdict>, Option<String>, Option<GptpDiag>);
+    let run_round = |fault: Option<(FaultSpec, &HashSet<i64>)>| -> RoundOutput {
+        let (fault_spec, fault_covered) = match &fault {
+            Some((f, covered)) => (Some(f.clone()), Some(*covered)),
+            None => (None, None),
+        };
         let sim_bundle = match build_flow_tas_sim_bundle(
             &nodes,
             &links,
@@ -616,7 +800,7 @@ pub async fn verify_tas_inner<R: RemoteRunner>(
             &timing,
             &SimOverrides {
                 has_rc,
-                fault,
+                fault: fault_spec,
                 ..Default::default()
             },
             &specs,
@@ -631,7 +815,7 @@ pub async fn verify_tas_inner<R: RemoteRunner>(
                     .map(|e| e.message_zh.clone())
                     .collect::<Vec<_>>()
                     .join("；");
-                return ("bundle_error".to_string(), vec![], Some(msg));
+                return ("bundle_error".to_string(), vec![], Some(msg), None);
             }
         };
         let outcome: SimRunOutcome =
@@ -643,15 +827,20 @@ pub async fn verify_tas_inner<R: RemoteRunner>(
                     } else {
                         "unreachable"
                     };
-                    return (status.to_string(), vec![], Some(m));
+                    return (status.to_string(), vec![], Some(m), None);
                 }
             };
         if outcome.exit_code != Some(0) {
-            return ("load_failed".to_string(), vec![], Some(outcome.output_tail));
+            return (
+                "load_failed".to_string(),
+                vec![],
+                Some(outcome.output_tail),
+                None,
+            );
         }
         let Some(csv) = outcome.csv else {
             // 空=FAIL，绝不渲染绿（R16）。
-            return ("empty".to_string(), vec![], None);
+            return ("empty".to_string(), vec![], None, None);
         };
         let rows = parse_vec_csv(&csv);
         let per_stream = classify(
@@ -660,18 +849,30 @@ pub async fn verify_tas_inner<R: RemoteRunner>(
             &placements,
             &sim_bundle.node_ned_names,
             sim_time_s,
+            fault_covered,
         );
-        let passed = per_stream.iter().filter(|v| v.pass).count();
-        let all_pass = passed == per_stream.len() && !per_stream.is_empty();
+        // gPTP 收敛诊断（R15）：同一份 CSV 取 clock 向量，只报告不参与轮判。
+        let diag = gptp_diag_from_csv(
+            &csv,
+            &sim_bundle.gm_ned_name,
+            &sim_bundle.node_ned_names,
+            &timing,
+        );
+        // 轮判只看下判的流（报告态不阻塞也不放行）；下判流为零不该发生（健康轮全判、
+        // 故障轮 covered 非空），防御性归 fail 不染绿。
+        let judged = per_stream.iter().filter(|v| v.judged).count();
+        let passed = per_stream.iter().filter(|v| v.judged && v.pass).count();
+        let all_pass = judged > 0 && passed == judged;
         (
             (if all_pass { "ok" } else { "fail" }).to_string(),
             per_stream,
             None,
+            diag,
         )
     };
 
     // 健康轮（无 RC 时即唯一轮，现状回归）。
-    let (h_status, h_per, h_detail) = run_round(None);
+    let (h_status, h_per, h_detail, h_diag) = run_round(None);
 
     // 顶层结果 = 健康轮（向后兼容：status/per_stream/文案词表与单轮现状一致；round 级
     // busy 顶层归 unreachable，前端本单元零改动）。
@@ -718,6 +919,7 @@ pub async fn verify_tas_inner<R: RemoteRunner>(
         per_stream: h_per,
         annotations: h_detail.into_iter().collect(),
         untested_streams: vec![],
+        gptp_diag: h_diag,
     }];
     for (name, bp) in planned {
         let round = match bp {
@@ -728,13 +930,18 @@ pub async fn verify_tas_inner<R: RemoteRunner>(
                 per_stream: vec![],
                 annotations: vec!["该平面无可断链路（RC 路径为空）。".to_string()],
                 untested_streams: vec![],
+                gptp_diag: None,
             },
             Some(bp) => {
-                let (status, per_stream, detail) = run_round(Some(FaultSpec {
-                    src_mid: bp.upstream_mid.clone(),
-                    src_db_port: bp.upstream_db_port,
-                    t_break_ns,
-                }));
+                let covered_set: HashSet<i64> = bp.covered.iter().copied().collect();
+                let (status, per_stream, detail, diag) = run_round(Some((
+                    FaultSpec {
+                        src_mid: bp.upstream_mid.clone(),
+                        src_db_port: bp.upstream_db_port,
+                        t_break_ns,
+                    },
+                    &covered_set,
+                )));
                 let mut annotations = vec![format!(
                     "断链：t={}ms 单向断开链路 {}（上游节点 {} 出向）",
                     t_break_ns / 1_000_000,
@@ -764,6 +971,7 @@ pub async fn verify_tas_inner<R: RemoteRunner>(
                         .iter()
                         .map(|s| format!("流 {s}：未测容错（断点不在其该平面路径上）"))
                         .collect(),
+                    gptp_diag: diag,
                 }
             }
         };
@@ -1740,11 +1948,19 @@ mod tests {
             assert_eq!(runner.inis().len(), 1, "无 RC 只跑一轮");
             let json = serde_json::to_string(&r).unwrap();
             assert!(!json.contains("rounds"), "{json}");
+            // U7 形状契约：无 rounds 老结果仅 additive 多 class/judged 两个恒有键；可选键
+            // （deliveryRatio/note/gptpDiag）在纯 ST 判定结果里一律缺席，其余与 U6 前一致。
+            assert!(json.contains("\"class\":\"ST\""), "{json}");
+            assert!(json.contains("\"judged\":true"), "{json}");
+            assert!(!json.contains("deliveryRatio"), "{json}");
+            assert!(!json.contains("\"note\""), "{json}");
+            assert!(!json.contains("gptpDiag"), "{json}");
         });
     }
 
-    /// Covers U6⑧：rounds serde 契约——camelCase（rounds/round/perStream/annotations/
-    /// untestedStreams），无 snake_case 泄漏。
+    /// Covers U6⑧ + U7⑦：rounds serde 契约——camelCase（rounds/round/perStream/annotations/
+    /// untestedStreams/gptpDiag 及 StreamVerdict 新字段 class/judged/deliveryRatio/note），
+    /// 无 snake_case 泄漏。
     #[test]
     fn rounds_serde_camel_case() {
         let r = VerifyTasResult {
@@ -1756,9 +1972,31 @@ mod tests {
             rounds: Some(vec![VerifyRound {
                 round: "fault_a".into(),
                 status: "busy".into(),
-                per_stream: vec![],
+                per_stream: vec![StreamVerdict {
+                    stream_seq: 0,
+                    class: "BE".into(),
+                    talker: "1".into(),
+                    listener: "2".into(),
+                    received: 2,
+                    expected: 4,
+                    jitter_max_ns: 1.0,
+                    latency_max_ns: 2.0,
+                    window_ns: 3.0,
+                    pass: true,
+                    judged: false,
+                    delivery_ratio: Some(0.5),
+                    note: Some("仅健康轮判（故障轮不判）".into()),
+                    reason: None,
+                }],
                 annotations: vec!["a".into()],
                 untested_streams: vec!["流 1：未测容错".into()],
+                gptp_diag: Some(GptpDiag {
+                    converged_nodes: 3,
+                    total_nodes: 4,
+                    threshold_summary: "1000ns".into(),
+                    worst_node: "sw2".into(),
+                    worst_offset_ns: 1500.0,
+                }),
             }]),
         };
         let json = serde_json::to_string(&r).unwrap();
@@ -1767,8 +2005,20 @@ mod tests {
         assert!(json.contains("\"untestedStreams\""), "{json}");
         assert!(json.contains("\"perStream\""), "{json}");
         assert!(json.contains("\"annotations\""), "{json}");
+        assert!(json.contains("\"class\":\"BE\""), "{json}");
+        assert!(json.contains("\"judged\":false"), "{json}");
+        assert!(json.contains("\"deliveryRatio\":0.5"), "{json}");
+        assert!(json.contains("\"note\""), "{json}");
+        assert!(json.contains("\"gptpDiag\""), "{json}");
+        assert!(json.contains("\"convergedNodes\":3"), "{json}");
+        assert!(json.contains("\"totalNodes\":4"), "{json}");
+        assert!(json.contains("\"thresholdSummary\":\"1000ns\""), "{json}");
+        assert!(json.contains("\"worstNode\":\"sw2\""), "{json}");
+        assert!(json.contains("\"worstOffsetNs\":1500.0"), "{json}");
         assert!(!json.contains("untested_streams"), "{json}");
         assert!(!json.contains("per_stream"), "{json}");
+        assert!(!json.contains("delivery_ratio"), "{json}");
+        assert!(!json.contains("gptp_diag"), "{json}");
     }
 
     /// Covers KTD7（U6⑨）：t_break 手算——RC 窗 1s → 0.4×=400ms（>200ms 下限，取 0.4×窗）；
@@ -1777,5 +2027,433 @@ mod tests {
     fn t_break_forty_percent_with_200ms_floor() {
         assert_eq!(fault_t_break_ns(1_000_000_000), 400_000_000);
         assert_eq!(fault_t_break_ns(100_000_000), 200_000_000);
+    }
+
+    // ---------- U7：分级判据（R11–R13）+ gPTP 收敛诊断行（R15）----------
+
+    /// R15：filter 拼了 clock timeChanged 子句（与 timesync TIMECHANGED_FILTER 同形），
+    /// 流量向量子句不动。
+    #[test]
+    fn flow_verify_filter_includes_clock_clause() {
+        assert!(FLOW_VERIFY_FILTER.contains("name=~\"packetLifeTime:vector\""));
+        assert!(FLOW_VERIFY_FILTER.contains("name=~\"packetJitter:vector\""));
+        assert!(
+            FLOW_VERIFY_FILTER
+                .contains("OR (module=~\"**.clock\" AND name=~\"timeChanged:vector\")"),
+            "{FLOW_VERIFY_FILTER}"
+        );
+    }
+
+    /// Covers AE1（U7①，R12）：RC 健康轮收 > 实发（2002 > 2001）→ FAIL「重复帧未消除」
+    /// （消除点失效不得染绿）。
+    #[test]
+    fn rc_duplicate_frames_fail_loudly() {
+        tauri::async_runtime::block_on(async {
+            let pool = fresh_pool().await;
+            seed_dual_plane_rc(&pool, RC_PATHS).await;
+            let csv = healthy_csv("TsnAgentFlowTasNetwork.es2.app[0].sink", 2002);
+            let runner = ScriptedRunner::new(vec![
+                Ok(outcome(Some(&csv))),
+                Ok(outcome(Some(&csv))),
+                Ok(outcome(Some(&csv))),
+            ]);
+            let r = verify_tas_inner(&pool, "s1", &runner).await.unwrap();
+            assert_eq!(r.status, "fail", "{r:?}");
+            assert_eq!(r.per_stream[0].class, "RC");
+            assert!(r.per_stream[0].judged);
+            assert!(
+                r.per_stream[0]
+                    .reason
+                    .as_deref()
+                    .unwrap()
+                    .contains("重复帧未消除"),
+                "{r:?}"
+            );
+        });
+    }
+
+    /// Covers AE1（U7①②，R12）：RC 缺口在在途容差内（2000/2001，容差 2）→ PASS；
+    /// 缺口超容差（1000/2001）→ FAIL 丢包。容差逐轮自计（实测 100us 时延 / 500us 周期
+    /// → ⌈0.2⌉+1=2）。
+    #[test]
+    fn rc_gap_within_tolerance_passes_beyond_fails() {
+        tauri::async_runtime::block_on(async {
+            // 容差内：收 2000、实发 2001。
+            let pool = fresh_pool().await;
+            seed_dual_plane_rc(&pool, RC_PATHS).await;
+            let csv = healthy_csv("TsnAgentFlowTasNetwork.es2.app[0].sink", 2000);
+            let runner = ScriptedRunner::new(vec![
+                Ok(outcome(Some(&csv))),
+                Ok(outcome(Some(&csv))),
+                Ok(outcome(Some(&csv))),
+            ]);
+            let r = verify_tas_inner(&pool, "s1", &runner).await.unwrap();
+            assert_eq!(r.status, "ok", "缺口 1 ≤ 容差 2 应通过：{r:?}");
+            assert!(r.per_stream[0].pass);
+
+            // 超容差：收 1000。
+            let pool = fresh_pool().await;
+            seed_dual_plane_rc(&pool, RC_PATHS).await;
+            let csv = healthy_csv("TsnAgentFlowTasNetwork.es2.app[0].sink", 1000);
+            let runner = ScriptedRunner::new(vec![
+                Ok(outcome(Some(&csv))),
+                Ok(outcome(Some(&csv))),
+                Ok(outcome(Some(&csv))),
+            ]);
+            let r = verify_tas_inner(&pool, "s1", &runner).await.unwrap();
+            assert_eq!(r.status, "fail", "{r:?}");
+            assert!(
+                r.per_stream[0].reason.as_deref().unwrap().contains("丢包"),
+                "{r:?}"
+            );
+        });
+    }
+
+    /// 混合三类 seed：dual-plane RC（seq0）+ ST（seq1，带 gate7 GCL）+ BE（seq2），
+    /// 全部 es1→es2、count=2000×500us（sim=1s、每流实发 2001）。
+    async fn seed_mixed_three_classes(pool: &sqlx::Pool<sqlx::Sqlite>) {
+        seed_dual_plane_rc(pool, RC_PATHS).await;
+        sqlx::query("INSERT INTO topology_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener, max_latency_us) VALUES ('s1', 1, 'ST', 7, 500, 512, 2000, '1', '2', 400)")
+            .execute(pool).await.unwrap();
+        sqlx::query("INSERT INTO topology_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener) VALUES ('s1', 2, 'BE', 0, 500, 512, 2000, '1', '2')")
+            .execute(pool).await.unwrap();
+        sqlx::query("INSERT INTO flow_plans (session_id, stream_seq, node, eth_n, gate_index, initially_open, offset_ns, durations_ns, solver) VALUES ('s1', 1, '0', 1, 7, 1, 0, '[300000,700000]', 'Z3')")
+            .execute(pool).await.unwrap();
+    }
+
+    /// 三个 sink（es2.app[0]=RC、app[1]=ST、app[2]=BE）全健康的 CSV；ST sink 抖动可注坏样本。
+    fn mixed_csv(st_jitter_breach: bool) -> String {
+        let mut csv = healthy_csv("TsnAgentFlowTasNetwork.es2.app[0].sink", 2001);
+        let st = healthy_csv("TsnAgentFlowTasNetwork.es2.app[1].sink", 2001);
+        // healthy_csv 自带表头，拼接时剥掉后两份的表头行。
+        csv.push_str(st.strip_prefix(&header()).unwrap());
+        if st_jitter_breach {
+            // 追加一行非首位 2us 抖动样本（首样本被 skip_first 跳过，须放后位才生效）。
+            csv.push_str(
+                "TsnAgentFlowTasNetwork.es2.app[1].sink,packetJitter:vector,0 0,0.0000001 0.000002\n",
+            );
+        }
+        let be = healthy_csv("TsnAgentFlowTasNetwork.es2.app[2].sink", 2001);
+        csv.push_str(be.strip_prefix(&header()).unwrap());
+        csv
+    }
+
+    /// Covers AE4（U7③，R11–R13）：混合三类三轮全绿——三类各按各判据（健康轮全判、
+    /// 故障轮只判 RC），overall PASS；BE 行带送达率 1.0；故障轮 ST/BE 报告态。
+    #[test]
+    fn mixed_three_classes_judged_per_class_all_green() {
+        tauri::async_runtime::block_on(async {
+            let pool = fresh_pool().await;
+            seed_mixed_three_classes(&pool).await;
+            let csv = mixed_csv(false);
+            let runner = ScriptedRunner::new(vec![
+                Ok(outcome(Some(&csv))),
+                Ok(outcome(Some(&csv))),
+                Ok(outcome(Some(&csv))),
+            ]);
+            let r = verify_tas_inner(&pool, "s1", &runner).await.unwrap();
+            assert_eq!(r.status, "ok", "{r:?}");
+            assert_eq!(
+                r.per_stream
+                    .iter()
+                    .map(|v| v.class.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["RC", "ST", "BE"]
+            );
+            assert!(r.per_stream.iter().all(|v| v.pass && v.judged), "{r:?}");
+            assert_eq!(r.per_stream[2].delivery_ratio, Some(1.0), "{r:?}");
+            let rounds = r.rounds.as_ref().expect("有 RC 应有 rounds");
+            assert_eq!(rounds.len(), 3);
+            assert!(rounds.iter().all(|x| x.status == "ok"), "{rounds:?}");
+            // 故障轮：只有 RC 下判，ST/BE 报告态（仅健康轮判）。
+            let fa = &rounds[1];
+            let st = fa.per_stream.iter().find(|v| v.class == "ST").unwrap();
+            assert!(!st.judged && st.pass, "{fa:?}");
+            assert!(st.note.as_deref().unwrap().contains("仅健康轮判"), "{fa:?}");
+            let be = fa.per_stream.iter().find(|v| v.class == "BE").unwrap();
+            assert!(!be.judged, "{fa:?}");
+            let rc = fa.per_stream.iter().find(|v| v.class == "RC").unwrap();
+            assert!(rc.judged && rc.pass, "{fa:?}");
+            assert!(r.overall.contains("另 2 个仅报告"), "{}", r.overall);
+        });
+    }
+
+    /// Covers AE4（U7③，R11/KTD4）：ST 抖动超标 → ST FAIL 不被 RC/BE 绿灯掩盖（整体 fail），
+    /// reason 带「重新规划」提示（plan 过期文案替代指纹）。
+    #[test]
+    fn mixed_st_jitter_breach_not_masked_by_rc_be() {
+        tauri::async_runtime::block_on(async {
+            let pool = fresh_pool().await;
+            seed_mixed_three_classes(&pool).await;
+            let csv = mixed_csv(true);
+            let runner = ScriptedRunner::new(vec![
+                Ok(outcome(Some(&csv))),
+                Ok(outcome(Some(&csv))),
+                Ok(outcome(Some(&csv))),
+            ]);
+            let r = verify_tas_inner(&pool, "s1", &runner).await.unwrap();
+            assert_eq!(r.status, "fail", "ST FAIL 不得被 RC/BE 绿灯掩盖：{r:?}");
+            let st = r.per_stream.iter().find(|v| v.class == "ST").unwrap();
+            assert!(!st.pass, "{r:?}");
+            let reason = st.reason.as_deref().unwrap();
+            assert!(reason.contains("抖动"), "{reason}");
+            assert!(reason.contains("若近期改过 ST 流请重新规划"), "{reason}");
+            // RC/BE 各自达标，不因 ST 连坐。
+            assert!(
+                r.per_stream
+                    .iter()
+                    .filter(|v| v.class != "ST")
+                    .all(|v| v.pass),
+                "{r:?}"
+            );
+        });
+    }
+
+    /// Covers U7④（R13）：BE 零收包 → FAIL；收一半（2/4）→ PASS 且送达率 0.5——
+    /// 丢包/抖动不判（夹具带 2us 抖动样本仍过），只报告。
+    #[test]
+    fn be_zero_receive_fails_half_receive_passes_with_ratio() {
+        tauri::async_runtime::block_on(async {
+            // 零收包：CSV 只有表头（该流无向量行）→ FAIL。
+            let pool = fresh_pool().await;
+            seed(&pool).await;
+            sqlx::query("DELETE FROM topology_streams WHERE session_id='s1'")
+                .execute(&pool)
+                .await
+                .unwrap();
+            sqlx::query("DELETE FROM flow_plans WHERE session_id='s1'")
+                .execute(&pool)
+                .await
+                .unwrap();
+            sqlx::query("INSERT INTO topology_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener) VALUES ('s1', 0, 'BE', 0, 500, 512, 3, '1', '2')")
+                .execute(&pool).await.unwrap();
+            let r = verify_tas_inner(
+                &pool,
+                "s1",
+                &MockRunner {
+                    outcome: outcome(Some(&header())),
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(r.status, "fail", "{r:?}");
+            assert_eq!(r.per_stream[0].class, "BE");
+            assert!(
+                r.per_stream[0]
+                    .reason
+                    .as_deref()
+                    .unwrap()
+                    .contains("无收包"),
+                "{r:?}"
+            );
+            assert_eq!(r.per_stream[0].delivery_ratio, Some(0.0), "{r:?}");
+
+            // 收一半：sim=1500us → 实发 4，收 2 → 送达率 0.5；带 2us 抖动样本仍 PASS（不判）。
+            let csv = format!(
+                "{}TsnAgentFlowTasNetwork.es2.app[0].sink,packetLifeTime:vector,0 0,0.0001 0.00012\nTsnAgentFlowTasNetwork.es2.app[0].sink,packetJitter:vector,0 0,0.0000001 0.000002\n",
+                header()
+            );
+            let r = verify_tas_inner(
+                &pool,
+                "s1",
+                &MockRunner {
+                    outcome: outcome(Some(&csv)),
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(r.status, "ok", "BE 只判有收包（丢包/抖动不判）：{r:?}");
+            assert!(r.per_stream[0].pass);
+            assert_eq!(r.per_stream[0].received, 2);
+            assert_eq!(r.per_stream[0].expected, 4);
+            assert_eq!(r.per_stream[0].delivery_ratio, Some(0.5), "{r:?}");
+        });
+    }
+
+    /// Covers U7⑤（R11 分级面）：故障轮 ST 时延/抖动劣化 → 该轮 ST 不判（judged=false、
+    /// note「仅健康轮判」、不拉低轮判）；RC 照判；轮摘要带「仅报告」尾注。
+    #[test]
+    fn fault_round_st_degradation_reported_not_judged() {
+        tauri::async_runtime::block_on(async {
+            let pool = fresh_pool().await;
+            seed_dual_plane_rc(&pool, RC_PATHS).await;
+            sqlx::query("INSERT INTO topology_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener, max_latency_us) VALUES ('s1', 1, 'ST', 7, 500, 512, 2000, '1', '2', 400)")
+                .execute(&pool).await.unwrap();
+            sqlx::query("INSERT INTO flow_plans (session_id, stream_seq, node, eth_n, gate_index, initially_open, offset_ns, durations_ns, solver) VALUES ('s1', 1, '0', 1, 7, 1, 0, '[300000,700000]', 'Z3')")
+                .execute(&pool).await.unwrap();
+            let mut healthy = healthy_csv("TsnAgentFlowTasNetwork.es2.app[0].sink", 2001);
+            let st = healthy_csv("TsnAgentFlowTasNetwork.es2.app[1].sink", 2001);
+            healthy.push_str(st.strip_prefix(&header()).unwrap());
+            // 断A轮：RC 健康、ST 劣化（时延 1ms 超窗 + 丢到只剩 3 帧——若被判必挂）。
+            let mut fault = healthy_csv("TsnAgentFlowTasNetwork.es2.app[0].sink", 2001);
+            fault.push_str(
+                "TsnAgentFlowTasNetwork.es2.app[1].sink,packetLifeTime:vector,0 0 0,0.001 0.001 0.001\nTsnAgentFlowTasNetwork.es2.app[1].sink,packetJitter:vector,0 0 0,0.0000001 0.000005 0.000004\n",
+            );
+            let runner = ScriptedRunner::new(vec![
+                Ok(outcome(Some(&healthy))),
+                Ok(outcome(Some(&fault))),
+                Ok(outcome(Some(&healthy))),
+            ]);
+            let r = verify_tas_inner(&pool, "s1", &runner).await.unwrap();
+            assert_eq!(r.status, "ok", "{r:?}");
+            let rounds = r.rounds.as_ref().unwrap();
+            let fa = &rounds[1];
+            assert_eq!(fa.status, "ok", "ST 劣化不拉低故障轮判决：{fa:?}");
+            let st = fa.per_stream.iter().find(|v| v.class == "ST").unwrap();
+            assert!(!st.judged && st.pass && st.reason.is_none(), "{fa:?}");
+            assert!(st.note.as_deref().unwrap().contains("仅健康轮判"), "{fa:?}");
+            let rc = fa.per_stream.iter().find(|v| v.class == "RC").unwrap();
+            assert!(rc.judged && rc.pass, "{fa:?}");
+            assert!(r.overall.contains("仅报告"), "{}", r.overall);
+        });
+    }
+
+    /// Covers U7⑧（KTD8）：故障轮未被断链覆盖的 RC 流——per-stream 行 judged=false +
+    /// note「未测容错」（round 级 untested_streams 由 U6 既有测试锁定）；被覆盖流照判。
+    #[test]
+    fn fault_round_untested_rc_reported_not_judged() {
+        tauri::async_runtime::block_on(async {
+            let pool = fresh_pool().await;
+            // 两条 RC 不共向（es1→es2、es3→es1）：断A断点只覆盖流 1，流 0 未测。
+            seed_dual_plane_two_rc(&pool, ("4", "1")).await;
+            let mut csv = healthy_csv("TsnAgentFlowTasNetwork.es2.app[0].sink", 2001);
+            let second = healthy_csv("TsnAgentFlowTasNetwork.es1.app[1].sink", 2001);
+            csv.push_str(second.strip_prefix(&header()).unwrap());
+            let runner = ScriptedRunner::new(vec![
+                Ok(outcome(Some(&csv))),
+                Ok(outcome(Some(&csv))),
+                Ok(outcome(Some(&csv))),
+            ]);
+            let r = verify_tas_inner(&pool, "s1", &runner).await.unwrap();
+            let rounds = r.rounds.as_ref().unwrap();
+            let fa = &rounds[1];
+            let s0 = fa.per_stream.iter().find(|v| v.stream_seq == 0).unwrap();
+            assert!(!s0.judged && s0.pass, "{fa:?}");
+            assert!(s0.note.as_deref().unwrap().contains("未测容错"), "{fa:?}");
+            let s1 = fa.per_stream.iter().find(|v| v.stream_seq == 1).unwrap();
+            assert!(s1.judged, "被覆盖流照判：{fa:?}");
+            // 健康轮两条 RC 都判。
+            assert!(rounds[0].per_stream.iter().all(|v| v.judged), "{rounds:?}");
+        });
+    }
+
+    /// Covers U7⑨（R16 沿袭）：空/短向量该流该轮 FAIL 不染绿——健康轮（CSV 有表头无该流
+    /// 向量行）与故障轮（健康轮正常、断A轮向量缺失）各一 case，故障轮被覆盖 RC 同判。
+    #[test]
+    fn empty_vectors_fail_stream_in_healthy_and_fault_rounds() {
+        tauri::async_runtime::block_on(async {
+            // 健康轮空向量 → 该流 FAIL、整体 fail。
+            let pool = fresh_pool().await;
+            seed_dual_plane_rc(&pool, RC_PATHS).await;
+            let bare = header();
+            let runner = ScriptedRunner::new(vec![
+                Ok(outcome(Some(&bare))),
+                Ok(outcome(Some(&bare))),
+                Ok(outcome(Some(&bare))),
+            ]);
+            let r = verify_tas_inner(&pool, "s1", &runner).await.unwrap();
+            assert_eq!(r.status, "fail", "{r:?}");
+            assert!(!r.per_stream[0].pass);
+            assert!(
+                r.per_stream[0]
+                    .reason
+                    .as_deref()
+                    .unwrap()
+                    .contains("无收包"),
+                "{r:?}"
+            );
+
+            // 故障轮空向量 → 该轮被覆盖 RC FAIL（健康轮不受影响）。
+            let pool = fresh_pool().await;
+            seed_dual_plane_rc(&pool, RC_PATHS).await;
+            let full = healthy_csv("TsnAgentFlowTasNetwork.es2.app[0].sink", 2001);
+            let runner = ScriptedRunner::new(vec![
+                Ok(outcome(Some(&full))),
+                Ok(outcome(Some(&bare))),
+                Ok(outcome(Some(&full))),
+            ]);
+            let r = verify_tas_inner(&pool, "s1", &runner).await.unwrap();
+            assert_eq!(r.status, "ok", "顶层=健康轮：{r:?}");
+            let rounds = r.rounds.as_ref().unwrap();
+            assert_eq!(rounds[1].status, "fail", "{rounds:?}");
+            let rc = &rounds[1].per_stream[0];
+            assert!(rc.judged && !rc.pass, "故障轮空向量不染绿：{rounds:?}");
+        });
+    }
+
+    /// GM sw1 + 三个 clock 序列（sw2=500ns、es2=1500ns、esb1=100ns，稳态窗为 sim 后半程）。
+    /// esb1 是双宿拆分内嵌桥——不在 node_ned_names，单列计数、阈值走缺省（最小惊讶口径）。
+    fn clock_csv_rows() -> &'static str {
+        "TsnAgentFlowTasNetwork.sw1.clock,timeChanged:vector,0 1,0 1\n\
+         TsnAgentFlowTasNetwork.sw2.clock,timeChanged:vector,0 0.6 1,0 0.6000005 1.0000005\n\
+         TsnAgentFlowTasNetwork.es2.clock,timeChanged:vector,0 0.6 1,0 0.6000015 1.0000015\n\
+         TsnAgentFlowTasNetwork.esb1.clock,timeChanged:vector,0 0.6 1,0 0.6000001 1.0000001\n"
+    }
+
+    /// Covers U7⑥（R15）：夹具 CSV 带 clock 向量 → 每轮 gPTP 诊断行——缺省阈值 1000ns 回退、
+    /// converged N/M 与最差节点正确、拆分桥（esb1）单列计数；故障轮照实报告（诊断行仍在）；
+    /// 诊断不参与 verdict（流全绿不受 es2 时钟未收敛影响）。
+    #[test]
+    fn gptp_diag_default_threshold_counts_and_worst_node() {
+        tauri::async_runtime::block_on(async {
+            let pool = fresh_pool().await;
+            seed_dual_plane_rc(&pool, RC_PATHS).await;
+            let mut csv = healthy_csv("TsnAgentFlowTasNetwork.es2.app[0].sink", 2001);
+            csv.push_str(clock_csv_rows());
+            let runner = ScriptedRunner::new(vec![
+                Ok(outcome(Some(&csv))),
+                Ok(outcome(Some(&csv))),
+                Ok(outcome(Some(&csv))),
+            ]);
+            let r = verify_tas_inner(&pool, "s1", &runner).await.unwrap();
+            assert_eq!(r.status, "ok", "诊断只报告不判：{r:?}");
+            let rounds = r.rounds.as_ref().unwrap();
+            let d = rounds[0].gptp_diag.as_ref().expect("健康轮应有诊断行");
+            assert_eq!(d.total_nodes, 3, "{d:?}");
+            assert_eq!(d.converged_nodes, 2, "es2 1500ns > 缺省 1000ns：{d:?}");
+            assert_eq!(d.threshold_summary, "1000ns", "{d:?}");
+            assert_eq!(d.worst_node, "es2", "{d:?}");
+            assert!((d.worst_offset_ns - 1500.0).abs() < 0.5, "{d:?}");
+            // 故障轮照实报告（KTD2：断链下游劣化属预期，诊断行不缺席）。
+            assert!(rounds[1].gptp_diag.is_some(), "{rounds:?}");
+            assert!(rounds[2].gptp_diag.is_some(), "{rounds:?}");
+        });
+    }
+
+    /// Covers U7⑥（R15）：timesync_nodes.offset_threshold 配置后逐节点阈值生效——es2 阈值
+    /// 放宽到 2000ns → 3/3 收敛，阈值概览显示逐节点区间；无 clock 向量的轮 → 诊断行缺席。
+    #[test]
+    fn gptp_diag_per_node_threshold_applies_and_absent_without_clock_rows() {
+        tauri::async_runtime::block_on(async {
+            let pool = fresh_pool().await;
+            seed_dual_plane_rc(&pool, RC_PATHS).await;
+            sqlx::query(
+                "UPDATE timesync_nodes SET offset_threshold=2000 WHERE session_id='s1' AND mid='2'",
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+            let mut with_clock = healthy_csv("TsnAgentFlowTasNetwork.es2.app[0].sink", 2001);
+            with_clock.push_str(clock_csv_rows());
+            let without_clock = healthy_csv("TsnAgentFlowTasNetwork.es2.app[0].sink", 2001);
+            let runner = ScriptedRunner::new(vec![
+                Ok(outcome(Some(&with_clock))),
+                Ok(outcome(Some(&without_clock))),
+                Ok(outcome(Some(&with_clock))),
+            ]);
+            let r = verify_tas_inner(&pool, "s1", &runner).await.unwrap();
+            let rounds = r.rounds.as_ref().unwrap();
+            let d = rounds[0].gptp_diag.as_ref().unwrap();
+            assert_eq!(
+                d.converged_nodes, 3,
+                "es2 1500ns ≤ 逐节点阈值 2000ns：{d:?}"
+            );
+            assert_eq!(d.total_nodes, 3, "{d:?}");
+            assert_eq!(d.threshold_summary, "1000–2000ns", "{d:?}");
+            assert!(
+                rounds[1].gptp_diag.is_none(),
+                "无 clock 向量不臆造诊断行：{rounds:?}"
+            );
+        });
     }
 }

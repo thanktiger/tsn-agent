@@ -1,6 +1,7 @@
 import { useRef } from "react";
 
 import {
+  gptpDiagLine,
   invokePlanTas,
   invokeVerifyTas,
   isZ3Guaranteed,
@@ -8,7 +9,11 @@ import {
   type PlanUiState,
   planAllowsVerify,
   planSucceeded,
+  roundLabel,
+  roundStatusLabel,
+  type StreamVerdict,
   showVerifyTable,
+  type VerifyRound,
   type VerifyTasResult,
   type VerifyUiState,
   verifyAllPass,
@@ -117,9 +122,13 @@ export function FlowPanel({
       {/* R21 诚实边界：结果区容器级标注，读到任一结果前即可见。 */}
       <p className="flow-honesty-note">仿真实测 · 非 T10 硬件判决</p>
 
-      {/* R22：分钟级综合/软仿进行中反馈。 */}
+      {/* R22：分钟级综合/软仿进行中反馈（U7：含 RC 流时为三轮，逐轮分钟级）。 */}
       {planning && <p className="flow-progress mono">正在跑 Z3 门控综合，分钟级，请稍候…</p>}
-      {verifying && <p className="flow-progress mono">正在跑 pin 软仿实测，分钟级，请稍候…</p>}
+      {verifying && (
+        <p className="flow-progress mono">
+          正在跑 pin 软仿实测（含 RC 流时为健康+断A+断B 三轮，逐轮分钟级），请稍候…
+        </p>
+      )}
 
       <PlanResultArea planState={planState} />
       <VerifyResultArea verifyState={verifyState} />
@@ -167,6 +176,22 @@ function VerifyResultArea({ verifyState }: { verifyState: VerifyUiState }) {
     return <p className="flow-message mono flow-error">软仿失败：{verifyState.message}</p>;
   }
   const result = verifyState.result;
+
+  // U7 多轮结果（有 RC 流）：顶层摘要（U6 overall 串联）+ 按轮分组小节。
+  if (result.rounds && result.rounds.length > 0) {
+    const allRoundsOk = result.rounds.every((r) => r.status === "ok");
+    return (
+      <div className={`flow-verify-result ${allRoundsOk ? "pass" : "fail"}`}>
+        <p className="flow-overall">{result.overall}</p>
+        {result.message && <p className="flow-message mono">{result.message}</p>}
+        {result.rounds.map((round) => (
+          <VerifyRoundSection key={round.round} round={round} />
+        ))}
+      </div>
+    );
+  }
+
+  // 无 rounds（纯 ST/ST+BE 单轮老结果）：渲染现状不变。
   // R16：空/短/失败绝不渲染绿——仅有逐流行时才出表。
   const showTable = showVerifyTable(result);
   const allPass = verifyAllPass(result);
@@ -205,5 +230,92 @@ function VerifyResultArea({ verifyState }: { verifyState: VerifyUiState }) {
         </table>
       )}
     </div>
+  );
+}
+
+/** U7 单轮小节：status + 带「类别」列的逐流表 + gPTP 诊断行 + 标注 + 未测容错列表。 */
+function VerifyRoundSection({ round }: { round: VerifyRound }) {
+  return (
+    <section className={`flow-verify-round ${round.status}`}>
+      <h4 className="flow-round-title">
+        {roundLabel(round.round)} · {roundStatusLabel(round.status)}
+      </h4>
+      {round.perStream.length > 0 && (
+        <table className="flow-verdict-table">
+          <thead>
+            <tr>
+              <th>流</th>
+              <th>类别</th>
+              <th>talker→listener</th>
+              <th>收/发</th>
+              <th>抖动(ns)</th>
+              <th>时延(ns)</th>
+              <th>判定</th>
+            </tr>
+          </thead>
+          <tbody>
+            {round.perStream.map((s) => (
+              <RoundVerdictRow key={s.streamSeq} verdict={s} />
+            ))}
+          </tbody>
+        </table>
+      )}
+      {round.gptpDiag && <p className="flow-gptp-diag mono">{gptpDiagLine(round.gptpDiag)}</p>}
+      {round.annotations.length > 0 && (
+        <ul className="flow-round-annotations">
+          {round.annotations.map((a) => (
+            <li key={a} className="mono">
+              {a}
+            </li>
+          ))}
+        </ul>
+      )}
+      {round.untestedStreams.length > 0 && (
+        <ul className="flow-round-untested">
+          {round.untestedStreams.map((u) => (
+            <li key={u} className="mono">
+              {u}
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+/** 单流行（多轮表）：RC 时延/抖动标「首达路实测」（慢副本被消除点吞掉，防误读双路都达标）；
+ * BE 达标旁并列送达率；报告态（judged=false）显示 note 不显示达标/未达标。 */
+function RoundVerdictRow({ verdict: s }: { verdict: StreamVerdict }) {
+  const firstPathMark = s.class === "RC" ? "（首达路实测）" : "";
+  const ratioMark =
+    s.class === "BE" && s.deliveryRatio != null
+      ? `（送达率 ${Math.round(s.deliveryRatio * 100)}%）`
+      : "";
+  const verdictText =
+    s.judged === false
+      ? (s.note ?? "仅报告")
+      : s.pass
+        ? `达标${ratioMark}`
+        : `未达标：${s.reason ?? ""}`;
+  return (
+    <tr className={s.judged === false ? "reported" : s.pass ? "pass" : "fail"}>
+      <td>{s.streamSeq}</td>
+      <td>{s.class ?? "ST"}</td>
+      <td>
+        {s.talker}→{s.listener}
+      </td>
+      <td>
+        {s.received}/{s.expected}
+      </td>
+      <td>
+        {s.jitterMaxNs.toFixed(0)}
+        {firstPathMark}
+      </td>
+      <td>
+        {s.latencyMaxNs.toFixed(0)}
+        {firstPathMark}
+      </td>
+      <td>{verdictText}</td>
+    </tr>
   );
 }

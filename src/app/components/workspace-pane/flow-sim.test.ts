@@ -1,10 +1,13 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  gptpDiagLine,
   isZ3Guaranteed,
   type PlanResult,
   planAllowsVerify,
   planSucceeded,
+  roundLabel,
+  roundStatusLabel,
   showVerifyTable,
   type VerifyTasResult,
   verifyAllPass,
@@ -114,5 +117,27 @@ describe("flow-sim helpers", () => {
         }),
       ),
     ).toBe(true);
+  });
+
+  it("U7：轮名/轮 status 中文映射（未知词回退原样）", () => {
+    expect(roundLabel("healthy")).toBe("健康轮");
+    expect(roundLabel("fault_a")).toBe("断A轮");
+    expect(roundLabel("fault_b")).toBe("断B轮");
+    expect(roundLabel("x")).toBe("x");
+    expect(roundStatusLabel("ok")).toBe("通过");
+    expect(roundStatusLabel("busy")).toBe("服务占用（稍后重试）");
+    expect(roundStatusLabel("weird")).toBe("weird");
+  });
+
+  it("U7/R15：gPTP 诊断行文案（只报告不判）", () => {
+    expect(
+      gptpDiagLine({
+        convergedNodes: 3,
+        totalNodes: 4,
+        thresholdSummary: "1000ns",
+        worstNode: "es2",
+        worstOffsetNs: 1500.4,
+      }),
+    ).toBe("gPTP 收敛：3/4 节点 ≤ 阈值（1000ns），最差 1500 ns @es2");
   });
 });
