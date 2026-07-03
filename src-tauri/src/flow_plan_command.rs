@@ -1,9 +1,11 @@
 //! `plan_tas`（U7）：让 INET Z3 配置器真算 802.1Qbv 门控表（GCL），app 读回落 `flow_plans`。
 //!
-//! 流程（KTD1 可测内核 + 注入式 client）：读流集 → 逐流推导路径（U5，喂 pathFragments）→
-//! 组 synth flow+TAS bundle（U6）→ `InetSimPlanClient::plan_gcl` 跑配置器 + dump `.sca`
-//! （U1/U6 spike）→ 解析 GCL（ned→mid）→ **不可行/空则判 FAIL 不落空表（R10）** → 全量覆盖
-//! 写 `flow_plans`。求解器出处（Z3 带保证 / Eager 无保证，R8）随结果 + 落库记录。
+//! 流程（KTD1 可测内核 + 注入式 client）：读流集 → **只保留 ST 流**（R4/KTD4：RC/BE 不进
+//! synth bundle、不排窗；无 ST 流清 flow_plans 并返回 `no_gating`，R5）→ 逐 ST 流推导路径
+//! （U5，喂 pathFragments；双平面锁平面 A，KTD6）→ 组 synth flow+TAS bundle（U6）→
+//! `InetSimPlanClient::plan_gcl` 跑配置器 + dump `.sca`（U1/U6 spike）→ 解析 GCL（ned→mid）
+//! → **不可行/空则判 FAIL 不落空表（R10）** → 全量覆盖写 `flow_plans`。
+//! 求解器出处（Z3 带保证 / Eager 无保证，R8）随结果 + 落库记录。
 //!
 //! 对账（R9）是**辅助信号、测试/验收期**行为：docx 期望门窗是夹具（U10），运行期库里没有，
 //! 故 `plan_tas` 不内联对账；`flow_reconcile` 供 U10 用综合结果对比冻结期望。
@@ -15,7 +17,7 @@ use serde::Serialize;
 use sqlx::Row;
 use std::collections::BTreeMap;
 
-use crate::flow_route::{RouteRequest, derive_route};
+use crate::flow_route::{RouteRequest, derive_route, link_plane};
 use crate::inet_sim_bundle::{
     FlowStreamSpec, FlowTasSchedule, GclEntry, SimOverrides, build_flow_tas_sim_bundle,
 };
@@ -29,7 +31,7 @@ pub const CALIBER_FLOW_TAS_PLANNED: &str = "flow_tas_planned";
 #[serde(rename_all = "camelCase")]
 pub struct PlanResult {
     pub caliber: String,
-    /// ok | no_streams | no_gm | route_error | bundle_error | unreachable | solver_failed
+    /// ok | no_streams | no_gating | no_gm | route_error | bundle_error | unreachable | solver_failed
     pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub solver: Option<String>,
@@ -257,6 +259,18 @@ pub async fn plan_tas_inner<P: InetSimPlanClient>(
         ));
     }
 
+    // R4/KTD4：Z3 只喂 ST——RC/BE 完全不进 synth bundle（app/识别/编码都不出现）。
+    let st_streams: Vec<&DbStream> = streams.iter().filter(|s| s.class == "ST").collect();
+    if st_streams.is_empty() {
+        // R5：无 ST 流 → 跳过求解器，清掉可能的存量 GCL，产出「无需门控」的合法空结果。
+        write_flow_plans(pool, session_id, &[]).await?;
+        return Ok(PlanResult::simple(
+            "no_gating",
+            "流集无 ST 流，无需门控综合；可直接验证。",
+            None,
+        ));
+    }
+
     let (nodes, links) = load_topology(pool, session_id).await?;
     let gm_mid: Option<String> =
         sqlx::query_scalar("SELECT gm_mid FROM timesync_domain WHERE session_id = ?")
@@ -274,14 +288,18 @@ pub async fn plan_tas_inner<P: InetSimPlanClient>(
     };
     let timing = load_timing(pool, session_id).await?;
 
-    // 逐流推导路径（plane 缺省=全链路；歧义/不可达响亮失败，surfaced）。喂 pathFragments。
+    // 逐 ST 流推导路径（歧义/不可达响亮失败，surfaced）。喂 pathFragments。
+    // KTD6：双平面拓扑（链路带 plane 键）上 plane=None 必然双路歧义——ST 锁平面 A
+    // （docx Qbv 用例同路径）；单平面沿 plane 缺省（全链路）。先判后推，不做失败重试式。
+    let dual_plane = links.iter().any(|l| link_plane(l).is_some());
+    let plane = if dual_plane { Some("A") } else { None };
     let mut specs: Vec<FlowStreamSpec> = Vec::new();
-    for s in &streams {
+    for s in &st_streams {
         let route = derive_route(
             &RouteRequest {
                 talker: &s.talker,
                 listener: &s.listener,
-                plane: None,
+                plane,
             },
             &nodes,
             &links,
@@ -488,6 +506,33 @@ par TsnAgentFlowTasNetwork.sw1.eth[1].macLayer.queue.transmissionGate[1] duratio
         }
     }
 
+    /// 捕获送去求解的 ini（断言 synth bundle 形态；ini 为 None 即求解器未被调用）。
+    struct CapturingPlanClient {
+        result: Result<HttpPlanResult, String>,
+        ini: std::sync::Mutex<Option<String>>,
+    }
+    impl InetSimPlanClient for CapturingPlanClient {
+        fn plan_gcl(
+            &self,
+            _base_url: &str,
+            bundle: &crate::inet_remote::InetBundle,
+        ) -> Result<HttpPlanResult, String> {
+            *self.ini.lock().unwrap() = Some(bundle.omnetpp_ini.clone());
+            self.result.clone()
+        }
+    }
+
+    fn ok_plan_result() -> Result<HttpPlanResult, String> {
+        // sw1 gate7 的 .sca（ST 门；ned sw1 → mid 0）。
+        let sca = "par N.sw1.eth[1].macLayer.queue.transmissionGate[7] initiallyOpen true\npar N.sw1.eth[1].macLayer.queue.transmissionGate[7] offset 0s\npar N.sw1.eth[1].macLayer.queue.transmissionGate[7] durations \"[300us, 700us]\"\n";
+        Ok(HttpPlanResult {
+            exit_code: 0,
+            output_tail: "ok".into(),
+            sca_gcl: Some(sca.into()),
+            solver: Some("Z3".into()),
+        })
+    }
+
     async fn fresh_pool() -> sqlx::Pool<sqlx::Sqlite> {
         let opts = SqliteConnectOptions::new()
             .in_memory(true)
@@ -640,6 +685,128 @@ par TsnAgentFlowTasNetwork.sw1.eth[1].macLayer.queue.transmissionGate[1] duratio
                 .await
                 .unwrap();
             assert_eq!(r.status, "no_streams");
+        });
+    }
+
+    /// Covers R4/KTD4（U3①）：ST+RC+BE 混合集 → synth ini 只出现 ST 的 app/识别/门控条目，
+    /// RC/BE 完全不进 bundle（端口 1001/1002 与 pcp 6/0 均不得出现）。
+    #[test]
+    fn plan_synth_ini_only_contains_st_streams() {
+        tauri::async_runtime::block_on(async {
+            let pool = fresh_pool().await;
+            seed_linear(&pool).await;
+            add_stream(&pool, 0, "ST", 7).await;
+            add_stream(&pool, 1, "RC", 6).await;
+            add_stream(&pool, 2, "BE", 0).await;
+            let client = CapturingPlanClient {
+                result: ok_plan_result(),
+                ini: std::sync::Mutex::new(None),
+            };
+            let r = plan_tas_inner(&pool, "s1", &client, "http://x")
+                .await
+                .unwrap();
+            assert_eq!(r.status, "ok", "{r:?}");
+            let ini = client.ini.lock().unwrap().clone().expect("求解器应被调用");
+            // specs 只含 ST → 稠密端口只有 1000；RC/BE 若混入会占 1001/1002。
+            assert!(ini.contains("destPort = 1000"), "{ini}");
+            assert!(!ini.contains("destPort = 1001"), "RC 不得进 bundle：{ini}");
+            assert!(!ini.contains("destPort = 1002"), "BE 不得进 bundle：{ini}");
+            // 只 1 个源 app；识别/编码/配置器均无 RC(pcp6)/BE(pcp0) 条目。
+            assert_eq!(ini.matches("UdpSourceApp").count(), 1, "{ini}");
+            assert!(ini.contains("pcp: 7"), "{ini}");
+            assert!(!ini.contains("pcp: 6"), "{ini}");
+            assert!(!ini.contains("pcp: 0"), "{ini}");
+        });
+    }
+
+    /// Covers R5（U3②）：纯 BE / 纯 RC 流集 → no_gating、flow_plans 清空（含存量 GCL）、
+    /// 求解器不被调用。
+    #[test]
+    fn plan_without_st_returns_no_gating_and_clears_plans() {
+        tauri::async_runtime::block_on(async {
+            for (class, pcp) in [("BE", 0i64), ("RC", 6i64)] {
+                let pool = fresh_pool().await;
+                seed_linear(&pool).await;
+                add_stream(&pool, 0, class, pcp).await;
+                // 存量 GCL（旧规划残留）——no_gating 应把它清掉。
+                sqlx::query("INSERT INTO flow_plans (session_id, stream_seq, node, eth_n, gate_index, initially_open, offset_ns, durations_ns, solver) VALUES ('s1', 0, '0', 1, 7, 1, 0, '[300000,700000]', 'Z3')")
+                    .execute(&pool).await.unwrap();
+                let client = CapturingPlanClient {
+                    result: ok_plan_result(),
+                    ini: std::sync::Mutex::new(None),
+                };
+                let r = plan_tas_inner(&pool, "s1", &client, "http://x")
+                    .await
+                    .unwrap();
+                assert_eq!(r.status, "no_gating", "纯 {class}：{r:?}");
+                assert!(r.overall.contains("无需门控"), "{r:?}");
+                let count: i64 =
+                    sqlx::query_scalar("SELECT COUNT(*) FROM flow_plans WHERE session_id='s1'")
+                        .fetch_one(&pool)
+                        .await
+                        .unwrap();
+                assert_eq!(count, 0, "纯 {class} 应清空 flow_plans");
+                assert!(
+                    client.ini.lock().unwrap().is_none(),
+                    "纯 {class} 不应调用求解器"
+                );
+            }
+        });
+    }
+
+    /// Covers KTD6（U3⑦）：双平面拓扑（链路带 plane 键）ST 规划 → 锁平面 A 推路径
+    /// （pathFragments 走 A 路交换机），无 AMBIGUOUS_ROUTE。
+    #[test]
+    fn plan_dual_plane_st_locks_plane_a() {
+        tauri::async_runtime::block_on(async {
+            let pool = fresh_pool().await;
+            // es1(0) =A= sw1(2) =A= es2(1)；es1 =B= sw2(3) =B= es2。GM=0。
+            for (mid, ty, ord) in [
+                ("0", "endSystem", 0),
+                ("1", "endSystem", 1),
+                ("2", "switch", 2),
+                ("3", "switch", 3),
+            ] {
+                sqlx::query("INSERT INTO topology_nodes (session_id, mid, name, x, y, node_type, port_count, queue_count, insert_order) VALUES ('s1', ?, NULL, 0, 0, ?, 8, 8, ?)")
+                    .bind(mid).bind(ty).bind(ord).execute(&pool).await.unwrap();
+            }
+            for (seq, src, sp, dst, dp, plane) in [
+                (0, "0", 0, "2", 0, "A"),
+                (1, "2", 1, "1", 0, "A"),
+                (2, "0", 1, "3", 0, "B"),
+                (3, "3", 1, "1", 1, "B"),
+            ] {
+                sqlx::query("INSERT INTO topology_links (session_id, link_seq, name, src_node, dst_node, src_port, dst_port, speed, styles_json) VALUES ('s1', ?, NULL, ?, ?, ?, ?, 1000, ?)")
+                    .bind(seq).bind(src).bind(dst).bind(sp).bind(dp)
+                    .bind(format!(r#"{{"plane":"{plane}"}}"#))
+                    .execute(&pool).await.unwrap();
+            }
+            sqlx::query("INSERT INTO timesync_domain (session_id, gm_mid) VALUES ('s1', '0')")
+                .execute(&pool)
+                .await
+                .unwrap();
+            for mid in ["0", "1", "2", "3"] {
+                sqlx::query("INSERT INTO timesync_nodes (session_id, mid, master_port, slave_port) VALUES ('s1', ?, '[]', '[]')")
+                    .bind(mid).execute(&pool).await.unwrap();
+            }
+            // ST 流 es1(0) → es2(1)（add_stream helper 固定 1→2，与此拓扑不符，直插）。
+            sqlx::query("INSERT INTO topology_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener) VALUES ('s1', 0, 'ST', 7, 500, 512, 10000, '0', '1')")
+                .execute(&pool).await.unwrap();
+            let client = CapturingPlanClient {
+                result: ok_plan_result(),
+                ini: std::sync::Mutex::new(None),
+            };
+            let r = plan_tas_inner(&pool, "s1", &client, "http://x")
+                .await
+                .unwrap();
+            assert_eq!(r.status, "ok", "双平面不该 AMBIGUOUS_ROUTE：{r:?}");
+            let ini = client.ini.lock().unwrap().clone().unwrap();
+            assert!(
+                ini.contains(r#"pathFragments: [["es1", "sw1", "es2"]]"#),
+                "应锁平面 A（es1→sw1→es2）：{ini}"
+            );
+            // 唯一一条 pathFragments（上面已断言其为 A 路）→ 没有第二条走平面 B 的路径。
+            assert_eq!(ini.matches("pathFragments").count(), 1, "{ini}");
         });
     }
 }

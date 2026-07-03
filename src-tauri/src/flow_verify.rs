@@ -22,10 +22,14 @@ pub const LINK_MTU_BYTES: i64 = 1500;
 /// 合法流量类别（R3 class 判别器）：ST 时间敏感 / BE 尽力而为 / RC 冗余（802.1CB 预留）。
 pub const FLOW_CLASSES: &[&str] = &["ST", "BE", "RC"];
 
+/// ST 流固定 PCP（同时即门号 gate_index，pcp→gate 恒等映射）。KTD4 pin 过滤的单一源。
+pub(crate) const ST_PCP: i64 = 7;
+
 /// class↔pcp 固定映射（R1）：ST=7 / RC=6 / BE=0；非法 class 返回 None（由 INVALID_CLASS 兜）。
-fn expected_pcp(class: &str) -> Option<i64> {
+/// 录入闸与 verify_tas 入口重校验（G1.3）共用。
+pub(crate) fn expected_pcp(class: &str) -> Option<i64> {
     match class {
-        "ST" => Some(7),
+        "ST" => Some(ST_PCP),
         "RC" => Some(6),
         "BE" => Some(0),
         _ => None,

@@ -1,4 +1,6 @@
-//! `verify_tas`（U8）：pin 住规划出的 GCL 软仿，逐流实测 jitter/丢包/时延判通过；空=FAIL。
+//! `verify_tas`（U8）：pin 住规划出的 GCL 软仿，逐流实测 jitter/丢包/时延判通过。
+//! GCL 空：有 ST 流 → `no_plan` 硬拦；无 ST 流 → 放行门全恒开跑（R5/KTD4）。
+//! pin 只认 ST-pcp（gate 7）门条目，存量旧全类条目忽略（G2.4 防互补关窗双写同门）。
 //!
 //! 镜像 `run_timesync_sim_inner`（KTD1 可测内核 + 注入 `RemoteRunner`）：读 `flow_plans` 的 pin
 //! GCL → 喂 U6 pin 模式 bundle（写死 transmissionGate、禁配置器）→ 现有 `run_sim_fetch_csv`
@@ -50,7 +52,7 @@ pub struct StreamVerdict {
 #[serde(rename_all = "camelCase")]
 pub struct VerifyTasResult {
     pub caliber: String,
-    /// ok | no_plan | no_streams | no_gm | bundle_error | unreachable | load_failed | empty | fail
+    /// ok | no_plan | no_streams | pcp_mismatch | no_gm | bundle_error | unreachable | load_failed | empty | fail
     pub status: String,
     pub per_stream: Vec<StreamVerdict>,
     pub overall: String,
@@ -250,14 +252,6 @@ pub async fn verify_tas_inner<R: RemoteRunner>(
     session_id: &str,
     runner: &R,
 ) -> Result<VerifyTasResult, String> {
-    let gcl = load_gcl(pool, session_id).await?;
-    if gcl.is_empty() {
-        return Ok(VerifyTasResult::simple(
-            "no_plan",
-            "还没有规划出门控表，请先在流量规划里规划再验证。",
-            None,
-        ));
-    }
     let db_streams = crate::flow_plan_command::load_streams(pool, session_id).await?;
     if db_streams.is_empty() {
         return Ok(VerifyTasResult::simple(
@@ -266,6 +260,39 @@ pub async fn verify_tas_inner<R: RemoteRunner>(
             None,
         ));
     }
+    // G1.3：入口重校验 class↔pcp 固定映射（ST=7/RC=6/BE=0，U2 录入闸同源）——存量不合规流
+    // （录入闸收紧前的旧库）响亮拒绝，防按错门号装配。
+    for s in &db_streams {
+        if let Some(expected) = crate::flow_verify::expected_pcp(&s.class)
+            && s.pcp != expected
+        {
+            return Ok(VerifyTasResult::simple(
+                "pcp_mismatch",
+                &format!(
+                    "流 {} 的 class/pcp（{}/{}）不符合固定映射（ST=7 / RC=6 / BE=0），请删除重录。",
+                    s.stream_seq, s.class, s.pcp
+                ),
+                None,
+            ));
+        }
+    }
+
+    // R5/KTD4：GCL 空只在存在 ST 流时硬拦（ST 要求先规划）；无 ST 流放行——门全恒开跑。
+    let has_st = db_streams.iter().any(|s| s.class == "ST");
+    let gcl = load_gcl(pool, session_id).await?;
+    if gcl.is_empty() && has_st {
+        return Ok(VerifyTasResult::simple(
+            "no_plan",
+            "还没有规划出门控表，请先在流量规划里规划再验证。",
+            None,
+        ));
+    }
+    // G2.4/KTD4：pin 只认 ST-pcp 门条目——存量 flow_plans 里旧全类条目（gate0/gate6 等）
+    // 忽略，防与后续互补关窗双写同门。ST pcp 单一源：flow_verify::ST_PCP。
+    let gcl: Vec<GclEntry> = gcl
+        .into_iter()
+        .filter(|g| g.gate_index == crate::flow_verify::ST_PCP as usize)
+        .collect();
     let specs: Vec<FlowStreamSpec> = db_streams
         .iter()
         .map(|s| FlowStreamSpec {
@@ -424,6 +451,27 @@ mod tests {
         }
     }
 
+    /// 捕获送去软仿的 ini（断言 pin 段形态）。
+    struct CapturingRunner {
+        outcome: SimRunOutcome,
+        ini: std::sync::Mutex<Option<String>>,
+    }
+    impl RemoteRunner for CapturingRunner {
+        fn run_sim_fetch_csv(
+            &self,
+            bundle: &crate::inet_remote::InetBundle,
+            _filter: &str,
+        ) -> Result<SimRunOutcome, RemoteError> {
+            *self.ini.lock().unwrap() = Some(bundle.omnetpp_ini.clone());
+            Ok(SimRunOutcome {
+                exit_code: self.outcome.exit_code,
+                output_tail: self.outcome.output_tail.clone(),
+                csv: self.outcome.csv.clone(),
+                scavetool_failed: self.outcome.scavetool_failed,
+            })
+        }
+    }
+
     fn outcome(csv: Option<&str>) -> SimRunOutcome {
         SimRunOutcome {
             exit_code: Some(0),
@@ -475,8 +523,8 @@ mod tests {
         }
         sqlx::query("INSERT INTO topology_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener, max_latency_us) VALUES ('s1', 0, 'ST', 7, 500, 512, 3, '1', '2', 400)")
             .execute(pool).await.unwrap();
-        // pin GCL 一条（sw1=mid0, eth1, gate0）。
-        sqlx::query("INSERT INTO flow_plans (session_id, stream_seq, node, eth_n, gate_index, initially_open, offset_ns, durations_ns, solver) VALUES ('s1', 0, '0', 1, 0, 1, 0, '[300000,700000]', 'Z3')")
+        // pin GCL 一条（sw1=mid0, eth1, gate7=ST 门）。
+        sqlx::query("INSERT INTO flow_plans (session_id, stream_seq, node, eth_n, gate_index, initially_open, offset_ns, durations_ns, solver) VALUES ('s1', 0, '0', 1, 7, 1, 0, '[300000,700000]', 'Z3')")
             .execute(pool).await.unwrap();
     }
 
@@ -606,7 +654,7 @@ mod tests {
         });
     }
 
-    /// 未规划（flow_plans 空）→ no_plan。
+    /// 未规划（flow_plans 空）且存在 ST 流 → no_plan（U3④：ST 才要求 GCL）。
     #[test]
     fn verify_without_plan_is_no_plan() {
         tauri::async_runtime::block_on(async {
@@ -632,6 +680,95 @@ mod tests {
             .await
             .unwrap();
             assert_eq!(r.status, "no_plan");
+        });
+    }
+
+    /// Covers AE5（U3③，R5/R13 前半）：纯 BE 流集、flow_plans 空 → 不再 no_plan，
+    /// 放行跑软仿（门全恒开）。
+    #[test]
+    fn verify_pure_be_without_gcl_runs() {
+        tauri::async_runtime::block_on(async {
+            let pool = fresh_pool().await;
+            seed(&pool).await;
+            // 换成纯 BE 流集 + 清掉 GCL。
+            sqlx::query("DELETE FROM topology_streams WHERE session_id='s1'")
+                .execute(&pool)
+                .await
+                .unwrap();
+            sqlx::query("DELETE FROM flow_plans WHERE session_id='s1'")
+                .execute(&pool)
+                .await
+                .unwrap();
+            sqlx::query("INSERT INTO topology_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener, max_latency_us) VALUES ('s1', 0, 'BE', 0, 500, 512, 3, '1', '2', 400)")
+                .execute(&pool).await.unwrap();
+            let csv = format!(
+                "{}TsnAgentFlowTasNetwork.es2.app[0].sink,packetLifeTime:vector,0 0 0,0.0001 0.00012 0.00011\nTsnAgentFlowTasNetwork.es2.app[0].sink,packetJitter:vector,0 0 0,0.0000002 0.0000003 0.0000001\n",
+                header()
+            );
+            let r = verify_tas_inner(
+                &pool,
+                "s1",
+                &MockRunner {
+                    outcome: outcome(Some(&csv)),
+                },
+            )
+            .await
+            .unwrap();
+            assert_ne!(r.status, "no_plan", "无 ST 流不得因空 GCL 硬拦：{r:?}");
+            assert_eq!(r.status, "ok", "{r:?}");
+        });
+    }
+
+    /// Covers G2.4（U3⑤）：存量 flow_plans 混有 gate0（旧全类条目）→ pin 段只出 gate7，
+    /// gate0 的 transmissionGate 行不得出现（互补关窗接管前提）。
+    #[test]
+    fn verify_pin_filters_non_st_gate_entries() {
+        tauri::async_runtime::block_on(async {
+            let pool = fresh_pool().await;
+            seed(&pool).await; // 已含 gate7 条目。
+            sqlx::query("INSERT INTO flow_plans (session_id, stream_seq, node, eth_n, gate_index, initially_open, offset_ns, durations_ns, solver) VALUES ('s1', 0, '0', 1, 0, 1, 0, '[500000,500000]', 'Z3')")
+                .execute(&pool).await.unwrap();
+            let csv = format!(
+                "{}TsnAgentFlowTasNetwork.es2.app[0].sink,packetLifeTime:vector,0 0 0,0.0001 0.00012 0.00011\nTsnAgentFlowTasNetwork.es2.app[0].sink,packetJitter:vector,0 0 0,0.0000002 0.0000003 0.0000001\n",
+                header()
+            );
+            let runner = CapturingRunner {
+                outcome: outcome(Some(&csv)),
+                ini: std::sync::Mutex::new(None),
+            };
+            let r = verify_tas_inner(&pool, "s1", &runner).await.unwrap();
+            assert_eq!(r.status, "ok", "{r:?}");
+            let ini = runner.ini.lock().unwrap().clone().unwrap();
+            assert!(ini.contains("transmissionGate[7]"), "{ini}");
+            assert!(
+                !ini.contains("transmissionGate[0]"),
+                "gate0 存量条目应被 pin 过滤：{ini}"
+            );
+        });
+    }
+
+    /// Covers G1.3（U3⑥）：存量 ST@pcp3 流（录入闸收紧前旧库）→ verify 入口响亮拒绝。
+    #[test]
+    fn verify_rejects_stale_stream_with_wrong_pcp() {
+        tauri::async_runtime::block_on(async {
+            let pool = fresh_pool().await;
+            seed(&pool).await;
+            sqlx::query("UPDATE topology_streams SET pcp=3 WHERE session_id='s1'")
+                .execute(&pool)
+                .await
+                .unwrap();
+            let r = verify_tas_inner(
+                &pool,
+                "s1",
+                &MockRunner {
+                    outcome: outcome(None),
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(r.status, "pcp_mismatch", "{r:?}");
+            assert!(r.overall.contains("流 0"), "{r:?}");
+            assert!(r.overall.contains("删除重录"), "{r:?}");
         });
     }
 
@@ -668,9 +805,9 @@ mod tests {
                 .await
                 .unwrap();
 
-            // plan：mock 服务回 sw1 gate 的 .sca（ned sw1 → mid 0）。
+            // plan：mock 服务回 sw1 gate7（ST 门）的 .sca（ned sw1 → mid 0）。
             let plan_client = MockPlan {
-                sca: "par N.sw1.eth[1].macLayer.queue.transmissionGate[0] initiallyOpen true\npar N.sw1.eth[1].macLayer.queue.transmissionGate[0] offset 0s\npar N.sw1.eth[1].macLayer.queue.transmissionGate[0] durations \"[300us, 700us]\"\n".into(),
+                sca: "par N.sw1.eth[1].macLayer.queue.transmissionGate[7] initiallyOpen true\npar N.sw1.eth[1].macLayer.queue.transmissionGate[7] offset 0s\npar N.sw1.eth[1].macLayer.queue.transmissionGate[7] durations \"[300us, 700us]\"\n".into(),
             };
             let pr =
                 crate::flow_plan_command::plan_tas_inner(&pool, "s1", &plan_client, "http://x")

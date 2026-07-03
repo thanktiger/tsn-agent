@@ -6,6 +6,7 @@ import {
   isZ3Guaranteed,
   type PlanResult,
   type PlanUiState,
+  planAllowsVerify,
   planSucceeded,
   showVerifyTable,
   type VerifyTasResult,
@@ -46,8 +47,8 @@ export function FlowPanel({
 
   const planning = planState.status === "running";
   const verifying = verifyState.status === "running";
-  // 规划成功产出门控表才允许验证（pin 的是那张表）。
-  const havePlan = planState.status === "done" && planSucceeded(planState.result);
+  // 规划产出门控表、或流集无 ST 流（no_gating 无需门控）才允许验证（R5/KTD4）。
+  const havePlan = planState.status === "done" && planAllowsVerify(planState.result);
 
   const planDisabled = !inFlowStage || planning;
   const verifyDisabled = !inFlowStage || verifying || planning || !havePlan;

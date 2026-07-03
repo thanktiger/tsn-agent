@@ -14,7 +14,7 @@ import { invoke } from "@tauri-apps/api/core";
 /** 规划结果（对齐 flow_plan_command::PlanResult）。 */
 export interface PlanResult {
   caliber: string;
-  /** ok | no_streams | no_gm | route_error | bundle_error | unreachable | solver_failed | no_service */
+  /** ok | no_streams | no_gating | no_gm | route_error | bundle_error | unreachable | solver_failed | no_service */
   status: string;
   /** 求解器出处：Z3=带调度性保证 / Eager=兜底无保证（R8/KTD7）。 */
   solver?: string;
@@ -40,7 +40,7 @@ export interface StreamVerdict {
 /** 验证结果（对齐 flow_verify_command::VerifyTasResult）。 */
 export interface VerifyTasResult {
   caliber: string;
-  /** ok | no_plan | no_streams | no_gm | bundle_error | unreachable | load_failed | empty | fail | no_service */
+  /** ok | no_plan | no_streams | pcp_mismatch | no_gm | bundle_error | unreachable | load_failed | empty | fail | no_service */
   status: string;
   perStream: StreamVerdict[];
   overall: string;
@@ -64,6 +64,14 @@ export type VerifyUiState =
 /** 规划是否成功产出门控表（空/失败绝不算成功，R16）。 */
 export function planSucceeded(result: PlanResult): boolean {
   return result.status === "ok" && result.gateCount > 0;
+}
+
+/**
+ * 验证按钮闸口径（R5/KTD4）：产出门控表，或流集无 ST 流（`no_gating`，无需门控）均放行。
+ * 后端已在 no_gating 时清空 flow_plans，verify 侧对无 ST 流集不再以空 GCL 硬拦（AE5）。
+ */
+export function planAllowsVerify(result: PlanResult): boolean {
+  return planSucceeded(result) || result.status === "no_gating";
 }
 
 /** 规划是否 Z3 带保证（诚实边界徽章，R8/KTD7）：Eager 兜底不得与 Z3 同等呈现。 */
