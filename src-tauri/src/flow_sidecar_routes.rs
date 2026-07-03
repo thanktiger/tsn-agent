@@ -124,10 +124,8 @@ pub struct AddStreamRequest {
     l4_protocol: Option<String>,
     #[serde(default)]
     max_latency_us: Option<i64>,
-    #[serde(default)]
-    redundant: Option<i64>,
-    #[serde(default)]
-    paths: Option<String>,
+    // 注意：请求侧的 redundant/paths 不设字段——serde 忽略未知键，这两列由系统推导
+    // （RC 落库前 derive_rc_paths 覆盖；ST/BE 恒 0/NULL），请求带什么都不透传。
 }
 
 impl AddStreamRequest {
@@ -148,8 +146,10 @@ impl AddStreamRequest {
                 dst_l4_port: self.dst_l4_port,
                 l4_protocol: self.l4_protocol,
                 max_latency_us: self.max_latency_us,
-                redundant: self.redundant.unwrap_or(0),
-                paths: self.paths,
+                // redundant/paths 不透传请求值：恒 0/NULL 起步——RC 由 add_stream 落库前
+                // derive_rc_paths 推导覆盖，ST/BE 就此落库（redundant=0、paths NULL）。
+                redundant: 0,
+                paths: None,
             },
         )
     }
@@ -643,6 +643,34 @@ mod tests {
             assert_eq!(paths["a"]["link_seqs"], json!([0, 1]));
             assert_eq!(paths["b"]["node_path"], json!(["0", "3", "1"]));
             assert_eq!(paths["b"]["link_seqs"], json!([2, 3]));
+        });
+    }
+
+    /// 非 RC 类强制 redundant=0/paths NULL：ST 请求带 redundant=1 + 垃圾 paths →
+    /// 落库列值仍 0/NULL（请求侧传入值不透传，与推导注释承诺一致）。
+    #[test]
+    fn non_rc_request_redundant_paths_not_passed_through() {
+        tauri::async_runtime::block_on(async {
+            let (pool, buf) = test_state().await;
+            add_node(&pool, "0").await;
+            add_node(&pool, "1").await;
+            let (router, token) = build_test_router_with_pool(pool.clone(), buf.clone()).await;
+
+            let mut body = valid_st_body();
+            body["redundant"] = json!(1);
+            body["paths"] = json!(r#"{"a":"garbage"}"#);
+            let (status, parsed) = post(router, &token, "/db/flow/add_stream", body).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(parsed["ok"], true, "{parsed:?}");
+
+            let (redundant, paths): (i64, Option<String>) = sqlx::query_as(
+                "SELECT redundant, paths FROM topology_streams WHERE session_id='s1' AND stream_seq=0",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(redundant, 0, "ST 落库恒 redundant=0");
+            assert!(paths.is_none(), "ST 落库恒 paths NULL: {paths:?}");
         });
     }
 

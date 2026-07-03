@@ -464,7 +464,9 @@ fn fault_t_break_ns(min_rc_window_ns: u64) -> u64 {
     (min_rc_window_ns * 2 / 5).max(FAULT_T_BREAK_FLOOR_NS)
 }
 
-/// 断后某流在其活跃窗（count×period）内还应发的帧数（KTD7 尾量守卫）。窗已过断点 → 0。
+/// 断后某流在给定发送窗内还应发的帧数（KTD7 尾量守卫）。守卫的分母窗是**真实发送窗**
+/// （sim 时长——源固定间隔产包到 sim 结束，与 expected_sent 同模型），非 count×period 意图窗
+/// （长 ST 流拉长 sim 时短意图窗 RC 断后照样有帧，不得假拒验）。窗已过断点 → 0。
 fn frames_after_break(window_ns: u64, t_break_ns: u64, period_ns: u64) -> i64 {
     if window_ns <= t_break_ns || period_ns == 0 {
         0
@@ -617,8 +619,14 @@ pub async fn verify_tas_inner<R: RemoteRunner>(
     }
 
     // R5/KTD4：GCL 空只在存在 ST 流时硬拦（ST 要求先规划）；无 ST 流放行——门全恒开跑。
+    // 无 ST 流时存量 flow_plans（删光 ST 后的残留 GCL）一律不消费：pin 零门条目、
+    // 补集不生成，与「门全恒开」口径一致。
     let has_st = db_streams.iter().any(|s| s.class == "ST");
-    let gcl = load_gcl(pool, session_id).await?;
+    let gcl = if has_st {
+        load_gcl(pool, session_id).await?
+    } else {
+        vec![]
+    };
     if gcl.is_empty() && has_st {
         return Ok(VerifyTasResult::simple(
             "no_plan",
@@ -722,6 +730,10 @@ pub async fn verify_tas_inner<R: RemoteRunner>(
     };
     let timing = load_timing(pool, session_id).await?;
 
+    // 与 bundle 用同一公式（SimOverrides::default 未覆盖 sim_time）——反推实发数、尾量守卫
+    // 的真实发送窗共用；三轮同一时长。
+    let sim_time_s = flow_sim_time_s(&specs);
+
     // ---- U6：断链故障轮编排准备（有 RC 才有；KTD2/KTD3/KTD7/KTD8）----
     // 断点与断链时刻在跑任何软仿前定死；尾量不足整体响亮报错（不烧三轮墙钟）。
     let fault_plan: Option<FaultPlan> = if has_rc {
@@ -751,7 +763,9 @@ pub async fn verify_tas_inner<R: RemoteRunner>(
                 select_break_point(&plane_b, &st_links, &links, &clock_tree),
             ),
         ];
-        // KTD7 尾量守卫：断后每条被覆盖 RC 流在其活跃窗（count×period）内应发帧数 ≥ 20。
+        // KTD7 尾量守卫：断后每条被覆盖 RC 流在真实发送窗（sim 时长，源产包到 sim 结束）内
+        // 应发帧数 ≥ 20。t_break 仍按最小 RC 意图窗计（上方 fault_t_break_ns），只有分母改窗。
+        let sim_window_ns = (sim_time_s * 1e9) as u64;
         let mut violations: Vec<String> = Vec::new();
         for (_, bp) in &planned {
             let Some(bp) = bp else { continue };
@@ -759,12 +773,11 @@ pub async fn verify_tas_inner<R: RemoteRunner>(
                 let Some(s) = db_streams.iter().find(|d| d.stream_seq == *seq) else {
                     continue;
                 };
-                let window_ns = s.count.max(1) as u64 * s.period_us.max(1) as u64 * 1_000;
                 let period_ns = s.period_us.max(1) as u64 * 1_000;
-                let frames = frames_after_break(window_ns, t_break_ns, period_ns);
+                let frames = frames_after_break(sim_window_ns, t_break_ns, period_ns);
                 if frames < FAULT_MIN_FRAMES_AFTER_BREAK {
                     violations.push(format!(
-                        "流 {seq} 断链（t={}ms）后活跃窗内仅应发 {frames} 帧（<{FAULT_MIN_FRAMES_AFTER_BREAK}）",
+                        "流 {seq} 断链（t={}ms）后发送窗内仅应发 {frames} 帧（<{FAULT_MIN_FRAMES_AFTER_BREAK}）",
                         t_break_ns / 1_000_000
                     ));
                 }
@@ -785,8 +798,6 @@ pub async fn verify_tas_inner<R: RemoteRunner>(
     };
 
     let (_classes, placements, _node_apps) = plan_flow_traffic(&specs);
-    // 与 bundle 用同一公式（SimOverrides::default 未覆盖 sim_time）反推实发数；三轮同一时长。
-    let sim_time_s = flow_sim_time_s(&specs);
 
     // 单轮执行（KTD3：三轮=三次独立 bundle + 顺序提交共用此路径）：装 bundle（fault=None 即
     // 健康轮，产物与 U5 后现状位级一致）→ 跑 → classify（U7 分级：故障轮带被断链覆盖的 RC
@@ -1321,6 +1332,38 @@ mod tests {
         });
     }
 
+    /// 删光 ST 后存量 GCL 不消费：seed 的 gate7 flow_plans 残留 + 纯 BE 流集 → 提交的
+    /// pin ini 无任何 transmissionGate 行（零门条目、补集不接管存量），验证正常跑。
+    #[test]
+    fn stale_gcl_ignored_when_no_st_streams() {
+        tauri::async_runtime::block_on(async {
+            let pool = fresh_pool().await;
+            seed(&pool).await; // 带 gate7 flow_plans 存量。
+            // 删光 ST，只留 BE（不清 flow_plans——模拟删流后残留）。
+            sqlx::query("DELETE FROM topology_streams WHERE session_id='s1'")
+                .execute(&pool)
+                .await
+                .unwrap();
+            sqlx::query("INSERT INTO topology_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener) VALUES ('s1', 0, 'BE', 0, 500, 512, 3, '1', '2')")
+                .execute(&pool).await.unwrap();
+            let csv = format!(
+                "{}TsnAgentFlowTasNetwork.es2.app[0].sink,packetLifeTime:vector,0 0 0,0.0001 0.00012 0.00011\nTsnAgentFlowTasNetwork.es2.app[0].sink,packetJitter:vector,0 0 0,0.0000002 0.0000003 0.0000001\n",
+                header()
+            );
+            let runner = CapturingRunner {
+                outcome: outcome(Some(&csv)),
+                ini: std::sync::Mutex::new(None),
+            };
+            let r = verify_tas_inner(&pool, "s1", &runner).await.unwrap();
+            assert_eq!(r.status, "ok", "{r:?}");
+            let ini = runner.ini.lock().unwrap().clone().unwrap();
+            assert!(
+                !ini.contains("transmissionGate["),
+                "纯 BE 不得 pin 存量门条目、不得生成补集：{ini}"
+            );
+        });
+    }
+
     /// Covers G2.4（U3⑤）：存量 flow_plans 混有 gate0（旧全类条目）→ pin 段只出 gate7，
     /// gate0 的 transmissionGate 行不得出现（互补关窗接管前提）。
     #[test]
@@ -1818,8 +1861,9 @@ mod tests {
         });
     }
 
-    /// Covers KTD7（U6③）：RC 窗太短（100×500us=50ms < 200ms 下限断点）→ 断后应发 0 帧
-    /// <20，整体响亮报错提示调大 count，且一轮软仿都不跑（不烧墙钟）。
+    /// Covers KTD7（U6③）：纯 RC 短流集——sim 时长=RC 窗（100×500us=50ms）≤ t_break 下限
+    /// 200ms → 断后真实发送窗内应发 0 帧 <20，整体响亮报错提示调大 count，且一轮软仿都
+    /// 不跑（不烧墙钟）。真不足时守卫仍响亮（分母改真实发送窗后语义保住）。
     #[test]
     fn fault_tail_guard_errors_loudly_without_running() {
         tauri::async_runtime::block_on(async {
@@ -1839,6 +1883,44 @@ mod tests {
             );
             assert!(r.rounds.is_none(), "{r:?}");
             assert!(runner.inis().is_empty(), "尾量不足不得烧软仿墙钟");
+        });
+    }
+
+    /// 尾量守卫分母=真实发送窗（sim 时长），非 RC 意图窗：短意图窗 RC（100×1000us=100ms）
+    /// 加长 ST（10000×1000us=10s）→ sim=10s，t_break=200ms 后仍有 9800 帧——不得
+    /// fault_window_too_short 假拒验，三轮照跑。
+    #[test]
+    fn fault_tail_guard_uses_real_send_window_not_intent_window() {
+        tauri::async_runtime::block_on(async {
+            let pool = fresh_pool().await;
+            seed_dual_plane_rc(&pool, RC_PATHS).await;
+            // RC 意图窗缩到 100ms（旧分母下断后 0 帧必拒）；ST 长流把 sim 拉到 10s。
+            sqlx::query(
+                "UPDATE topology_streams SET count=100, period_us=1000 WHERE session_id='s1'",
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query("INSERT INTO topology_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener, max_latency_us) VALUES ('s1', 1, 'ST', 7, 1000, 512, 10000, '1', '2', 800)")
+                .execute(&pool).await.unwrap();
+            sqlx::query("INSERT INTO flow_plans (session_id, stream_seq, node, eth_n, gate_index, initially_open, offset_ns, durations_ns, solver) VALUES ('s1', 1, '0', 1, 7, 1, 0, '[300000,700000]', 'Z3')")
+                .execute(&pool).await.unwrap();
+            let runner = ScriptedRunner::new(vec![
+                Ok(outcome(None)),
+                Ok(outcome(None)),
+                Ok(outcome(None)),
+            ]);
+            let r = verify_tas_inner(&pool, "s1", &runner).await.unwrap();
+            assert_ne!(
+                r.status, "fault_window_too_short",
+                "真实发送窗充足不得假拒验：{r:?}"
+            );
+            let rounds = r.rounds.as_ref().expect("三轮照跑");
+            assert_eq!(
+                rounds.iter().map(|x| x.round.as_str()).collect::<Vec<_>>(),
+                vec!["healthy", "fault_a", "fault_b"]
+            );
+            assert_eq!(runner.inis().len(), 3, "三轮都提交");
         });
     }
 
@@ -1912,6 +1994,36 @@ mod tests {
                 "最差轮可见：{}",
                 r.overall
             );
+        });
+    }
+
+    /// KTD3 反方向：健康轮 unreachable → 断A/断B 轮仍执行拿全量信息；健康轮 status 记录在
+    /// rounds[0]（错误详情进标注），顶层归 unreachable 既有词表。
+    #[test]
+    fn healthy_round_failure_still_runs_fault_rounds() {
+        tauri::async_runtime::block_on(async {
+            let pool = fresh_pool().await;
+            seed_dual_plane_rc(&pool, RC_PATHS).await;
+            let csv = healthy_csv("TsnAgentFlowTasNetwork.es2.app[0].sink", 2001);
+            let runner = ScriptedRunner::new(vec![
+                Err(RemoteError::Unreachable("connection refused".into())),
+                Ok(outcome(Some(&csv))),
+                Ok(outcome(Some(&csv))),
+            ]);
+            let r = verify_tas_inner(&pool, "s1", &runner).await.unwrap();
+            assert_eq!(r.status, "unreachable", "顶层=健康轮词表：{r:?}");
+            assert_eq!(runner.inis().len(), 3, "健康轮失败不阻断故障轮");
+            let rounds = r.rounds.as_ref().expect("rounds 应携带全轮");
+            assert_eq!(rounds[0].status, "unreachable", "{rounds:?}");
+            assert!(
+                rounds[0]
+                    .annotations
+                    .iter()
+                    .any(|s| s.contains("connection refused")),
+                "错误详情进标注：{rounds:?}"
+            );
+            assert_eq!(rounds[1].status, "ok", "断A轮仍执行：{rounds:?}");
+            assert_eq!(rounds[2].status, "ok", "断B轮仍执行：{rounds:?}");
         });
     }
 

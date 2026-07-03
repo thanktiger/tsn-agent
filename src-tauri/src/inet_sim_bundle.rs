@@ -114,8 +114,9 @@ pub(crate) fn flow_frame_overhead_bytes(has_rc: bool) -> i64 {
     FLOW_FRAME_OVERHEAD_BYTES + if has_rc { FLOW_FRAME_RTAG_BYTES } else { 0 }
 }
 
-/// 门控周期（ns）：与 synth 段 `gateCycleDuration = 1ms` 同一周期（U5 互补关窗按此取补）。
-const GATE_CYCLE_NS: u64 = 1_000_000;
+/// 门控周期（ns）：由录入闸的 `flow_verify::GATE_CYCLE_US` 单一源推导（×1000，消除双定义
+/// 漂移），与 synth 段 `gateCycleDuration = 1ms` 同一周期（U5 互补关窗按此取补）。
+const GATE_CYCLE_NS: u64 = crate::flow_verify::GATE_CYCLE_US as u64 * 1_000;
 /// 以太网 MTU（载荷字节）：补集最长连续开窗须容得下一个 MTU 帧的发送时长，否则低优先级门永久锁死。
 const MTU_BYTES: i64 = 1500;
 /// 补集门条目的 solver 标识（U5/KTD5）：pin 写参时据此**不写** enableImplicitGuardBand

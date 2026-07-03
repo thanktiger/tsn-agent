@@ -71,7 +71,8 @@ export interface VerifyRound {
 /** 验证结果（对齐 flow_verify_command::VerifyTasResult）。 */
 export interface VerifyTasResult {
   caliber: string;
-  /** ok | no_plan | no_streams | pcp_mismatch | no_gm | bundle_error | unreachable | load_failed | empty | fail | no_service */
+  /** ok | no_plan | no_streams | pcp_mismatch | no_gm | route_error | bundle_error | unreachable |
+   * load_failed | empty | fail | fault_window_too_short | no_service */
   status: string;
   perStream: StreamVerdict[];
   overall: string;
@@ -115,10 +116,18 @@ export function isZ3Guaranteed(result: PlanResult): boolean {
   return (result.solver ?? "") === "Z3";
 }
 
-/** 验证是否全流达标（空/短/失败绝不算通过，R16）。 */
+/** 验证是否全流达标（空/短/失败绝不算通过，R16）。rounds-aware：有多轮结果（RC 断链轮）时
+ * 每轮 status 须 ok 且该轮下判（judged）的流全过——顶层 status/perStream 恒为健康轮，
+ * 断链轮 FAIL 不得被顶层绿灯掩盖；无 rounds 的老结果行为不变。 */
 export function verifyAllPass(result: VerifyTasResult): boolean {
+  const roundsPass = (result.rounds ?? []).every(
+    (r) => r.status === "ok" && r.perStream.every((s) => s.judged === false || s.pass),
+  );
   return (
-    result.status === "ok" && result.perStream.length > 0 && result.perStream.every((s) => s.pass)
+    result.status === "ok" &&
+    result.perStream.length > 0 &&
+    result.perStream.every((s) => s.pass) &&
+    roundsPass
   );
 }
 
