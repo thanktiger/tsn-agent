@@ -13,13 +13,21 @@
 //! sim 时长按 `count×period` 推导（`flow_sim_time_s`），「实发」由 `floor(sim/period)+1`
 //! 确定性反推（`flow_expected_sent`，无需服务回传发送数）。判 `实发 - 收 ≤ 在途容差`
 //! （容差=⌈实测max时延/period⌉+1）——自由产包源 sim 结束时总有在途尾巴，故不能要求精确相等。
+//!
+//! **U6 断链故障轮（R9/AE2）**：有 RC 流 → 健康+断A+断B 三轮顺序独立提交（KTD3，服务零改动）。
+//! 断点=各平面上覆盖最多 RC 流的**有向**链路占用（KTD8，平手优先避开 ST 路由、再取最小
+//! link_seq；时钟树边/ST 路由重叠响亮标注不改选，KTD2）；`t_break = max(0.4×最小 RC 活跃窗,
+//! 200ms 收敛下限)`，断后被覆盖流应发帧数 <20 整体响亮报错（KTD7）。单轮失败（load_failed/
+//! unreachable/busy）继续余轮拿全量信息；顶层 status/per_stream 恒为健康轮结果（前端向后
+//! 兼容，U7 接多轮渲染），`rounds` 携带全轮。本单元各轮同一判据（U7 做分级）。
 
 use serde::Serialize;
 use sqlx::Row;
+use std::collections::{BTreeMap, HashSet};
 
 use crate::inet_remote::{RemoteError, RemoteRunner, SimRunOutcome};
 use crate::inet_sim_bundle::{
-    FlowStreamSpec, FlowTasSchedule, GclEntry, SimOverrides, build_flow_tas_sim_bundle,
+    FaultSpec, FlowStreamSpec, FlowTasSchedule, GclEntry, SimOverrides, build_flow_tas_sim_bundle,
     flow_expected_sent, flow_sim_time_s, plan_flow_traffic,
 };
 use crate::inet_sim_command::{load_timing, load_topology};
@@ -29,6 +37,10 @@ pub const CALIBER_FLOW_TAS_VERIFIED: &str = "flow_tas_verified";
 const JITTER_LIMIT_NS: f64 = 1_000.0;
 /// per-packet 时延 + 抖动向量 filter（U1 spike 钉死向量名）。
 const FLOW_VERIFY_FILTER: &str = "name=~\"packetLifeTime:vector\" OR name=~\"packetJitter:vector\"";
+/// 断链时刻的 gPTP 收敛下限（KTD7；spike 在 400ms 断链验证过 gPTP 存活，200ms 为收敛底线）。
+const FAULT_T_BREAK_FLOOR_NS: u64 = 200_000_000;
+/// 断后被覆盖 RC 流的最小应发帧数（KTD7 绝对帧量尾量守卫）。
+const FAULT_MIN_FRAMES_AFTER_BREAK: i64 = 20;
 
 /// 单流实测判决。
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -47,17 +59,40 @@ pub struct StreamVerdict {
     pub reason: Option<String>,
 }
 
+/// 单轮验证结果（U6 断链故障轮编排，R9/AE2）。healthy 轮无断链；fault_a/fault_b 各断该平面
+/// 覆盖最多 RC 流的一条链路（KTD8）。本单元各轮同一判据（U7 做分级与结构化渲染）。
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct VerifyRound {
+    /// healthy | fault_a | fault_b
+    pub round: String,
+    /// ok | fail | empty | load_failed | unreachable | busy | bundle_error。
+    /// busy = 服务端 409 单运行锁（环境冲突，不判验证 FAIL）；顶层 status 仍归 unreachable
+    /// 保持既有前端词表。
+    pub status: String,
+    pub per_stream: Vec<StreamVerdict>,
+    /// 响亮标注（KTD2）：断点描述 / 时钟树边重叠 / ST 路由重叠 / 运行错误详情。
+    pub annotations: Vec<String>,
+    /// 该轮未被断链途经的 RC 流（「未测容错」字符串，U7 结构化；KTD8）。
+    pub untested_streams: Vec<String>,
+}
+
 /// 验证结果（前端/agent 消费）。KTD7 诚实边界：caliber 恒 flow_tas_verified（仿真实测·非 T10）。
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct VerifyTasResult {
     pub caliber: String,
-    /// ok | no_plan | no_streams | pcp_mismatch | no_gm | route_error | bundle_error | unreachable | load_failed | empty | fail
+    /// ok | no_plan | no_streams | pcp_mismatch | no_gm | route_error | bundle_error | unreachable | load_failed | empty | fail | fault_window_too_short
     pub status: String,
     pub per_stream: Vec<StreamVerdict>,
     pub overall: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    /// U6 多轮结果：有 RC 流 → [healthy, fault_a, fault_b]；无 RC → None（序列化零变化，
+    /// 现状回归）。顶层 status/per_stream 恒为健康轮结果（向后兼容），overall 串联各轮摘要
+    /// （最差轮可见，KTD3）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rounds: Option<Vec<VerifyRound>>,
 }
 
 impl VerifyTasResult {
@@ -68,6 +103,7 @@ impl VerifyTasResult {
             per_stream: vec![],
             overall: overall.to_string(),
             message,
+            rounds: None,
         }
     }
 }
@@ -246,6 +282,125 @@ fn classify(
         .collect()
 }
 
+/// 断链时刻（ns）：max(0.4 × 最小 RC 活跃窗, 200ms gPTP 收敛下限)（KTD7）。
+fn fault_t_break_ns(min_rc_window_ns: u64) -> u64 {
+    (min_rc_window_ns * 2 / 5).max(FAULT_T_BREAK_FLOOR_NS)
+}
+
+/// 断后某流在其活跃窗（count×period）内还应发的帧数（KTD7 尾量守卫）。窗已过断点 → 0。
+fn frames_after_break(window_ns: u64, t_break_ns: u64, period_ns: u64) -> i64 {
+    if window_ns <= t_break_ns || period_ns == 0 {
+        0
+    } else {
+        ((window_ns - t_break_ns) / period_ns) as i64
+    }
+}
+
+/// 某平面故障轮的断点（KTD8）：断链上游端点（朝 talker 一侧）+ 覆盖/未覆盖流 + 重叠标注位。
+struct BreakPoint {
+    link_seq: i64,
+    upstream_mid: String,
+    upstream_db_port: i64,
+    covered: Vec<i64>,
+    untested: Vec<i64>,
+    on_st_route: bool,
+    on_clock_tree: bool,
+}
+
+/// 故障轮计划：(t_break_ns, [(轮名, 断点)])——有 RC 流才 Some。
+type FaultPlan = (u64, Vec<(&'static str, Option<BreakPoint>)>);
+
+/// 断点选择（KTD8）：候选=各 RC 流该平面路径的**有向**链路占用（(link_seq, 上游节点)——
+/// 单向 TX 断开只杀同向副本，反向途经不算覆盖）。取覆盖流数最多者；覆盖数平手优先避开
+/// ST 流路由（verify 期平面 A link_seqs）；再平手取最小 (link_seq, mid)（BTreeMap 升序，
+/// 确定性）。所有最高覆盖候选都撞 ST 路由时不降覆盖去避让——取覆盖最高者并由
+/// `on_st_route` 响亮标注（KTD2）；时钟树边同款只标注不改选（结构性避不开）。
+fn select_break_point(
+    routes: &[(i64, &crate::flow_route::Route)],
+    st_links: &HashSet<i64>,
+    links: &[crate::topology_verify::VerifyLink],
+    clock_tree: &crate::timesync_tree::ClockTree,
+) -> Option<BreakPoint> {
+    let mut cover: BTreeMap<(i64, String), Vec<i64>> = BTreeMap::new();
+    for (seq, r) in routes {
+        for (i, ls) in r.link_seqs.iter().enumerate() {
+            cover
+                .entry((*ls, r.node_path[i].clone()))
+                .or_default()
+                .push(*seq);
+        }
+    }
+    let mut best: Option<(&(i64, String), &Vec<i64>)> = None;
+    for (key, streams) in &cover {
+        let better = match &best {
+            None => true,
+            Some((bk, bs)) => {
+                if streams.len() != bs.len() {
+                    streams.len() > bs.len()
+                } else {
+                    // 覆盖数平手：优先不撞 ST 路由；再平手保留更小 key（升序先到者）。
+                    !st_links.contains(&key.0) && st_links.contains(&bk.0)
+                }
+            }
+        };
+        if better {
+            best = Some((key, streams));
+        }
+    }
+    let ((link_seq, upstream_mid), covered) = best?;
+    let link = links.iter().find(|l| l.link_seq == *link_seq)?;
+    let upstream_db_port = if &link.src_node == upstream_mid {
+        link.src_port
+    } else {
+        link.dst_port
+    }?;
+    let covered_set: HashSet<i64> = covered.iter().copied().collect();
+    let untested: Vec<i64> = routes
+        .iter()
+        .map(|(s, _)| *s)
+        .filter(|s| !covered_set.contains(s))
+        .collect();
+    let ptp_on = |mid: &str, port: Option<i64>| {
+        port.is_some_and(|p| {
+            clock_tree
+                .per_node
+                .iter()
+                .find(|n| n.mid == mid)
+                .is_some_and(|n| n.port_ptp_enabled.contains(&p))
+        })
+    };
+    Some(BreakPoint {
+        link_seq: *link_seq,
+        upstream_mid: upstream_mid.clone(),
+        upstream_db_port,
+        covered: covered.clone(),
+        untested,
+        on_st_route: st_links.contains(link_seq),
+        // 时钟树边=两端端口都在树上（master/slave 各一端）；非树边两端 passive 不入树。
+        on_clock_tree: ptp_on(&link.src_node, link.src_port)
+            && ptp_on(&link.dst_node, link.dst_port),
+    })
+}
+
+/// 单轮机器词 → overall 串联用的摘要（ok/fail 给达标计数，其余给状态词本身）。
+fn round_summary(status: &str, per_stream: &[StreamVerdict]) -> String {
+    match status {
+        "ok" | "fail" => {
+            let passed = per_stream.iter().filter(|v| v.pass).count();
+            format!("{passed} 个达标 / {} 个未达标", per_stream.len() - passed)
+        }
+        s => s.to_string(),
+    }
+}
+
+fn round_label(round: &str) -> &'static str {
+    match round {
+        "healthy" => "健康轮",
+        "fault_a" => "断A轮",
+        _ => "断B轮",
+    }
+}
+
 /// 可测内核：注入 RemoteRunner，pin GCL → bundle → 跑 → 逐流实测判决。
 pub async fn verify_tas_inner<R: RemoteRunner>(
     pool: &sqlx::Pool<sqlx::Sqlite>,
@@ -316,11 +471,19 @@ pub async fn verify_tas_inner<R: RemoteRunner>(
         )
     };
     let mut specs: Vec<FlowStreamSpec> = Vec::new();
+    // U6：RC 各流的 A/B 重推导路径与 ST 平面 A link 集顺手收集——断点选择（KTD8）与
+    // ST 路由避让/标注（KTD2）的输入，与装配同一份推导、绝不二算。
+    let mut rc_routes: Vec<(i64, crate::flow_route::Route, crate::flow_route::Route)> = Vec::new();
+    let mut st_links: HashSet<i64> = HashSet::new();
     for s in &db_streams {
         let (frer_trees, pin_links) = if s.class == "RC" {
             match crate::flow_route::derive_redundant_routes(&s.talker, &s.listener, &nodes, &links)
             {
-                Ok((a, b)) => (Some(vec![a.node_path, b.node_path]), None),
+                Ok((a, b)) => {
+                    let trees = Some(vec![a.node_path.clone(), b.node_path.clone()]);
+                    rc_routes.push((s.stream_seq, a, b));
+                    (trees, None)
+                }
                 Err(errs) => return Ok(route_fail(s.stream_seq, errs)),
             }
         } else if dual_plane && (!has_rc || s.class == "ST") {
@@ -333,7 +496,11 @@ pub async fn verify_tas_inner<R: RemoteRunner>(
                 &nodes,
                 &links,
             ) {
-                Ok(r) if has_rc => (Some(vec![r.node_path]), None),
+                Ok(r) if has_rc => {
+                    // 该分支在 has_rc 下只有 ST 流进得来（BE 落 else 分支）。
+                    st_links.extend(r.link_seqs.iter().copied());
+                    (Some(vec![r.node_path]), None)
+                }
                 Ok(r) => (None, Some(r.link_seqs)),
                 Err(errs) => return Ok(route_fail(s.stream_seq, errs)),
             }
@@ -371,83 +538,252 @@ pub async fn verify_tas_inner<R: RemoteRunner>(
     };
     let timing = load_timing(pool, session_id).await?;
 
-    let sim_bundle = match build_flow_tas_sim_bundle(
-        &nodes,
-        &links,
-        &gm_mid,
-        &timing,
-        &SimOverrides {
-            has_rc,
-            ..Default::default()
-        },
-        &specs,
-        FlowTasSchedule::Pin(&gcl),
-        session_id,
-        0,
-    ) {
-        Ok(b) => b,
-        Err(errs) => {
-            let msg = errs
-                .iter()
-                .map(|e| e.message_zh.clone())
-                .collect::<Vec<_>>()
-                .join("；");
+    // ---- U6：断链故障轮编排准备（有 RC 才有；KTD2/KTD3/KTD7/KTD8）----
+    // 断点与断链时刻在跑任何软仿前定死；尾量不足整体响亮报错（不烧三轮墙钟）。
+    let fault_plan: Option<FaultPlan> = if has_rc {
+        let min_rc_window_ns = db_streams
+            .iter()
+            .filter(|s| s.class == "RC")
+            .map(|s| s.count.max(1) as u64 * s.period_us.max(1) as u64 * 1_000)
+            .min()
+            .unwrap_or(0);
+        let t_break_ns = fault_t_break_ns(min_rc_window_ns);
+        // 时钟树只读消费（KTD2）：判断断点是否树边——重叠只标注不改选（双平面单跳拓扑上
+        // 结构性避不开）。
+        let clock_tree = crate::timesync_tree::compute_clock_tree(pool, session_id, &gm_mid, &[])
+            .await
+            .map_err(|e| format!("读时钟树失败：{e}"))?;
+        let plane_a: Vec<(i64, &crate::flow_route::Route)> =
+            rc_routes.iter().map(|(s, a, _)| (*s, a)).collect();
+        let plane_b: Vec<(i64, &crate::flow_route::Route)> =
+            rc_routes.iter().map(|(s, _, b)| (*s, b)).collect();
+        let planned = vec![
+            (
+                "fault_a",
+                select_break_point(&plane_a, &st_links, &links, &clock_tree),
+            ),
+            (
+                "fault_b",
+                select_break_point(&plane_b, &st_links, &links, &clock_tree),
+            ),
+        ];
+        // KTD7 尾量守卫：断后每条被覆盖 RC 流在其活跃窗（count×period）内应发帧数 ≥ 20。
+        let mut violations: Vec<String> = Vec::new();
+        for (_, bp) in &planned {
+            let Some(bp) = bp else { continue };
+            for seq in &bp.covered {
+                let Some(s) = db_streams.iter().find(|d| d.stream_seq == *seq) else {
+                    continue;
+                };
+                let window_ns = s.count.max(1) as u64 * s.period_us.max(1) as u64 * 1_000;
+                let period_ns = s.period_us.max(1) as u64 * 1_000;
+                let frames = frames_after_break(window_ns, t_break_ns, period_ns);
+                if frames < FAULT_MIN_FRAMES_AFTER_BREAK {
+                    violations.push(format!(
+                        "流 {seq} 断链（t={}ms）后活跃窗内仅应发 {frames} 帧（<{FAULT_MIN_FRAMES_AFTER_BREAK}）",
+                        t_break_ns / 1_000_000
+                    ));
+                }
+            }
+        }
+        violations.sort();
+        violations.dedup();
+        if !violations.is_empty() {
             return Ok(VerifyTasResult::simple(
-                "bundle_error",
-                "验证工程生成失败。",
-                Some(msg),
+                "fault_window_too_short",
+                "断链容错窗口不足，无法有效评估 RC 容错，请调大 RC 流的 count。",
+                Some(violations.join("；")),
             ));
         }
-    };
-
-    let outcome: SimRunOutcome =
-        match runner.run_sim_fetch_csv(&sim_bundle.bundle, FLOW_VERIFY_FILTER) {
-            Ok(o) => o,
-            Err(RemoteError::Unreachable(m)) => {
-                return Ok(VerifyTasResult::simple(
-                    "unreachable",
-                    "验证暂时无法运行（软仿服务不可达），工程保持原状。",
-                    Some(m),
-                ));
-            }
-        };
-    if outcome.exit_code != Some(0) {
-        return Ok(VerifyTasResult::simple(
-            "load_failed",
-            "INET 没跑起来（pin 工程装配失败）。",
-            Some(outcome.output_tail),
-        ));
-    }
-    let Some(csv) = outcome.csv else {
-        // 空=FAIL，绝不渲染绿（R16）。
-        return Ok(VerifyTasResult::simple(
-            "empty",
-            "结果为空：未取到 per-packet 向量（检查 recording/模块路径）。",
-            Some("空结果不渲染成通过。".to_string()),
-        ));
+        Some((t_break_ns, planned))
+    } else {
+        None
     };
 
     let (_classes, placements, _node_apps) = plan_flow_traffic(&specs);
-    let rows = parse_vec_csv(&csv);
-    // 与 bundle 用同一公式（SimOverrides::default 未覆盖 sim_time）反推实发数。
+    // 与 bundle 用同一公式（SimOverrides::default 未覆盖 sim_time）反推实发数；三轮同一时长。
     let sim_time_s = flow_sim_time_s(&specs);
-    let per_stream = classify(
-        &rows,
-        &specs,
-        &placements,
-        &sim_bundle.node_ned_names,
-        sim_time_s,
-    );
 
-    let passed = per_stream.iter().filter(|v| v.pass).count();
-    let all_pass = passed == per_stream.len() && !per_stream.is_empty();
-    Ok(VerifyTasResult {
-        caliber: CALIBER_FLOW_TAS_VERIFIED.to_string(),
-        status: if all_pass { "ok" } else { "fail" }.to_string(),
-        overall: format!("{passed} 个达标 / {} 个未达标", per_stream.len() - passed),
-        per_stream,
-        message: None,
-    })
+    // 单轮执行（KTD3：三轮=三次独立 bundle + 顺序提交共用此路径）：装 bundle（fault=None 即
+    // 健康轮，产物与 U5 后现状位级一致）→ 跑 → classify（本单元各轮同一判据，U7 分级）。
+    // 返回 (round status, per_stream, 详情)。busy=服务端 409 单运行锁（凭 BUSY_MESSAGE 文案
+    // 判别，环境冲突不与验证 FAIL 混淆；其余 Unreachable 归 unreachable 兜底）。
+    let run_round = |fault: Option<FaultSpec>| -> (String, Vec<StreamVerdict>, Option<String>) {
+        let sim_bundle = match build_flow_tas_sim_bundle(
+            &nodes,
+            &links,
+            &gm_mid,
+            &timing,
+            &SimOverrides {
+                has_rc,
+                fault,
+                ..Default::default()
+            },
+            &specs,
+            FlowTasSchedule::Pin(&gcl),
+            session_id,
+            0,
+        ) {
+            Ok(b) => b,
+            Err(errs) => {
+                let msg = errs
+                    .iter()
+                    .map(|e| e.message_zh.clone())
+                    .collect::<Vec<_>>()
+                    .join("；");
+                return ("bundle_error".to_string(), vec![], Some(msg));
+            }
+        };
+        let outcome: SimRunOutcome =
+            match runner.run_sim_fetch_csv(&sim_bundle.bundle, FLOW_VERIFY_FILTER) {
+                Ok(o) => o,
+                Err(RemoteError::Unreachable(m)) => {
+                    let status = if m.contains(crate::inet_sim_http::BUSY_MESSAGE) {
+                        "busy"
+                    } else {
+                        "unreachable"
+                    };
+                    return (status.to_string(), vec![], Some(m));
+                }
+            };
+        if outcome.exit_code != Some(0) {
+            return ("load_failed".to_string(), vec![], Some(outcome.output_tail));
+        }
+        let Some(csv) = outcome.csv else {
+            // 空=FAIL，绝不渲染绿（R16）。
+            return ("empty".to_string(), vec![], None);
+        };
+        let rows = parse_vec_csv(&csv);
+        let per_stream = classify(
+            &rows,
+            &specs,
+            &placements,
+            &sim_bundle.node_ned_names,
+            sim_time_s,
+        );
+        let passed = per_stream.iter().filter(|v| v.pass).count();
+        let all_pass = passed == per_stream.len() && !per_stream.is_empty();
+        (
+            (if all_pass { "ok" } else { "fail" }).to_string(),
+            per_stream,
+            None,
+        )
+    };
+
+    // 健康轮（无 RC 时即唯一轮，现状回归）。
+    let (h_status, h_per, h_detail) = run_round(None);
+
+    // 顶层结果 = 健康轮（向后兼容：status/per_stream/文案词表与单轮现状一致；round 级
+    // busy 顶层归 unreachable，前端本单元零改动）。
+    let mut result = match h_status.as_str() {
+        "bundle_error" => {
+            VerifyTasResult::simple("bundle_error", "验证工程生成失败。", h_detail.clone())
+        }
+        "unreachable" | "busy" => VerifyTasResult::simple(
+            "unreachable",
+            "验证暂时无法运行（软仿服务不可达），工程保持原状。",
+            h_detail.clone(),
+        ),
+        "load_failed" => VerifyTasResult::simple(
+            "load_failed",
+            "INET 没跑起来（pin 工程装配失败）。",
+            h_detail.clone(),
+        ),
+        "empty" => VerifyTasResult::simple(
+            "empty",
+            "结果为空：未取到 per-packet 向量（检查 recording/模块路径）。",
+            Some("空结果不渲染成通过。".to_string()),
+        ),
+        _ => {
+            let passed = h_per.iter().filter(|v| v.pass).count();
+            VerifyTasResult {
+                caliber: CALIBER_FLOW_TAS_VERIFIED.to_string(),
+                status: h_status.clone(),
+                overall: format!("{passed} 个达标 / {} 个未达标", h_per.len() - passed),
+                per_stream: h_per.clone(),
+                message: None,
+                rounds: None,
+            }
+        }
+    };
+
+    let Some((t_break_ns, planned)) = fault_plan else {
+        return Ok(result); // 无 RC：单轮零变化（rounds=None，序列化与现状逐字一致）。
+    };
+
+    // ---- 故障轮执行（KTD3 顺序独立提交；单轮失败继续余轮拿全量信息）----
+    let mut rounds: Vec<VerifyRound> = vec![VerifyRound {
+        round: "healthy".to_string(),
+        status: h_status,
+        per_stream: h_per,
+        annotations: h_detail.into_iter().collect(),
+        untested_streams: vec![],
+    }];
+    for (name, bp) in planned {
+        let round = match bp {
+            None => VerifyRound {
+                // 防御分支：RC 路径非空时选不出断点不该发生。
+                round: name.to_string(),
+                status: "bundle_error".to_string(),
+                per_stream: vec![],
+                annotations: vec!["该平面无可断链路（RC 路径为空）。".to_string()],
+                untested_streams: vec![],
+            },
+            Some(bp) => {
+                let (status, per_stream, detail) = run_round(Some(FaultSpec {
+                    src_mid: bp.upstream_mid.clone(),
+                    src_db_port: bp.upstream_db_port,
+                    t_break_ns,
+                }));
+                let mut annotations = vec![format!(
+                    "断链：t={}ms 单向断开链路 {}（上游节点 {} 出向）",
+                    t_break_ns / 1_000_000,
+                    bp.link_seq,
+                    bp.upstream_mid
+                )];
+                if bp.on_clock_tree {
+                    annotations.push(format!(
+                        "断点链路 {} 是时钟树边：断后下游时钟自由运行，时钟劣化属预期（结构性避不开，KTD2）。",
+                        bp.link_seq
+                    ));
+                }
+                if bp.on_st_route {
+                    annotations.push(format!(
+                        "断点链路 {} 与 ST 流路由重叠（无法避开）：该轮 ST 判读仅供参考。",
+                        bp.link_seq
+                    ));
+                }
+                annotations.extend(detail);
+                VerifyRound {
+                    round: name.to_string(),
+                    status,
+                    per_stream,
+                    annotations,
+                    untested_streams: bp
+                        .untested
+                        .iter()
+                        .map(|s| format!("流 {s}：未测容错（断点不在其该平面路径上）"))
+                        .collect(),
+                }
+            }
+        };
+        rounds.push(round);
+    }
+    // overall 取最差可见（KTD3）：逐轮摘要串联，最差轮的状态词一定在串里；
+    // 顶层 status/per_stream 保持健康轮（向后兼容）。
+    result.overall = rounds
+        .iter()
+        .map(|r| {
+            format!(
+                "{}：{}",
+                round_label(&r.round),
+                round_summary(&r.status, &r.per_stream)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("；");
+    result.rounds = Some(rounds);
+    Ok(result)
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -867,7 +1203,8 @@ mod tests {
     // ---------- U4：RC 重推导（凭证不作输入）/ 断言失败响亮不装配 ----------
 
     /// 双平面 seed：es1(1) —A— sw1(0) —A— es2(2)；—B— sw2(3) —B—。GM=sw1(0)。
-    /// 一条 RC 流 es1→es2，paths 凭证由调用方传（模拟录入时预存）。
+    /// 一条 RC 流 es1→es2（count=2000×500us → 活跃窗 1s：t_break=0.4×1s=400ms、断后
+    /// 1200 帧过 KTD7 尾量守卫），paths 凭证由调用方传（模拟录入时预存）。
     async fn seed_dual_plane_rc(pool: &sqlx::Pool<sqlx::Sqlite>, paths: &str) {
         for (mid, ty, ord) in [
             ("0", "switch", 0),
@@ -897,8 +1234,20 @@ mod tests {
             sqlx::query("INSERT INTO timesync_nodes (session_id, mid, master_port, slave_port) VALUES ('s1', ?, '[]', '[]')")
                 .bind(mid).execute(pool).await.unwrap();
         }
-        sqlx::query("INSERT INTO topology_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener, max_latency_us, redundant, paths) VALUES ('s1', 0, 'RC', 6, 500, 512, 3, '1', '2', 400, 1, ?)")
+        sqlx::query("INSERT INTO topology_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener, max_latency_us, redundant, paths) VALUES ('s1', 0, 'RC', 6, 500, 512, 2000, '1', '2', 400, 1, ?)")
             .bind(paths).execute(pool).await.unwrap();
+    }
+
+    /// n 个健康样本（时延 100us / 抖动 0.2ns）的 sink 向量对（RC seed 的 sim=1s、
+    /// 实发 2001 时按 n=2001 造收=发）。
+    fn healthy_csv(module: &str, n: usize) -> String {
+        let t = vec!["0"; n].join(" ");
+        let lat = vec!["0.0001"; n].join(" ");
+        let jit = vec!["0.0000002"; n].join(" ");
+        format!(
+            "{}{module},packetLifeTime:vector,{t},{lat}\n{module},packetJitter:vector,{t},{jit}\n",
+            header()
+        )
     }
 
     /// Covers G1.2（U4④/KTD6）：paths 凭证与重推导不一致（凭证是拓扑改动前的过期快照）→
@@ -910,10 +1259,8 @@ mod tests {
             // 过期凭证：node_path 指向已不存在的节点 9（拓扑录流后被改过）。
             let stale = r#"{"a":{"node_path":["1","9","2"],"link_seqs":[9]},"b":{"node_path":["1","8","2"],"link_seqs":[8]}}"#;
             seed_dual_plane_rc(&pool, stale).await;
-            let csv = format!(
-                "{}TsnAgentFlowTasNetwork.es2.app[0].sink,packetLifeTime:vector,0 0 0,0.0001 0.00012 0.00011\nTsnAgentFlowTasNetwork.es2.app[0].sink,packetJitter:vector,0 0 0,0.0000002 0.0000003 0.0000001\n",
-                header()
-            );
+            // 收=实发（sim=1s、500us → 2001）。
+            let csv = healthy_csv("TsnAgentFlowTasNetwork.es2.app[0].sink", 2001);
             let runner = CapturingRunner {
                 outcome: outcome(Some(&csv)),
                 ini: std::sync::Mutex::new(None),
@@ -1048,5 +1395,387 @@ mod tests {
             .unwrap();
             assert_eq!(vr.status, "fail", "坏 GCL 应判 FAIL：{vr:?}");
         });
+    }
+
+    // ---------- U6：断链故障轮编排（KTD2/KTD3/KTD7/KTD8）----------
+
+    /// U6 多轮 runner：脚本化逐轮 outcome + 捕获每轮 bundle（ini/ned），断言三轮编排。
+    struct ScriptedRunner {
+        script: std::sync::Mutex<std::collections::VecDeque<Result<SimRunOutcome, RemoteError>>>,
+        bundles: std::sync::Mutex<Vec<(String, String)>>,
+    }
+    impl ScriptedRunner {
+        fn new(script: Vec<Result<SimRunOutcome, RemoteError>>) -> Self {
+            Self {
+                script: std::sync::Mutex::new(script.into()),
+                bundles: std::sync::Mutex::new(vec![]),
+            }
+        }
+        fn inis(&self) -> Vec<String> {
+            self.bundles
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(i, _)| i.clone())
+                .collect()
+        }
+        fn neds(&self) -> Vec<String> {
+            self.bundles
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(_, n)| n.clone())
+                .collect()
+        }
+    }
+    impl RemoteRunner for ScriptedRunner {
+        fn run_sim_fetch_csv(
+            &self,
+            bundle: &crate::inet_remote::InetBundle,
+            _filter: &str,
+        ) -> Result<SimRunOutcome, RemoteError> {
+            self.bundles
+                .lock()
+                .unwrap()
+                .push((bundle.omnetpp_ini.clone(), bundle.network_ned.clone()));
+            self.script
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("脚本外的多余轮次调用")
+        }
+    }
+
+    const RC_PATHS: &str = r#"{"a":{"node_path":["1","0","2"],"link_seqs":[0,1]},"b":{"node_path":["1","3","2"],"link_seqs":[2,3]}}"#;
+
+    /// Covers AE2（U6①⑦）：有 RC → 健康+断A+断B 三轮顺序提交（KTD3）。健康轮 ini/NED 无
+    /// scenarioManager（零变化）；断A轮带 disconnect（t 手算=0.4×RC 活跃窗 1s=400ms、
+    /// src-module 经 SplitEs 映射→esb1、平面 A 端口 0→ethg$o[0]）；断B轮断平面 B（端口 1）。
+    #[test]
+    fn fault_rounds_three_runs_with_disconnect_script() {
+        tauri::async_runtime::block_on(async {
+            let pool = fresh_pool().await;
+            seed_dual_plane_rc(&pool, RC_PATHS).await;
+            let csv = healthy_csv("TsnAgentFlowTasNetwork.es2.app[0].sink", 2001);
+            let runner = ScriptedRunner::new(vec![
+                Ok(outcome(Some(&csv))),
+                Ok(outcome(Some(&csv))),
+                Ok(outcome(Some(&csv))),
+            ]);
+            let r = verify_tas_inner(&pool, "s1", &runner).await.unwrap();
+            assert_eq!(r.status, "ok", "{r:?}");
+            let rounds = r.rounds.as_ref().expect("有 RC 应有 rounds");
+            assert_eq!(
+                rounds.iter().map(|x| x.round.as_str()).collect::<Vec<_>>(),
+                vec!["healthy", "fault_a", "fault_b"]
+            );
+            assert!(rounds.iter().all(|x| x.status == "ok"), "{rounds:?}");
+            let inis = runner.inis();
+            let neds = runner.neds();
+            assert_eq!(inis.len(), 3, "三次独立提交（KTD3）");
+            // 健康轮零变化。
+            assert!(!inis[0].contains("scenarioManager"), "{}", inis[0]);
+            assert!(!neds[0].contains("ScenarioManager"), "{}", neds[0]);
+            // 断A轮：t=0.4×(2000×500us)=400ms；断点=链路 0（es1→sw1 有向），上游 es1 拆分
+            // → esb1，库端口 0 → ethg$o[0]。
+            assert!(
+                inis[1].contains(
+                    "*.scenarioManager.script = xml(\"<script><at t='400000000ns'><disconnect src-module='esb1' src-gate='ethg$o[0]'/></at></script>\")"
+                ),
+                "{}",
+                inis[1]
+            );
+            assert!(
+                neds[1].contains("scenarioManager: ScenarioManager;"),
+                "{}",
+                neds[1]
+            );
+            // 断B轮：链路 2（es1→sw2），es1 平面 B 端口 1 → ethg$o[1]。
+            assert!(
+                inis[2].contains("<disconnect src-module='esb1' src-gate='ethg$o[1]'/>"),
+                "{}",
+                inis[2]
+            );
+        });
+    }
+
+    /// 双平面 5 节点 seed：sw1(0)=平面A、sw2(3)=平面B；es1(1)/es2(2)/es3(4) 全双宿。
+    /// 两条 RC：seq0 es1→es2 固定；seq1 由调用方指定 talker/listener（共享/平手两形态）。
+    async fn seed_dual_plane_two_rc(pool: &sqlx::Pool<sqlx::Sqlite>, rc1: (&str, &str)) {
+        for (mid, ty, ord) in [
+            ("0", "switch", 0),
+            ("1", "endSystem", 1),
+            ("2", "endSystem", 2),
+            ("3", "switch", 3),
+            ("4", "endSystem", 4),
+        ] {
+            sqlx::query("INSERT INTO topology_nodes (session_id, mid, name, x, y, node_type, port_count, queue_count, insert_order) VALUES ('s1', ?, NULL, 0, 0, ?, 8, 8, ?)")
+                .bind(mid).bind(ty).bind(ord).execute(pool).await.unwrap();
+        }
+        for (seq, src, sp, dst, dp, plane) in [
+            (0, "1", 0, "0", 0, "A"),
+            (1, "0", 1, "2", 0, "A"),
+            (2, "1", 1, "3", 0, "B"),
+            (3, "3", 1, "2", 1, "B"),
+            (4, "4", 0, "0", 2, "A"),
+            (5, "4", 1, "3", 2, "B"),
+        ] {
+            sqlx::query("INSERT INTO topology_links (session_id, link_seq, name, src_node, dst_node, src_port, dst_port, speed, styles_json) VALUES ('s1', ?, NULL, ?, ?, ?, ?, 1000, ?)")
+                .bind(seq).bind(src).bind(dst).bind(sp).bind(dp)
+                .bind(format!(r#"{{"plane":"{plane}"}}"#))
+                .execute(pool).await.unwrap();
+        }
+        sqlx::query("INSERT INTO timesync_domain (session_id, gm_mid) VALUES ('s1', '0')")
+            .execute(pool)
+            .await
+            .unwrap();
+        for mid in ["0", "1", "2", "3", "4"] {
+            sqlx::query("INSERT INTO timesync_nodes (session_id, mid, master_port, slave_port) VALUES ('s1', ?, '[]', '[]')")
+                .bind(mid).execute(pool).await.unwrap();
+        }
+        for (seq, talker, listener) in [(0, "1", "2"), (1, rc1.0, rc1.1)] {
+            sqlx::query("INSERT INTO topology_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener, max_latency_us, redundant, paths) VALUES ('s1', ?, 'RC', 6, 500, 512, 2000, ?, ?, 400, 1, NULL)")
+                .bind(seq).bind(talker).bind(listener).execute(pool).await.unwrap();
+        }
+    }
+
+    /// Covers KTD8（U6②前半/⑦非拆分 case）：两条 RC（es1→es2、es3→es2）平面 A 共享
+    /// sw1→es2 链路（覆盖数 2）→ 选中共享链路，上游是交换机（非拆分）→ src-module=sw1、
+    /// 库端口 1→ethg$o[1]；无未覆盖流。
+    #[test]
+    fn fault_break_point_picks_max_coverage_shared_link() {
+        tauri::async_runtime::block_on(async {
+            let pool = fresh_pool().await;
+            seed_dual_plane_two_rc(&pool, ("4", "2")).await;
+            let runner = ScriptedRunner::new(vec![
+                Ok(outcome(None)),
+                Ok(outcome(None)),
+                Ok(outcome(None)),
+            ]);
+            let r = verify_tas_inner(&pool, "s1", &runner).await.unwrap();
+            let rounds = r.rounds.expect("rounds");
+            assert!(
+                runner.inis()[1].contains("<disconnect src-module='sw1' src-gate='ethg$o[1]'/>"),
+                "{}",
+                runner.inis()[1]
+            );
+            assert!(
+                rounds[1].untested_streams.is_empty(),
+                "共享链路两流全覆盖：{rounds:?}"
+            );
+            assert!(
+                rounds[1].annotations.iter().any(|s| s.contains("链路 1")),
+                "{rounds:?}"
+            );
+        });
+    }
+
+    /// Covers KTD8（U6②后半）：两条 RC 不共向（es1→es2、es3→es1）→ 覆盖数全平手，
+    /// 取最小 (link_seq, 上游) 有向占用（链路 0 的 sw1→es1 向，属流 1）→ 确定性选择；
+    /// 未被该有向断点覆盖的流 0 标「未测容错」。
+    #[test]
+    fn fault_break_point_tie_is_deterministic_and_marks_untested() {
+        tauri::async_runtime::block_on(async {
+            let pool = fresh_pool().await;
+            seed_dual_plane_two_rc(&pool, ("4", "1")).await;
+            let runner = ScriptedRunner::new(vec![
+                Ok(outcome(None)),
+                Ok(outcome(None)),
+                Ok(outcome(None)),
+            ]);
+            let r = verify_tas_inner(&pool, "s1", &runner).await.unwrap();
+            let rounds = r.rounds.expect("rounds");
+            // 平手确定性：BTreeMap 升序首个 = (link 0, 上游 sw1(mid0))，sw1 库端口 0 → eth0。
+            assert!(
+                runner.inis()[1].contains("<disconnect src-module='sw1' src-gate='ethg$o[0]'/>"),
+                "{}",
+                runner.inis()[1]
+            );
+            assert_eq!(rounds[1].untested_streams.len(), 1, "{rounds:?}");
+            assert!(
+                rounds[1].untested_streams[0].contains("流 0")
+                    && rounds[1].untested_streams[0].contains("未测容错"),
+                "{rounds:?}"
+            );
+        });
+    }
+
+    /// Covers KTD7（U6③）：RC 窗太短（100×500us=50ms < 200ms 下限断点）→ 断后应发 0 帧
+    /// <20，整体响亮报错提示调大 count，且一轮软仿都不跑（不烧墙钟）。
+    #[test]
+    fn fault_tail_guard_errors_loudly_without_running() {
+        tauri::async_runtime::block_on(async {
+            let pool = fresh_pool().await;
+            seed_dual_plane_rc(&pool, RC_PATHS).await;
+            sqlx::query("UPDATE topology_streams SET count=100 WHERE session_id='s1'")
+                .execute(&pool)
+                .await
+                .unwrap();
+            let runner = ScriptedRunner::new(vec![]);
+            let r = verify_tas_inner(&pool, "s1", &runner).await.unwrap();
+            assert_eq!(r.status, "fault_window_too_short", "{r:?}");
+            assert!(r.overall.contains("调大"), "{r:?}");
+            assert!(
+                r.message.as_deref().unwrap().contains("流 0"),
+                "响亮指认流：{r:?}"
+            );
+            assert!(r.rounds.is_none(), "{r:?}");
+            assert!(runner.inis().is_empty(), "尾量不足不得烧软仿墙钟");
+        });
+    }
+
+    /// Covers KTD2（U6④）：断A断点（es1→sw1）既是时钟树边（GM=sw1 的树含全部平面 A/B 边
+    /// 0/1/2）又撞 ST 平面 A 路由 → 两类响亮标注都在；断B断点（es1→sw2，链路 2）是树边但
+    /// 不撞 ST 路由 → 只有时钟树标注。
+    #[test]
+    fn fault_annotations_mark_clock_tree_and_st_route_overlap() {
+        tauri::async_runtime::block_on(async {
+            let pool = fresh_pool().await;
+            seed_dual_plane_rc(&pool, RC_PATHS).await;
+            // 加 ST 流（平面 A：es1→es2）+ 其 GCL（有 ST 无 GCL 会 no_plan 早退）。
+            sqlx::query("INSERT INTO topology_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener, max_latency_us) VALUES ('s1', 1, 'ST', 7, 500, 512, 2000, '1', '2', 400)")
+                .execute(&pool).await.unwrap();
+            sqlx::query("INSERT INTO flow_plans (session_id, stream_seq, node, eth_n, gate_index, initially_open, offset_ns, durations_ns, solver) VALUES ('s1', 0, '0', 1, 7, 1, 0, '[300000,700000]', 'Z3')")
+                .execute(&pool).await.unwrap();
+            let runner = ScriptedRunner::new(vec![
+                Ok(outcome(None)),
+                Ok(outcome(None)),
+                Ok(outcome(None)),
+            ]);
+            let r = verify_tas_inner(&pool, "s1", &runner).await.unwrap();
+            let rounds = r.rounds.expect("rounds");
+            let a = &rounds[1];
+            assert!(a.annotations.iter().any(|s| s.contains("时钟树")), "{a:?}");
+            assert!(
+                a.annotations.iter().any(|s| s.contains("ST 流路由")),
+                "{a:?}"
+            );
+            let b = &rounds[2];
+            assert!(b.annotations.iter().any(|s| s.contains("时钟树")), "{b:?}");
+            assert!(
+                !b.annotations.iter().any(|s| s.contains("ST 流路由")),
+                "断B（平面 B）不撞 ST 平面 A 路由：{b:?}"
+            );
+        });
+    }
+
+    /// Covers KTD3（U6⑤）：断A轮 load_failed（exit≠0）→ 断B轮仍执行；顶层 status/per_stream
+    /// 保持健康轮结果；overall 串联含最差轮状态词。
+    #[test]
+    fn fault_round_failure_continues_and_overall_shows_worst() {
+        tauri::async_runtime::block_on(async {
+            let pool = fresh_pool().await;
+            seed_dual_plane_rc(&pool, RC_PATHS).await;
+            let csv = healthy_csv("TsnAgentFlowTasNetwork.es2.app[0].sink", 2001);
+            let runner = ScriptedRunner::new(vec![
+                Ok(outcome(Some(&csv))),
+                Ok(SimRunOutcome {
+                    exit_code: Some(1),
+                    output_tail: "boom".into(),
+                    csv: None,
+                    scavetool_failed: false,
+                }),
+                Ok(outcome(Some(&csv))),
+            ]);
+            let r = verify_tas_inner(&pool, "s1", &runner).await.unwrap();
+            assert_eq!(r.status, "ok", "顶层保持健康轮：{r:?}");
+            assert_eq!(r.per_stream.len(), 1, "顶层保持健康轮 per_stream：{r:?}");
+            assert!(r.per_stream[0].pass);
+            let rounds = r.rounds.as_ref().unwrap();
+            assert_eq!(rounds[1].status, "load_failed", "{rounds:?}");
+            assert!(
+                rounds[1].annotations.iter().any(|s| s.contains("boom")),
+                "错误详情进标注：{rounds:?}"
+            );
+            assert_eq!(rounds[2].status, "ok", "断B轮仍执行：{rounds:?}");
+            assert_eq!(runner.inis().len(), 3, "三轮都提交");
+            assert!(
+                r.overall.contains("load_failed"),
+                "最差轮可见：{}",
+                r.overall
+            );
+        });
+    }
+
+    /// Covers plan U6⑧：断A轮 409（BUSY_MESSAGE）→ 该轮标 busy（环境冲突，非验证 FAIL），
+    /// 余轮继续，顶层保持健康轮 ok。
+    #[test]
+    fn fault_round_busy_from_409_is_not_fail() {
+        tauri::async_runtime::block_on(async {
+            let pool = fresh_pool().await;
+            seed_dual_plane_rc(&pool, RC_PATHS).await;
+            let csv = healthy_csv("TsnAgentFlowTasNetwork.es2.app[0].sink", 2001);
+            let runner = ScriptedRunner::new(vec![
+                Ok(outcome(Some(&csv))),
+                Err(RemoteError::Unreachable(
+                    crate::inet_sim_http::BUSY_MESSAGE.to_string(),
+                )),
+                Ok(outcome(Some(&csv))),
+            ]);
+            let r = verify_tas_inner(&pool, "s1", &runner).await.unwrap();
+            assert_eq!(r.status, "ok", "{r:?}");
+            let rounds = r.rounds.as_ref().unwrap();
+            assert_eq!(rounds[1].status, "busy", "{rounds:?}");
+            assert_ne!(rounds[1].status, "fail");
+            assert_eq!(rounds[2].status, "ok", "余轮继续：{rounds:?}");
+            assert!(r.overall.contains("busy"), "{}", r.overall);
+        });
+    }
+
+    /// Covers U6⑥：无 RC 流 → 单轮现状回归——runner 只被调 1 次、rounds=None（口径选定：
+    /// None 而非单元素），序列化里无 rounds 键（前端零感知）。
+    #[test]
+    fn no_rc_single_round_and_rounds_absent() {
+        tauri::async_runtime::block_on(async {
+            let pool = fresh_pool().await;
+            seed(&pool).await; // 纯 ST。
+            let csv = format!(
+                "{}TsnAgentFlowTasNetwork.es2.app[0].sink,packetLifeTime:vector,0 0 0,0.0001 0.00012 0.00011\nTsnAgentFlowTasNetwork.es2.app[0].sink,packetJitter:vector,0 0 0,0.0000002 0.0000003 0.0000001\n",
+                header()
+            );
+            let runner = ScriptedRunner::new(vec![Ok(outcome(Some(&csv)))]);
+            let r = verify_tas_inner(&pool, "s1", &runner).await.unwrap();
+            assert_eq!(r.status, "ok", "{r:?}");
+            assert!(r.rounds.is_none(), "{r:?}");
+            assert_eq!(runner.inis().len(), 1, "无 RC 只跑一轮");
+            let json = serde_json::to_string(&r).unwrap();
+            assert!(!json.contains("rounds"), "{json}");
+        });
+    }
+
+    /// Covers U6⑧：rounds serde 契约——camelCase（rounds/round/perStream/annotations/
+    /// untestedStreams），无 snake_case 泄漏。
+    #[test]
+    fn rounds_serde_camel_case() {
+        let r = VerifyTasResult {
+            caliber: CALIBER_FLOW_TAS_VERIFIED.to_string(),
+            status: "ok".into(),
+            per_stream: vec![],
+            overall: "x".into(),
+            message: None,
+            rounds: Some(vec![VerifyRound {
+                round: "fault_a".into(),
+                status: "busy".into(),
+                per_stream: vec![],
+                annotations: vec!["a".into()],
+                untested_streams: vec!["流 1：未测容错".into()],
+            }]),
+        };
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(json.contains("\"rounds\""), "{json}");
+        assert!(json.contains("\"round\":\"fault_a\""), "{json}");
+        assert!(json.contains("\"untestedStreams\""), "{json}");
+        assert!(json.contains("\"perStream\""), "{json}");
+        assert!(json.contains("\"annotations\""), "{json}");
+        assert!(!json.contains("untested_streams"), "{json}");
+        assert!(!json.contains("per_stream"), "{json}");
+    }
+
+    /// Covers KTD7（U6⑨）：t_break 手算——RC 窗 1s → 0.4×=400ms（>200ms 下限，取 0.4×窗）；
+    /// RC 窗 100ms → 0.4×=40ms < 200ms → 取 200ms 收敛下限。
+    #[test]
+    fn t_break_forty_percent_with_200ms_floor() {
+        assert_eq!(fault_t_break_ns(1_000_000_000), 400_000_000);
+        assert_eq!(fault_t_break_ns(100_000_000), 200_000_000);
     }
 }

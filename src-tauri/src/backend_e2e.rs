@@ -203,6 +203,7 @@ async fn backend_full_flow_initialize_to_soft_sim() {
         change_interval_ms: None,
         sim_time_s: Some(2.5),
         has_rc: false,
+        fault: None,
     };
 
     // 6) 真软仿命令内核：verify 闸（不漂移）→ bundle → mock runner → 取数算偏差。

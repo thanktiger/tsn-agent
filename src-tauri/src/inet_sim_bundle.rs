@@ -327,6 +327,17 @@ fn build_port_rate_map(
     out
 }
 
+/// 断链故障轮参数（U6/KTD2）：verify 编排从重推导路径选定断点后传入。断链语义为**单向 TX
+/// 断开**（`ethg$o[N]`，spike run4 逐字语法）：`src_mid`/`src_db_port` 是断链**上游端点**
+/// （朝 talker 一侧）的 mid 与其在该链路上的库端口号。builder 负责 mid→NED 名（含 SplitEs
+/// 拆分映射：双宿端点的库端口锚在内嵌桥上 → 取桥名）与库端口→ethN（build_port_eth_map 同源）。
+#[derive(Debug, Clone)]
+pub struct FaultSpec {
+    pub src_mid: String,
+    pub src_db_port: i64,
+    pub t_break_ns: u64,
+}
+
 /// 覆盖表单（R4）：振荡器类型 / 漂移幅度 / sim 时长。缺省走 R3(a) 固定默认。
 #[derive(Debug, Clone, Default)]
 pub struct SimOverrides {
@@ -344,6 +355,9 @@ pub struct SimOverrides {
     /// 无法从入参 streams 判会话是否有 RC，须由调用方从全流集判定后传入（帧开销 +4B R-TAG）。
     /// timesync 忽略。
     pub has_rc: bool,
+    /// flow 专用（U6）：断链故障轮。Some → NED 加 scenarioManager 子模块 + ini 出 disconnect
+    /// 脚本；None（健康轮/timesync/synth）→ 零输出，产物与无此字段时位级一致。
+    pub fault: Option<FaultSpec>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -688,17 +702,34 @@ fn build_submodules_and_connections(
 
 /// network.ned 文本。网络名参数化（timesync=TsnAgentTimesyncNetwork / flow=TsnAgentFlowTasNetwork），
 /// 其余（extends TsnNetworkBase、bitrate 默认、submodule/connection 段）共享。
-fn build_network_ned(network_name: &str, submodules: &str, connections: &str) -> String {
+/// `scenario_manager`（U6 断链故障轮，spike 押注④）：import + 子模块两行即够，`hasStatus`
+/// 不需要；false 时输出与加参前位级一致（健康轮/timesync 零变化）。
+fn build_network_ned(
+    network_name: &str,
+    submodules: &str,
+    connections: &str,
+    scenario_manager: bool,
+) -> String {
+    let sm_import = if scenario_manager {
+        "import inet.common.scenario.ScenarioManager;\n"
+    } else {
+        ""
+    };
+    let sm_submodule = if scenario_manager {
+        "        scenarioManager: ScenarioManager;\n"
+    } else {
+        ""
+    };
     format!(
         "package tsnagent.generated;\n\n\
-import inet.networks.base.TsnNetworkBase;\n\
+{sm_import}import inet.networks.base.TsnNetworkBase;\n\
 import inet.node.ethernet.EthernetLink;\n\
 import inet.node.tsn.TsnDevice;\n\
 import inet.node.tsn.TsnSwitch;\n\n\
 network {network_name} extends TsnNetworkBase\n{{\n\
     parameters:\n\
         *.eth[*].bitrate = default({DEFAULT_DATARATE_MBPS}Mbps);\n\
-    submodules:\n{submodules}\
+    submodules:\n{sm_submodule}{submodules}\
     connections allowunconnected:\n{connections}\
 }}\n"
     )
@@ -720,7 +751,8 @@ pub fn build_timesync_sim_bundle(
     let no_splits = BTreeMap::new();
     let (submodules, connections) =
         build_submodules_and_connections(nodes, &mapped, &port_eth, links, &no_splits);
-    let network_ned = build_network_ned("TsnAgentTimesyncNetwork", &submodules, &connections);
+    let network_ned =
+        build_network_ned("TsnAgentTimesyncNetwork", &submodules, &connections, false);
 
     let gm_ned = &mapped[gm_mid].ned_name;
     let omnetpp_ini = build_timesync_ini(&mapped, &port_eth, gm_ned, timing, overrides);
@@ -1481,6 +1513,23 @@ fn build_flow_tas_ini(
         }
     }
 
+    // --- 断链故障轮（U6/KTD2，spike run4 逐字语法）：ScenarioManager 单向 TX 断开 ---
+    // src-module = 断链上游端点（朝 talker 一侧）的 NED 名——拆分节点（SplitEs）的库端口锚在
+    // 内嵌桥上，故取桥名；gate 下标即 ethN（build_port_eth_map 同源）；t 用 ns 精确值。
+    // 健康轮（fault=None）零输出，ini 与现状位级一致。
+    if let Some(f) = &overrides.fault {
+        let module = splits
+            .get(&f.src_mid)
+            .map(|sp| sp.bridge_ned.clone())
+            .unwrap_or_else(|| ned(&f.src_mid));
+        // 映射存在性已在 build_flow_tas_sim_bundle 前置校验。
+        let eth_n = port_eth[&f.src_mid][&f.src_db_port];
+        ini.push_str(&format!(
+            "*.scenarioManager.script = xml(\"<script><at t='{}ns'><disconnect src-module='{module}' src-gate='ethg$o[{eth_n}]'/></at></script>\")\n",
+            f.t_break_ns
+        ));
+    }
+
     ini
 }
 
@@ -1502,11 +1551,34 @@ pub fn build_flow_tas_sim_bundle(
 ) -> Result<TimesyncSimBundle, Vec<VerifyError>> {
     let mapped = map_and_validate(nodes, links, gm_mid)?;
     let port_eth = build_port_eth_map(links);
+    // 断链端点（U6）：进装配前校验可映射（mid 在拓扑、库端口有 ethN 门号），坏输入响亮失败
+    // 而非 panic——断点由 verify 编排从同一份链路集的重推导路径选出，正常不该失配。
+    if let Some(f) = &overrides.fault {
+        let mappable = mapped.contains_key(f.src_mid.as_str())
+            && port_eth
+                .get(&f.src_mid)
+                .is_some_and(|m| m.contains_key(&f.src_db_port));
+        if !mappable {
+            return Err(vec![VerifyError {
+                code: "fault_endpoint_unmapped".to_string(),
+                message_zh: format!(
+                    "断链端点（节点 {} 端口 {}）无法映射到 NED/ethN，故障轮无法装配。",
+                    f.src_mid, f.src_db_port
+                ),
+                node_ref: Some(f.src_mid.clone()),
+            }]);
+        }
+    }
     // RC 会话的双宿端系统拆分（spike 契约改型）；非 RC 会话恒空、NED 零变化。
     let splits = compute_rc_splits(&mapped, &port_eth, links, streams);
     let (submodules, connections) =
         build_submodules_and_connections(nodes, &mapped, &port_eth, links, &splits);
-    let network_ned = build_network_ned("TsnAgentFlowTasNetwork", &submodules, &connections);
+    let network_ned = build_network_ned(
+        "TsnAgentFlowTasNetwork",
+        &submodules,
+        &connections,
+        overrides.fault.is_some(),
+    );
 
     // 互补关窗（U5/KTD5，仅 pin）：会话存在 BE/RC 流才从 ST 门表推导补集条目追加进 pin 集；
     // 纯 ST 会话补集恒空、ini 位级不变。BE/RC 存在性从全流集判定（verify 传入全流集；
@@ -1772,6 +1844,7 @@ mod tests {
             change_interval_ms: None,
             sim_time_s: Some(2.5),
             has_rc: false,
+            fault: None,
         };
         let b = build_timesync_sim_bundle(&nodes, &links, "1", &timing, &ov, "s1", 1).unwrap();
         let ini = &b.bundle.omnetpp_ini;
@@ -1790,6 +1863,7 @@ mod tests {
             change_interval_ms: Some(25.0),
             sim_time_s: None,
             has_rc: false,
+            fault: None,
         };
         let b = build_timesync_sim_bundle(&nodes, &links, "1", &timing, &ov, "s1", 1).unwrap();
         let ini = &b.bundle.omnetpp_ini;
@@ -2717,5 +2791,99 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err.code, "gcl_cycle_mismatch");
+    }
+
+    // ---------- U6：断链故障轮（ScenarioManager disconnect）----------
+
+    /// Covers U6①⑦（bundle 面，spike run4 逐字）：fault 参数 → NED 加 import + scenarioManager
+    /// 子模块（押注④：hasStatus 不需要）、ini 出单向 TX disconnect 脚本。src-module 经 SplitEs
+    /// 映射（断双宿 talker 首跳 → esb 桥名）、ethN 经 build_port_eth_map、t 为 ns 精确值。
+    #[test]
+    fn fault_emits_scenario_manager_and_disconnect_script() {
+        let (nodes, links, timing) = dual_plane_sample();
+        let b = build_flow_tas_sim_bundle(
+            &nodes,
+            &links,
+            "0",
+            &timing,
+            &SimOverrides {
+                has_rc: true,
+                fault: Some(FaultSpec {
+                    src_mid: "1".into(),
+                    src_db_port: 0,
+                    t_break_ns: 400_000_000,
+                }),
+                ..Default::default()
+            },
+            &rc_session_streams(),
+            FlowTasSchedule::Pin(&[]),
+            "s1",
+            7,
+        )
+        .unwrap();
+        let ned = &b.bundle.network_ned;
+        assert!(
+            ned.contains("import inet.common.scenario.ScenarioManager;"),
+            "{ned}"
+        );
+        assert!(
+            ned.contains("        scenarioManager: ScenarioManager;\n"),
+            "{ned}"
+        );
+        assert!(!ned.contains("hasStatus"), "押注④ hasStatus 不需要：{ned}");
+        // es1(mid1) 是 RC talker 且双宿 → 拆分：库端口 0 锚在 esb1 → src-module=esb1、eth0。
+        let ini = &b.bundle.omnetpp_ini;
+        assert!(
+            ini.contains(
+                "*.scenarioManager.script = xml(\"<script><at t='400000000ns'><disconnect src-module='esb1' src-gate='ethg$o[0]'/></at></script>\")"
+            ),
+            "{ini}"
+        );
+    }
+
+    /// U6 健康轮零变化：fault=None → NED/ini 均无 scenarioManager 痕迹（RC 会话也不例外）。
+    #[test]
+    fn no_fault_has_no_scenario_manager() {
+        let b = build_rc_session();
+        assert!(
+            !b.bundle.network_ned.contains("ScenarioManager"),
+            "{}",
+            b.bundle.network_ned
+        );
+        assert!(
+            !b.bundle.omnetpp_ini.contains("scenarioManager"),
+            "{}",
+            b.bundle.omnetpp_ini
+        );
+    }
+
+    /// 断链端点映射不上（未知库端口）→ 响亮 Err 不装配。
+    #[test]
+    fn fault_unmapped_endpoint_errors() {
+        let (nodes, links, timing) = dual_plane_sample();
+        let err = build_flow_tas_sim_bundle(
+            &nodes,
+            &links,
+            "0",
+            &timing,
+            &SimOverrides {
+                has_rc: true,
+                fault: Some(FaultSpec {
+                    src_mid: "1".into(),
+                    src_db_port: 9, // es1 没有库端口 9。
+                    t_break_ns: 400_000_000,
+                }),
+                ..Default::default()
+            },
+            &rc_session_streams(),
+            FlowTasSchedule::Pin(&[]),
+            "s1",
+            7,
+        )
+        .unwrap_err();
+        assert!(
+            err.iter().any(|e| e.code == "fault_endpoint_unmapped"),
+            "{err:?}"
+        );
     }
 }
