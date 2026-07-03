@@ -728,7 +728,12 @@ export interface FlowMcpToolDefinition {
 function addStreamInputSchema(): z.ZodRawShape {
   return {
     class: z.enum(["ST", "BE", "RC"]).describe("流量类别：ST 时间敏感 / BE 尽力而为 / RC 冗余"),
-    pcp: z.number().int().min(0).max(7).describe("802.1Q 优先级 PCP，0–7"),
+    pcp: z
+      .number()
+      .int()
+      .min(0)
+      .max(7)
+      .describe("802.1Q 优先级 PCP；与 class 固定映射：ST=7 / RC=6 / BE=0"),
     periodUs: z.number().int().min(1).describe("发送周期（us），须整除门控周期 1000us"),
     frameBytes: z.number().int().min(1).max(1500).describe("报文长度（字节），≤ 链路 MTU 1500"),
     count: z.number().int().min(1).describe("期望发送报文数（验证期判收=发）"),
@@ -750,12 +755,16 @@ export function createFlowToolRegistry(): FlowMcpToolDefinition[] {
       allowedToolName: "mcp__tsn_topology__flow_add_stream",
       title: "Add a traffic stream",
       description:
-        "Record one traffic stream (ST/BE/RC) for the session. Runs the verify_flow gate first " +
-        "(period must divide the 1000us gate cycle, frame <= link MTU, talker/listener must be existing " +
-        "node mids, same PCP must map to one class); on violation the stream is rejected with the offending " +
-        "field and NOT persisted. talker/listener are node mids (call topology.inspect to find them). " +
-        "maxLatencyUs is optional (planning derives it from the docx window when omitted). Returns the " +
-        "assigned streamSeq on success.",
+        "Record one traffic stream for the session. Three classes with a FIXED class-to-pcp mapping: " +
+        "ST (pcp 7) time-sensitive stream scheduled by TAS gate control; RC (pcp 6) 802.1CB redundant " +
+        "stream that REQUIRES a dual-plane topology — the system derives disjoint plane-A/B paths and " +
+        "fills redundant/paths automatically (never user input; on a non-dual-plane topology RC is " +
+        "rejected with NOT_DUAL_PLANE); BE (pcp 0) best-effort. Runs the verify_flow gate first " +
+        "(class must match its fixed PCP, period must divide the 1000us gate cycle, frame <= link MTU, " +
+        "talker/listener must be existing node mids, same PCP must map to one class); on violation the " +
+        "stream is rejected with the offending field and NOT persisted. talker/listener are node mids " +
+        "(call topology.inspect to find them). maxLatencyUs is optional (planning derives it from the " +
+        "docx window when omitted). Returns the assigned streamSeq on success.",
       inputSchema: addStreamInputSchema(),
       handler: async (args) =>
         callSidecarTool("/db/flow/add_stream", args, {

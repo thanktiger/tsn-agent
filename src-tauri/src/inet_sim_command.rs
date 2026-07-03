@@ -22,8 +22,8 @@ const CALIBER_TIMESYNC_SIMULATED: &str = "timesync_simulated";
 /// scavetool filter（执行期实跑后微调）：clock 模块的 timeChanged 向量。
 const TIMECHANGED_FILTER: &str = "module=~\"**.clock\" AND name=~\"timeChanged:vector\"";
 /// 收敛默认阈值（纳秒）：稳态 max|offset| 在此内算收敛（参考线、非设计质量判定，R8）。
-/// 逐节点 offset_threshold 的精确 mid↔module 映射 deferred（实跑确认 module 路径后接入）。
-const CONVERGENCE_THRESHOLD_NS: f64 = 1000.0; // 1µs
+/// 逐节点 offset_threshold 缺省时的全局兜底；flow 验证的 gPTP 诊断行（U7/R15）同口径复用。
+pub(crate) const CONVERGENCE_THRESHOLD_NS: f64 = 1000.0; // 1µs
 
 // ---------- U5/U6：软仿覆盖参数默认值（单一事实源在后端，前端读用于摘要/预填）----------
 
@@ -307,6 +307,8 @@ pub async fn run_timesync_sim(
         drift_rate_change_ppm: request.drift_rate_change_ppm,
         change_interval_ms: request.change_interval_ms,
         sim_time_s: request.sim_time_s,
+        has_rc: false, // timesync 无流量，恒 false（flow 专用）。
+        fault: None,   // 断链故障轮 flow 专用（U6），timesync 恒 None。
     };
     // 软仿走宿主机薄 HTTP 服务（单路径）。未配置地址 → 结构化提示，不弹 IPC 错。
     let Some(base_url) = crate::inet_sim_http_config::resolve_inet_sim_http_url(pool).await? else {
@@ -416,7 +418,8 @@ pub async fn run_timesync_sim_inner<R: RemoteRunner>(
 }
 
 /// 从 timeChanged series 的 module 路径提取 ned 名：`...Network.sw1.clock` → `sw1`（取 .clock 前一段）。
-fn series_ned_name(module: &str) -> Option<&str> {
+/// pub(crate)：flow 验证的 gPTP 诊断行（U7/R15）复用同一提取口径。
+pub(crate) fn series_ned_name(module: &str) -> Option<&str> {
     let mut parts = module.rsplit('.');
     let last = parts.next()?;
     if last != "clock" {
@@ -1133,6 +1136,8 @@ mod tests {
             drift_rate_change_ppm: None,
             change_interval_ms: None,
             sim_time_s: Some(2.5),
+            has_rc: false,
+            fault: None,
         };
         let result = run_timesync_sim_inner(&pool, "s1", &overrides, &mock)
             .await

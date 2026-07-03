@@ -4,8 +4,8 @@
 //!
 //! 双平面用 `styles_json.plane` 消歧（`plane=A`/`B`），单平面（链路无 plane 键）走
 //! plane 缺省（全链路）。**每平面路径唯一**：存在等长多路径即响亮 `AMBIGUOUS_ROUTE`
-//! 失败，绝不 `paths.first()` 静默取一条（R11）。RC/双平面备 A/B 不相交断言（R17，
-//! FRER 逻辑本身不实现，只备断言）。
+//! 失败，绝不 `paths.first()` 静默取一条（R11）。RC/双平面 A/B 不相交断言由录入闸
+//! 消费（R2；FRER 装配另在 verify bundle 侧）。
 //!
 //! 与 `MacForwardingTableConfigurator`（INET L2 转发表、纯拓扑最短路）区分——那是可选
 //! 交叉核对，不是 GCL 来源。
@@ -39,8 +39,9 @@ fn err(code: &str, message_zh: String, node_ref: Option<String>) -> VerifyError 
     }
 }
 
-/// 链路所属平面（`styles_json.plane`）；无键返回 None。
-fn link_plane(link: &VerifyLink) -> Option<String> {
+/// 链路所属平面（`styles_json.plane`）；无键返回 None。录入闸（flow_verify）用它
+/// 判「拓扑是否双平面」（存在任一带 plane 键的链路）。
+pub(crate) fn link_plane(link: &VerifyLink) -> Option<String> {
     serde_json::from_str::<serde_json::Value>(&link.styles_json)
         .ok()
         .and_then(|v| {
@@ -229,13 +230,8 @@ pub fn derive_route(
     })
 }
 
-/// RC/双平面：推导 A/B 两路径并断言不相交（R17）。FRER 帧复制逻辑本身不实现，
-/// 只备断言——共用中间节点或链路即响亮失败。
-///
-/// `#[allow(dead_code)]`：本函数是 RC 路径的入口，按 R17「只备断言」暂无生产调用方
-/// （FRER 本期不实现）；它引用 `derive_route`/`Route` 等，连带把本模块 API 标记为 live，
-/// 待 U6/U7 消费 `derive_route` 后可移除本 allow（RC 若仍未接则保留）。
-#[allow(dead_code)]
+/// RC/双平面：推导 A/B 两路径并断言不相交（R2/R17）。录入闸（`flow_verify::derive_rc_paths`）
+/// 在 RC 落库前消费；共用中间节点或链路即响亮失败。
 pub fn derive_redundant_routes(
     talker: &str,
     listener: &str,

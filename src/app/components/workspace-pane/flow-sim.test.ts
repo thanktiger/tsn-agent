@@ -1,9 +1,13 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  gptpDiagLine,
   isZ3Guaranteed,
   type PlanResult,
+  planAllowsVerify,
   planSucceeded,
+  roundLabel,
+  roundStatusLabel,
   showVerifyTable,
   type VerifyTasResult,
   verifyAllPass,
@@ -35,6 +39,15 @@ describe("flow-sim helpers", () => {
     expect(planSucceeded(plan())).toBe(true);
     expect(planSucceeded(plan({ status: "solver_failed", gateCount: 0 }))).toBe(false);
     expect(planSucceeded(plan({ status: "ok", gateCount: 0 }))).toBe(false);
+  });
+
+  it("planAllowsVerify：有门控表或 no_gating（无 ST 流，R5/AE5）均放行验证", () => {
+    expect(planAllowsVerify(plan())).toBe(true);
+    expect(planAllowsVerify(plan({ status: "no_gating", solver: undefined, gateCount: 0 }))).toBe(
+      true,
+    );
+    expect(planAllowsVerify(plan({ status: "solver_failed", gateCount: 0 }))).toBe(false);
+    expect(planAllowsVerify(plan({ status: "ok", gateCount: 0 }))).toBe(false);
   });
 
   it("isZ3Guaranteed 区分 Z3 带保证 / Eager 兜底", () => {
@@ -83,6 +96,74 @@ describe("flow-sim helpers", () => {
     expect(verifyAllPass(oneFail)).toBe(false);
   });
 
+  it("verifyAllPass rounds-aware：断链轮 FAIL 不得被顶层健康轮绿灯掩盖", () => {
+    const passStream = {
+      streamSeq: 0,
+      class: "RC",
+      talker: "1",
+      listener: "2",
+      received: 2001,
+      expected: 2001,
+      jitterMaxNs: 100,
+      latencyMaxNs: 200,
+      windowNs: 400000,
+      pass: true,
+      judged: true,
+    };
+    const failStream = {
+      ...passStream,
+      pass: false,
+      reason: "丢包",
+    };
+    const round = (roundName: string, perStream: (typeof passStream)[], status = "ok") => ({
+      round: roundName,
+      status,
+      perStream,
+      annotations: [],
+      untestedStreams: [],
+    });
+
+    // 健康轮全过 + 断A轮 RC FAIL → false（顶层 status/perStream 恒为健康轮，不能只看顶层）。
+    const faultAFail = verify({
+      status: "ok",
+      perStream: [passStream],
+      rounds: [
+        round("healthy", [passStream]),
+        round("fault_a", [failStream], "fail"),
+        round("fault_b", [passStream]),
+      ],
+    });
+    expect(verifyAllPass(faultAFail)).toBe(false);
+
+    // 断A轮只有 judged=false 的报告态流 → 不影响（报告态不阻塞）。
+    const reported = { ...passStream, judged: false, pass: true, note: "仅健康轮判" };
+    const faultAReportedOnly = verify({
+      status: "ok",
+      perStream: [passStream],
+      rounds: [
+        round("healthy", [passStream]),
+        round("fault_a", [reported]),
+        round("fault_b", [reported]),
+      ],
+    });
+    expect(verifyAllPass(faultAReportedOnly)).toBe(true);
+
+    // 轮 status 非 ok（如 unreachable/busy）→ 不算全过。
+    const faultBBusy = verify({
+      status: "ok",
+      perStream: [passStream],
+      rounds: [
+        round("healthy", [passStream]),
+        round("fault_a", [passStream]),
+        round("fault_b", [], "busy"),
+      ],
+    });
+    expect(verifyAllPass(faultBBusy)).toBe(false);
+
+    // 无 rounds 老结果 → 行为不变。
+    expect(verifyAllPass(verify({ status: "ok", perStream: [passStream] }))).toBe(true);
+  });
+
   it("showVerifyTable：仅有逐流行时渲染（空=不绿，R16）", () => {
     expect(showVerifyTable(verify({ perStream: [] }))).toBe(false);
     expect(
@@ -104,5 +185,27 @@ describe("flow-sim helpers", () => {
         }),
       ),
     ).toBe(true);
+  });
+
+  it("U7：轮名/轮 status 中文映射（未知词回退原样）", () => {
+    expect(roundLabel("healthy")).toBe("健康轮");
+    expect(roundLabel("fault_a")).toBe("断A轮");
+    expect(roundLabel("fault_b")).toBe("断B轮");
+    expect(roundLabel("x")).toBe("x");
+    expect(roundStatusLabel("ok")).toBe("通过");
+    expect(roundStatusLabel("busy")).toBe("服务占用（稍后重试）");
+    expect(roundStatusLabel("weird")).toBe("weird");
+  });
+
+  it("U7/R15：gPTP 诊断行文案（只报告不判）", () => {
+    expect(
+      gptpDiagLine({
+        convergedNodes: 3,
+        totalNodes: 4,
+        thresholdSummary: "1000ns",
+        worstNode: "es2",
+        worstOffsetNs: 1500.4,
+      }),
+    ).toBe("gPTP 收敛：3/4 节点 ≤ 阈值（1000ns），最差 1500 ns @es2");
   });
 });

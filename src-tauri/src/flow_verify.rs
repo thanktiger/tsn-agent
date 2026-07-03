@@ -9,6 +9,9 @@
 use serde::Serialize;
 use sqlx::{Pool, Row, Sqlite};
 
+use crate::flow_route::{derive_redundant_routes, link_plane};
+use crate::topology_verify::{VerifyLink, VerifyNode};
+
 /// 门控周期（gateCycleDuration）默认 1ms=1000us（对齐 U1 spike 宿主机 Z3 配置器默认）。
 /// 流周期须整除它，TAS 排程才能干净重复（R6）。
 pub const GATE_CYCLE_US: i64 = 1000;
@@ -18,6 +21,20 @@ pub const LINK_MTU_BYTES: i64 = 1500;
 
 /// 合法流量类别（R3 class 判别器）：ST 时间敏感 / BE 尽力而为 / RC 冗余（802.1CB 预留）。
 pub const FLOW_CLASSES: &[&str] = &["ST", "BE", "RC"];
+
+/// ST 流固定 PCP（同时即门号 gate_index，pcp→gate 恒等映射）。KTD4 pin 过滤的单一源。
+pub(crate) const ST_PCP: i64 = 7;
+
+/// class↔pcp 固定映射（R1）：ST=7 / RC=6 / BE=0；非法 class 返回 None（由 INVALID_CLASS 兜）。
+/// 录入闸与 verify_tas 入口重校验（G1.3）共用。
+pub(crate) fn expected_pcp(class: &str) -> Option<i64> {
+    match class {
+        "ST" => Some(ST_PCP),
+        "RC" => Some(6),
+        "BE" => Some(0),
+        _ => None,
+    }
+}
 
 /// 单条结构问题：code 给程序判别、message_zh 给用户直接看、node_ref 指向出问题的
 /// 节点/字段（与 topology_verify::VerifyError 同字段名）。
@@ -84,6 +101,20 @@ pub async fn verify_flow(
         errors.push(VerifyError::new(
             "INVALID_PCP",
             format!("优先级 PCP={} 越界，合法范围 0–7。", s.pcp),
+            None,
+        ));
+    }
+
+    // 2b. class↔pcp 固定映射（R1）：ST=7 / RC=6 / BE=0，违规即拒。
+    if let Some(expected) = expected_pcp(&s.class)
+        && s.pcp != expected
+    {
+        errors.push(VerifyError::new(
+            "PCP_CLASS_MISMATCH",
+            format!(
+                "{} 流的优先级固定为 PCP={expected}，不能用 PCP={}（映射 ST=7 / RC=6 / BE=0）。",
+                s.class, s.pcp
+            ),
             None,
         ));
     }
@@ -185,7 +216,109 @@ pub async fn verify_flow(
         }
     }
 
+    // 8. RC 双平面前置 + A/B 路径可推导（R2/AE3）。仅当 talker/listener 都在拓扑时跑，
+    //    避免与第 6 步重复报节点缺失。
+    if s.class == "RC"
+        && node_mids.contains(&s.talker)
+        && node_mids.contains(&s.listener)
+        && let Err(mut es) = derive_rc_paths(pool, session_id, &s.talker, &s.listener).await?
+    {
+        errors.append(&mut es);
+    }
+
     Ok(errors)
+}
+
+/// RC 双平面路径推导（R2）：`verify_flow` 的 RC 分支与 `add_stream` 落库前共用。
+/// 外层 `Err` = 数据库故障；内层 `Ok` 是 `paths` 列 JSON 契约
+/// `{"a":{"node_path":[...],"link_seqs":[...]},"b":{...}}`（node id 为库内 mid），
+/// 内层 `Err` = 校验违规。先判拓扑是否双平面——链路集里没有任何带 plane 键的链路即
+/// `NOT_DUAL_PLANE` 响亮说明「需要双平面」，不掉进「平面 A 不可达」的误导报错（AE3）；
+/// 双平面才跑 `derive_redundant_routes`（不可达/多路径/路径相交均在录入时拒绝）。
+pub async fn derive_rc_paths(
+    pool: &Pool<Sqlite>,
+    session_id: &str,
+    talker: &str,
+    listener: &str,
+) -> Result<Result<String, Vec<VerifyError>>, sqlx::Error> {
+    let (nodes, links) = load_route_topology(pool, session_id).await?;
+    if !links.iter().any(|l| link_plane(l).is_some()) {
+        return Ok(Err(vec![VerifyError::new(
+            "NOT_DUAL_PLANE",
+            "当前拓扑非双平面，RC 流需要双平面冗余路径。".to_string(),
+            None,
+        )]));
+    }
+    match derive_redundant_routes(talker, listener, &nodes, &links) {
+        Ok((a, b)) => Ok(Ok(serde_json::json!({
+            "a": { "node_path": a.node_path, "link_seqs": a.link_seqs },
+            "b": { "node_path": b.node_path, "link_seqs": b.link_seqs },
+        })
+        .to_string())),
+        Err(errs) => Ok(Err(errs
+            .into_iter()
+            .map(|e| map_route_error(e, talker, listener))
+            .collect())),
+    }
+}
+
+/// 路由层错误 → 录入闸用户语言。双平面前置判断之后 `NO_ROUTE` 只剩一种成因——
+/// 节点只挂了单平面（某平面子图里不可达），按「未接入双平面」改写文案；其余码原样透传。
+fn map_route_error(
+    e: crate::topology_verify::VerifyError,
+    talker: &str,
+    listener: &str,
+) -> VerifyError {
+    if e.code == "NO_ROUTE" {
+        return VerifyError::new(
+            "NO_ROUTE",
+            format!(
+                "从 {talker} 到 {listener} 有平面不可达：节点未接入双平面（RC 流要求发送/接收节点同时接入平面 A 与 B）。"
+            ),
+            e.node_ref,
+        );
+    }
+    VerifyError::new(&e.code, e.message_zh, e.node_ref)
+}
+
+/// 读路由推导所需拓扑结构列 → `VerifyNode`/`VerifyLink`（与 `inet_sim_command::load_topology`
+/// 同口径；此处独立查询以保持本模块 `sqlx::Error` 错误类型）。
+async fn load_route_topology(
+    pool: &Pool<Sqlite>,
+    session_id: &str,
+) -> Result<(Vec<VerifyNode>, Vec<VerifyLink>), sqlx::Error> {
+    let nodes = sqlx::query(
+        "SELECT mid, name, node_type, queue_count FROM topology_nodes WHERE session_id = ? ORDER BY insert_order, mid",
+    )
+    .bind(session_id)
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .map(|r| VerifyNode {
+        mid: r.get("mid"),
+        name: r.get("name"),
+        node_type: r.get("node_type"),
+        queue_count: r.get("queue_count"),
+    })
+    .collect();
+    let links = sqlx::query(
+        "SELECT link_seq, src_node, dst_node, src_port, dst_port, speed, styles_json FROM topology_links WHERE session_id = ? ORDER BY link_seq",
+    )
+    .bind(session_id)
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .map(|r| VerifyLink {
+        link_seq: r.get("link_seq"),
+        src_node: r.get("src_node"),
+        dst_node: r.get("dst_node"),
+        src_port: r.get("src_port"),
+        dst_port: r.get("dst_port"),
+        speed: r.get("speed"),
+        styles_json: r.get("styles_json"),
+    })
+    .collect();
+    Ok((nodes, links))
 }
 
 #[cfg(test)]
@@ -226,6 +359,46 @@ mod tests {
         .execute(pool)
         .await
         .unwrap();
+    }
+
+    /// 插入链路（plane=None 为单平面链路；Some 写 styles_json.plane，双平面 fixture 用）。
+    async fn add_link(
+        pool: &Pool<Sqlite>,
+        seq: i64,
+        src: &str,
+        sp: i64,
+        dst: &str,
+        dp: i64,
+        plane: Option<&str>,
+    ) {
+        let styles = match plane {
+            Some(p) => format!(r#"{{"plane":"{p}"}}"#),
+            None => "{}".to_string(),
+        };
+        sqlx::query(
+            "INSERT INTO topology_links (session_id, link_seq, name, src_node, dst_node, src_port, dst_port, speed, styles_json) \
+             VALUES ('s1', ?, NULL, ?, ?, ?, ?, 1000, ?)",
+        )
+        .bind(seq)
+        .bind(src)
+        .bind(dst)
+        .bind(sp)
+        .bind(dp)
+        .bind(styles)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// 双平面 fixture：0→1 经平面 A（0-2-1，seq 0/1）与平面 B（0-3-1，seq 2/3）。
+    async fn seed_dual_plane(pool: &Pool<Sqlite>) {
+        for mid in ["0", "1", "2", "3"] {
+            add_node(pool, mid).await;
+        }
+        add_link(pool, 0, "0", 0, "2", 0, Some("A")).await;
+        add_link(pool, 1, "2", 1, "1", 0, Some("A")).await;
+        add_link(pool, 2, "0", 1, "3", 0, Some("B")).await;
+        add_link(pool, 3, "3", 1, "1", 1, Some("B")).await;
     }
 
     async fn insert_existing_stream(pool: &Pool<Sqlite>, seq: i64, class: &str, pcp: i64) {
@@ -339,6 +512,88 @@ mod tests {
             codes(&errs).contains(&"INVALID_CLASS"),
             "{:?}",
             codes(&errs)
+        );
+    }
+
+    /// R1/②：class↔pcp 固定映射，ST@pcp5 / BE@pcp3 → PCP_CLASS_MISMATCH。
+    #[tokio::test]
+    async fn wrong_pcp_for_class_rejected_mismatch() {
+        let pool = fresh_pool().await;
+        add_node(&pool, "0").await;
+        add_node(&pool, "1").await;
+        let errs = verify_flow(&pool, "s1", &st(5)).await.unwrap();
+        assert!(
+            codes(&errs).contains(&"PCP_CLASS_MISMATCH"),
+            "{:?}",
+            codes(&errs)
+        );
+        let mut be = st(3);
+        be.class = "BE".to_string();
+        let errs = verify_flow(&pool, "s1", &be).await.unwrap();
+        assert!(
+            codes(&errs).contains(&"PCP_CLASS_MISMATCH"),
+            "{:?}",
+            codes(&errs)
+        );
+    }
+
+    /// R1/R2：双平面拓扑上 RC@pcp6 过闸（A/B 路径可推导且不相交）。
+    #[tokio::test]
+    async fn rc_at_pcp6_on_dual_plane_passes() {
+        let pool = fresh_pool().await;
+        seed_dual_plane(&pool).await;
+        let mut rc = st(6);
+        rc.class = "RC".to_string();
+        let errs = verify_flow(&pool, "s1", &rc).await.unwrap();
+        assert!(errs.is_empty(), "应无违规: {:?}", codes(&errs));
+    }
+
+    /// Covers AE3. 线性拓扑（链路无 plane 键）录 RC → NOT_DUAL_PLANE 响亮说明需双平面，
+    /// 不得掉进「平面 A 不可达」（NO_ROUTE）的误导报错。
+    #[tokio::test]
+    async fn rc_on_non_dual_plane_topology_rejected_not_dual_plane() {
+        let pool = fresh_pool().await;
+        add_node(&pool, "0").await;
+        add_node(&pool, "1").await;
+        add_link(&pool, 0, "0", 0, "1", 0, None).await;
+        let mut rc = st(6);
+        rc.class = "RC".to_string();
+        let errs = verify_flow(&pool, "s1", &rc).await.unwrap();
+        assert!(
+            codes(&errs).contains(&"NOT_DUAL_PLANE"),
+            "{:?}",
+            codes(&errs)
+        );
+        assert!(!codes(&errs).contains(&"NO_ROUTE"), "{:?}", codes(&errs));
+        let msg = &errs
+            .iter()
+            .find(|e| e.code == "NOT_DUAL_PLANE")
+            .unwrap()
+            .message_zh;
+        assert!(msg.contains("非双平面"), "{msg}");
+        assert!(!msg.contains("平面 A"), "不得误导为平面不可达: {msg}");
+    }
+
+    /// R2/⑤：talker 只挂平面 A（平面 B 上不可达）→ NO_ROUTE 文案映射为「未接入双平面」。
+    #[tokio::test]
+    async fn rc_talker_on_single_plane_reports_not_attached_dual_plane() {
+        let pool = fresh_pool().await;
+        for mid in ["0", "1", "2", "3"] {
+            add_node(&pool, mid).await;
+        }
+        // 平面 A：0-2-1；平面 B 只有 3-1（talker 0 未接入平面 B）。
+        add_link(&pool, 0, "0", 0, "2", 0, Some("A")).await;
+        add_link(&pool, 1, "2", 1, "1", 0, Some("A")).await;
+        add_link(&pool, 2, "3", 1, "1", 1, Some("B")).await;
+        let mut rc = st(6);
+        rc.class = "RC".to_string();
+        let errs = verify_flow(&pool, "s1", &rc).await.unwrap();
+        let no_route = errs.iter().find(|e| e.code == "NO_ROUTE");
+        assert!(no_route.is_some(), "{:?}", codes(&errs));
+        assert!(
+            no_route.unwrap().message_zh.contains("未接入双平面"),
+            "{}",
+            no_route.unwrap().message_zh
         );
     }
 

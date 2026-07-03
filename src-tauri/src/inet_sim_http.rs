@@ -17,6 +17,9 @@ use crate::inet_remote::{InetBundle, RemoteError, RemoteRunner, SimRunOutcome};
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// 轮询总上限（opp_env 首跑编译数分钟，给足；服务端单条命令另有 CMD_TIMEOUT 兜底）。
 const DEFAULT_POLL_TIMEOUT: Duration = Duration::from_secs(1800);
+/// 服务端 409 单运行锁文案（submit 撞并发时）。`RemoteError` 单变体（Unreachable），U6 断链
+/// 轮凭此文案把该错归类 busy（环境冲突，不与验证 FAIL/不可达混淆）；除此形态无从区分。
+pub(crate) const BUSY_MESSAGE: &str = "软仿服务忙（已有任务在运行）";
 
 /// 服务 result 端点回的结果（snake_case 与服务端一致，直接 deser）。
 #[derive(Debug, Clone, Deserialize)]
@@ -126,7 +129,7 @@ impl InetSimHttpClient for ReqwestInetSimClient {
             let status = resp.status();
             let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
             if status.as_u16() == 409 {
-                return Err("软仿服务忙（已有任务在运行）".to_string());
+                return Err(BUSY_MESSAGE.to_string());
             }
             if !status.is_success() {
                 return Err(format!(
@@ -218,7 +221,7 @@ impl InetSimPlanClient for ReqwestInetSimClient {
             let status = resp.status();
             let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
             if status.as_u16() == 409 {
-                return Err("软仿服务忙（已有任务在运行）".to_string());
+                return Err(BUSY_MESSAGE.to_string());
             }
             if !status.is_success() {
                 return Err(format!(
