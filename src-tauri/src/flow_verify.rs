@@ -218,10 +218,12 @@ pub async fn verify_flow(
 
     // 8. RC 双平面前置 + A/B 路径可推导（R2/AE3）。仅当 talker/listener 都在拓扑时跑，
     //    避免与第 6 步重复报节点缺失。
-    if s.class == "RC" && node_mids.contains(&s.talker) && node_mids.contains(&s.listener) {
-        if let Err(mut es) = derive_rc_paths(pool, session_id, &s.talker, &s.listener).await? {
-            errors.append(&mut es);
-        }
+    if s.class == "RC"
+        && node_mids.contains(&s.talker)
+        && node_mids.contains(&s.listener)
+        && let Err(mut es) = derive_rc_paths(pool, session_id, &s.talker, &s.listener).await?
+    {
+        errors.append(&mut es);
     }
 
     Ok(errors)
