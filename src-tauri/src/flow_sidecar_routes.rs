@@ -18,7 +18,7 @@ use serde_json::{Value, json};
 use sqlx::{Row, SqliteConnection};
 use std::sync::Arc;
 
-use crate::flow_verify::{StreamInput, VerifyError, verify_flow};
+use crate::flow_verify::{StreamInput, VerifyError, derive_rc_paths, verify_flow};
 use crate::topology_sidecar_routes::{RouteState, ok_summary, require_session, structured_error};
 
 /// push mutation(domain="flow") + emit，组装成功信封（镜像 timesync push_and_summary）。
@@ -159,7 +159,7 @@ pub async fn add_stream(
     State(state): State<Arc<RouteState>>,
     Json(req): Json<AddStreamRequest>,
 ) -> Response {
-    let (session_id, input) = req.into_input();
+    let (session_id, mut input) = req.into_input();
     if let Err(resp) = require_session(&state.pool, &session_id).await {
         return resp;
     }
@@ -178,6 +178,27 @@ pub async fn add_stream(
     };
     if !errors.is_empty() {
         return fail_with_flow_errors(&errors);
+    }
+
+    // RC 流：录入时推导 A/B 双平面路径落预留槽（R2；预存值仅凭证，规划/验证期重推导，KTD6）。
+    // redundant/paths 由系统推导，覆盖请求侧任何传入值；ST/BE 不变（redundant=0 / paths NULL）。
+    // 校验闸已跑过同一推导，此处 Err 分支纯防御。
+    if input.class == "RC" {
+        match derive_rc_paths(&state.pool, &session_id, &input.talker, &input.listener).await {
+            Ok(Ok(paths)) => {
+                input.redundant = 1;
+                input.paths = Some(paths);
+            }
+            Ok(Err(errors)) => return fail_with_flow_errors(&errors),
+            Err(e) => {
+                return structured_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "DATABASE_ERROR",
+                    &e.to_string(),
+                    true,
+                );
+            }
+        }
     }
 
     let mut tx = match state.pool.begin().await {
@@ -448,6 +469,46 @@ mod tests {
         .unwrap();
     }
 
+    /// 插入链路（plane=None 为单平面链路；Some 写 styles_json.plane，双平面 fixture 用）。
+    async fn add_link(
+        pool: &sqlx::Pool<sqlx::Sqlite>,
+        seq: i64,
+        src: &str,
+        sp: i64,
+        dst: &str,
+        dp: i64,
+        plane: Option<&str>,
+    ) {
+        let styles = match plane {
+            Some(p) => format!(r#"{{"plane":"{p}"}}"#),
+            None => "{}".to_string(),
+        };
+        sqlx::query(
+            "INSERT INTO topology_links (session_id, link_seq, name, src_node, dst_node, src_port, dst_port, speed, styles_json) \
+             VALUES ('s1', ?, NULL, ?, ?, ?, ?, 1000, ?)",
+        )
+        .bind(seq)
+        .bind(src)
+        .bind(dst)
+        .bind(sp)
+        .bind(dp)
+        .bind(styles)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// 双平面 fixture：0→1 经平面 A（0-2-1，seq 0/1）与平面 B（0-3-1，seq 2/3）。
+    async fn seed_dual_plane(pool: &sqlx::Pool<sqlx::Sqlite>) {
+        for mid in ["0", "1", "2", "3"] {
+            add_node(pool, mid).await;
+        }
+        add_link(pool, 0, "0", 0, "2", 0, Some("A")).await;
+        add_link(pool, 1, "2", 1, "1", 0, Some("A")).await;
+        add_link(pool, 2, "0", 1, "3", 0, Some("B")).await;
+        add_link(pool, 3, "3", 1, "1", 1, Some("B")).await;
+    }
+
     async fn post(
         router: axum::Router,
         token: &SecretToken,
@@ -542,32 +603,147 @@ mod tests {
         });
     }
 
-    /// RC 流带 redundant=1 + paths JSON 可落可读；ST/BE 流 redundant=0/paths=NULL。
+    /// R1/R2/R3/①：双平面拓扑上 ST@pcp7 / RC@pcp6 / BE@pcp0 各录入成功；
+    /// 断言 redundant/paths **列值本身**——ST/BE redundant=0、paths NULL，
+    /// RC redundant=1、paths JSON 的 a/b node_path 与 link_seqs 逐项匹配（非 blob 整体比对）。
     #[test]
-    fn rc_stream_redundant_and_paths_round_trip() {
+    fn three_classes_persist_redundant_and_paths_columns() {
         tauri::async_runtime::block_on(async {
             let (pool, buf) = test_state().await;
-            add_node(&pool, "0").await;
-            add_node(&pool, "1").await;
+            seed_dual_plane(&pool).await;
             let (router, token) = build_test_router_with_pool(pool.clone(), buf.clone()).await;
 
-            let body = json!({
-                "sessionId": "s1", "class": "RC", "pcp": 6, "periodUs": 500,
-                "frameBytes": 512, "count": 100, "talker": "0", "listener": "1",
-                "redundant": 1, "paths": "{\"A\":[\"0\",\"1\"],\"B\":[\"0\",\"1\"]}"
-            });
+            for (class, pcp) in [("ST", 7), ("RC", 6), ("BE", 0)] {
+                let mut body = valid_st_body();
+                body["class"] = json!(class);
+                body["pcp"] = json!(pcp);
+                let (status, parsed) =
+                    post(router.clone(), &token, "/db/flow/add_stream", body).await;
+                assert_eq!(status, StatusCode::OK);
+                assert_eq!(parsed["ok"], true, "{class}: {parsed:?}");
+            }
+
+            let rows: Vec<(i64, String, i64, Option<String>)> = sqlx::query_as(
+                "SELECT stream_seq, class, redundant, paths FROM topology_streams \
+                 WHERE session_id='s1' ORDER BY stream_seq",
+            )
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+            assert_eq!(rows.len(), 3);
+            assert_eq!((rows[0].1.as_str(), rows[0].2), ("ST", 0));
+            assert!(rows[0].3.is_none(), "ST paths 应为 NULL");
+            assert_eq!((rows[2].1.as_str(), rows[2].2), ("BE", 0));
+            assert!(rows[2].3.is_none(), "BE paths 应为 NULL");
+
+            assert_eq!((rows[1].1.as_str(), rows[1].2), ("RC", 1));
+            let paths: serde_json::Value =
+                serde_json::from_str(rows[1].3.as_deref().unwrap()).unwrap();
+            assert_eq!(paths["a"]["node_path"], json!(["0", "2", "1"]));
+            assert_eq!(paths["a"]["link_seqs"], json!([0, 1]));
+            assert_eq!(paths["b"]["node_path"], json!(["0", "3", "1"]));
+            assert_eq!(paths["b"]["link_seqs"], json!([2, 3]));
+        });
+    }
+
+    /// Covers AE3. 线性拓扑（链路无 plane 键）录 RC → NOT_DUAL_PLANE 拒绝、不落表。
+    #[test]
+    fn rc_on_linear_topology_rejected_not_dual_plane() {
+        tauri::async_runtime::block_on(async {
+            let (pool, buf) = test_state().await;
+            // 5 跳线性 0-1-2-3-4-5，无 plane 键。
+            for mid in ["0", "1", "2", "3", "4", "5"] {
+                add_node(&pool, mid).await;
+            }
+            for (seq, (src, dst)) in [("0", "1"), ("1", "2"), ("2", "3"), ("3", "4"), ("4", "5")]
+                .iter()
+                .enumerate()
+            {
+                add_link(&pool, seq as i64, src, 1, dst, 0, None).await;
+            }
+            let (router, token) = build_test_router_with_pool(pool.clone(), buf.clone()).await;
+
+            let mut body = valid_st_body();
+            body["class"] = json!("RC");
+            body["pcp"] = json!(6);
+            body["listener"] = json!("5");
+            let (status, parsed) = post(router, &token, "/db/flow/add_stream", body).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(parsed["ok"], false, "{parsed:?}");
+            assert_eq!(parsed["code"], "NOT_DUAL_PLANE");
+
+            let count: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM topology_streams WHERE session_id='s1'")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(count, 0, "被拒的流不落表");
+        });
+    }
+
+    /// R2/④：双平面（每平面两跳）RC 录入 → paths 两平面路径节点/链路互不相交、列非 NULL。
+    #[test]
+    fn rc_paths_disjoint_across_planes() {
+        tauri::async_runtime::block_on(async {
+            let (pool, buf) = test_state().await;
+            // 平面 A：0-2-3-1；平面 B：0-4-5-1。
+            for mid in ["0", "1", "2", "3", "4", "5"] {
+                add_node(&pool, mid).await;
+            }
+            add_link(&pool, 0, "0", 0, "2", 0, Some("A")).await;
+            add_link(&pool, 1, "2", 1, "3", 0, Some("A")).await;
+            add_link(&pool, 2, "3", 1, "1", 0, Some("A")).await;
+            add_link(&pool, 3, "0", 1, "4", 0, Some("B")).await;
+            add_link(&pool, 4, "4", 1, "5", 0, Some("B")).await;
+            add_link(&pool, 5, "5", 1, "1", 1, Some("B")).await;
+            let (router, token) = build_test_router_with_pool(pool.clone(), buf.clone()).await;
+
+            let mut body = valid_st_body();
+            body["class"] = json!("RC");
+            body["pcp"] = json!(6);
             let (status, parsed) = post(router, &token, "/db/flow/add_stream", body).await;
             assert_eq!(status, StatusCode::OK);
             assert_eq!(parsed["ok"], true, "{parsed:?}");
 
-            let (redundant, paths): (i64, Option<String>) = sqlx::query_as(
-                "SELECT redundant, paths FROM topology_streams WHERE session_id='s1' AND stream_seq=0",
+            let paths_col: Option<String> = sqlx::query_scalar(
+                "SELECT paths FROM topology_streams WHERE session_id='s1' AND stream_seq=0",
             )
             .fetch_one(&pool)
             .await
             .unwrap();
-            assert_eq!(redundant, 1);
-            assert!(paths.unwrap().contains("\"A\""));
+            let paths: serde_json::Value =
+                serde_json::from_str(paths_col.as_deref().expect("paths 列非 NULL")).unwrap();
+
+            let node_set = |key: &str| -> std::collections::HashSet<String> {
+                paths[key]["node_path"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|v| v.as_str().unwrap().to_string())
+                    .collect()
+            };
+            let a_nodes = node_set("a");
+            let b_nodes = node_set("b");
+            let shared: Vec<_> = a_nodes.intersection(&b_nodes).collect();
+            let endpoints: std::collections::HashSet<String> =
+                ["0".to_string(), "1".to_string()].into();
+            assert!(
+                shared.iter().all(|n| endpoints.contains(*n)),
+                "中间节点不得相交: {shared:?}"
+            );
+
+            let link_set = |key: &str| -> std::collections::HashSet<i64> {
+                paths[key]["link_seqs"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|v| v.as_i64().unwrap())
+                    .collect()
+            };
+            assert!(
+                link_set("a").is_disjoint(&link_set("b")),
+                "链路不得相交: {paths}"
+            );
         });
     }
 
