@@ -267,6 +267,25 @@ describe("FlowPanel", () => {
     expect(screen.getByText("达标")).toBeTruthy();
   });
 
+  it("U8/R15：无 rounds 结果带顶层 gptpDiag → 渲染一行诊断（纯 ST/纯 BE 会话也有）", () => {
+    const withDiag = verifyResult({
+      gptpDiag: {
+        convergedNodes: 2,
+        totalNodes: 2,
+        thresholdSummary: "1000ns",
+        worstNode: "sw1",
+        worstOffsetNs: 500,
+      },
+    });
+    render(<FlowPanel {...baseProps({ verifyState: { status: "done", result: withDiag } })} />);
+    expect(screen.getByText("gPTP 收敛：2/2 节点 ≤ 阈值（1000ns），最差 500 ns @sw1")).toBeTruthy();
+    // 顶层键缺席（旧结果）→ 不渲染诊断行（不臆造）。
+    render(
+      <FlowPanel {...baseProps({ verifyState: { status: "done", result: verifyResult() } })} />,
+    );
+    expect(screen.getAllByText(/gPTP 收敛/).length).toBe(1);
+  });
+
   it("会话切换后迟到结果被丢弃", async () => {
     let resolveFn: (r: PlanResult) => void = () => {};
     const planTas = vi.fn(() => new Promise<PlanResult>((res) => (resolveFn = res)));

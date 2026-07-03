@@ -191,7 +191,8 @@ function VerifyResultArea({ verifyState }: { verifyState: VerifyUiState }) {
     );
   }
 
-  // 无 rounds（纯 ST/ST+BE 单轮老结果）：渲染现状不变。
+  // 无 rounds（纯 ST/ST+BE/纯 BE 单轮结果）：渲染现状不变 + 顶层 gPTP 诊断行（R15 收尾，
+  // 只报告不判——有 rounds 时诊断行随轮小节渲染，此处不重复）。
   // R16：空/短/失败绝不渲染绿——仅有逐流行时才出表。
   const showTable = showVerifyTable(result);
   const allPass = verifyAllPass(result);
@@ -229,6 +230,7 @@ function VerifyResultArea({ verifyState }: { verifyState: VerifyUiState }) {
           </tbody>
         </table>
       )}
+      {result.gptpDiag && <p className="flow-gptp-diag mono">{gptpDiagLine(result.gptpDiag)}</p>}
     </div>
   );
 }

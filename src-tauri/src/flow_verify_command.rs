@@ -134,6 +134,11 @@ pub struct VerifyTasResult {
     /// （最差轮可见，KTD3）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rounds: Option<Vec<VerifyRound>>,
+    /// 顶层 gPTP 收敛诊断（R15 收尾，U8）：恒为健康轮诊断——有 rounds 时与健康轮的
+    /// gptpDiag 同值；无 rounds（纯 ST / ST+BE / 纯 BE 会话）时从该次运行 CSV 算，
+    /// 使无 RC 会话也有诊断行。取不到时钟向量 → None（缺席，不臆造）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gptp_diag: Option<GptpDiag>,
 }
 
 impl VerifyTasResult {
@@ -145,6 +150,7 @@ impl VerifyTasResult {
             overall: overall.to_string(),
             message,
             rounds: None,
+            gptp_diag: None,
         }
     }
 }
@@ -904,9 +910,13 @@ pub async fn verify_tas_inner<R: RemoteRunner>(
                 per_stream: h_per.clone(),
                 message: None,
                 rounds: None,
+                gptp_diag: None,
             }
         }
     };
+    // R15 收尾（U8）：顶层诊断恒取健康轮——无 rounds 会话（纯 ST/ST+BE/纯 BE）由此也有
+    // 诊断行；有 rounds 时与下方健康轮 gptpDiag 同值。错误轮 h_diag 本就是 None。
+    result.gptp_diag = h_diag.clone();
 
     let Some((t_break_ns, planned)) = fault_plan else {
         return Ok(result); // 无 RC：单轮零变化（rounds=None，序列化与现状逐字一致）。
@@ -1948,13 +1958,43 @@ mod tests {
             assert_eq!(runner.inis().len(), 1, "无 RC 只跑一轮");
             let json = serde_json::to_string(&r).unwrap();
             assert!(!json.contains("rounds"), "{json}");
-            // U7 形状契约：无 rounds 老结果仅 additive 多 class/judged 两个恒有键；可选键
-            // （deliveryRatio/note/gptpDiag）在纯 ST 判定结果里一律缺席，其余与 U6 前一致。
+            // U7 形状契约（R15 收尾更新，U8）：无 rounds 老结果 additive 多 class/judged 恒有键；
+            // deliveryRatio/note 在纯 ST 判定结果里缺席。gptpDiag 现为**顶层可选键**（R15）：
+            // 该次运行 CSV 无时钟向量 → 缺席（不臆造）；有向量时恒填充（下个 case + 矩阵测试锁定）。
             assert!(json.contains("\"class\":\"ST\""), "{json}");
             assert!(json.contains("\"judged\":true"), "{json}");
             assert!(!json.contains("deliveryRatio"), "{json}");
             assert!(!json.contains("\"note\""), "{json}");
             assert!(!json.contains("gptpDiag"), "{json}");
+        });
+    }
+
+    /// Covers R15 收尾（U8）：无 rounds 会话（纯 ST）CSV 带时钟向量 → 顶层 gptpDiag 恒填充
+    /// （纯 ST/纯 BE 会话由此也有诊断行）；rounds 仍缺席。
+    #[test]
+    fn no_rounds_result_carries_top_level_gptp_diag() {
+        tauri::async_runtime::block_on(async {
+            let pool = fresh_pool().await;
+            seed(&pool).await; // 纯 ST，GM=es1(mid1)。
+            let mut csv = format!(
+                "{}TsnAgentFlowTasNetwork.es2.app[0].sink,packetLifeTime:vector,0 0 0,0.0001 0.00012 0.00011\nTsnAgentFlowTasNetwork.es2.app[0].sink,packetJitter:vector,0 0 0,0.0000002 0.0000003 0.0000001\n",
+                header()
+            );
+            csv.push_str(clock_csv_rows_gm_es1());
+            let runner = ScriptedRunner::new(vec![Ok(outcome(Some(&csv)))]);
+            let r = verify_tas_inner(&pool, "s1", &runner).await.unwrap();
+            assert_eq!(r.status, "ok", "{r:?}");
+            assert!(r.rounds.is_none(), "{r:?}");
+            let d = r
+                .gptp_diag
+                .as_ref()
+                .expect("R15：无 rounds 也应有顶层诊断行");
+            assert_eq!(d.total_nodes, 2, "{d:?}");
+            assert_eq!(d.converged_nodes, 1, "es2 1500ns > 缺省 1000ns：{d:?}");
+            assert_eq!(d.worst_node, "es2", "{d:?}");
+            let json = serde_json::to_string(&r).unwrap();
+            assert!(json.contains("\"gptpDiag\""), "{json}");
+            assert!(!json.contains("rounds"), "{json}");
         });
     }
 
@@ -1998,6 +2038,14 @@ mod tests {
                     worst_offset_ns: 1500.0,
                 }),
             }]),
+            // R15 收尾：顶层诊断键与轮内同名（camelCase gptpDiag），serde 断言共用下方检查。
+            gptp_diag: Some(GptpDiag {
+                converged_nodes: 3,
+                total_nodes: 4,
+                threshold_summary: "1000ns".into(),
+                worst_node: "sw2".into(),
+                worst_offset_ns: 1500.0,
+            }),
         };
         let json = serde_json::to_string(&r).unwrap();
         assert!(json.contains("\"rounds\""), "{json}");
@@ -2381,6 +2429,14 @@ mod tests {
         });
     }
 
+    /// 线性 seed（GM=es1）版 clock 序列：sw1=500ns 收敛、es2=1500ns 未收敛（缺省阈值 1000ns）。
+    /// R15 顶层诊断行（无 rounds 会话）夹具用。
+    fn clock_csv_rows_gm_es1() -> &'static str {
+        "TsnAgentFlowTasNetwork.es1.clock,timeChanged:vector,0 1,0 1\n\
+         TsnAgentFlowTasNetwork.sw1.clock,timeChanged:vector,0 0.6 1,0 0.6000005 1.0000005\n\
+         TsnAgentFlowTasNetwork.es2.clock,timeChanged:vector,0 0.6 1,0 0.6000015 1.0000015\n"
+    }
+
     /// GM sw1 + 三个 clock 序列（sw2=500ns、es2=1500ns、esb1=100ns，稳态窗为 sim 后半程）。
     /// esb1 是双宿拆分内嵌桥——不在 node_ned_names，单列计数、阈值走缺省（最小惊讶口径）。
     fn clock_csv_rows() -> &'static str {
@@ -2417,6 +2473,8 @@ mod tests {
             // 故障轮照实报告（KTD2：断链下游劣化属预期，诊断行不缺席）。
             assert!(rounds[1].gptp_diag.is_some(), "{rounds:?}");
             assert!(rounds[2].gptp_diag.is_some(), "{rounds:?}");
+            // R15 收尾（U8）：有 rounds 时顶层诊断与健康轮同值。
+            assert_eq!(r.gptp_diag, rounds[0].gptp_diag, "{r:?}");
         });
     }
 
@@ -2455,5 +2513,365 @@ mod tests {
                 "无 clock 向量不臆造诊断行：{rounds:?}"
             );
         });
+    }
+
+    // ---------- U8：六种流组合矩阵夹具（plan→verify 管线，HTD 矩阵表逐行冻结回归基线）----------
+    //
+    // 每行一个锚点测试，锁四面：①进 Z3 的流集合（CapturingPlan 捕获 synth ini）②plan 产物
+    // （GCL 落库 或 no_gating 清表 + 求解器不被调）③verify 轮次数与轮名 ④各类判据生效面
+    // （judged 标志按类分叉）。近似覆盖的既有测试不重复造——矩阵行测试是显式命名的锚点，
+    // 细粒度形态（互补关窗参数/FRER trees 字面/断点选择）仍由上方各单元测试锁定。
+    mod matrix {
+        use super::*;
+
+        /// 捕获 synth ini 的 plan 客户端（断言「进 Z3 的流集合」）。ini 为 None = 求解器
+        /// 未被调用（无 ST 行的 no_gating 早退面）。
+        struct CapturingPlan {
+            sca: String,
+            ini: std::sync::Mutex<Option<String>>,
+        }
+        impl crate::inet_sim_http::InetSimPlanClient for CapturingPlan {
+            fn plan_gcl(
+                &self,
+                _base: &str,
+                bundle: &crate::inet_remote::InetBundle,
+            ) -> Result<crate::inet_sim_http::HttpPlanResult, String> {
+                *self.ini.lock().unwrap() = Some(bundle.omnetpp_ini.clone());
+                Ok(crate::inet_sim_http::HttpPlanResult {
+                    exit_code: 0,
+                    output_tail: "ok".into(),
+                    sca_gcl: Some(self.sca.clone()),
+                    solver: Some("Z3".into()),
+                })
+            }
+        }
+
+        /// 回 sw1 eth[1] gate7（ST 门）.sca 的捕获客户端——线性与双平面 seed 里 sw1 都是
+        /// ST 平面 A 路径上的交换机（ned sw1 → mid 0）。
+        fn plan_gate7() -> CapturingPlan {
+            CapturingPlan {
+                sca: "par N.sw1.eth[1].macLayer.queue.transmissionGate[7] initiallyOpen true\npar N.sw1.eth[1].macLayer.queue.transmissionGate[7] offset 0s\npar N.sw1.eth[1].macLayer.queue.transmissionGate[7] durations \"[300us, 700us]\"\n".into(),
+                ini: std::sync::Mutex::new(None),
+            }
+        }
+
+        async fn flow_plans_count(pool: &sqlx::Pool<sqlx::Sqlite>) -> i64 {
+            sqlx::query_scalar("SELECT COUNT(*) FROM flow_plans WHERE session_id='s1'")
+                .fetch_one(pool)
+                .await
+                .unwrap()
+        }
+
+        async fn clear_flow_plans(pool: &sqlx::Pool<sqlx::Sqlite>) {
+            sqlx::query("DELETE FROM flow_plans WHERE session_id='s1'")
+                .execute(pool)
+                .await
+                .unwrap();
+        }
+
+        /// 矩阵行 1「纯 ST」：进 Z3=ST；plan 产物=GCL 落库；verify=单轮健康（无 rounds）；
+        /// 判据=ST 三项（judged）。pin ini 无 FRER / 无互补关窗（纯 ST 位级基线面）。
+        #[test]
+        fn matrix_pure_st_single_round_st_criteria() {
+            tauri::async_runtime::block_on(async {
+                let pool = fresh_pool().await;
+                seed(&pool).await;
+                clear_flow_plans(&pool).await; // 真管线：GCL 由 plan 落库。
+                let plan = plan_gate7();
+                let pr = crate::flow_plan_command::plan_tas_inner(&pool, "s1", &plan, "http://x")
+                    .await
+                    .unwrap();
+                assert_eq!(pr.status, "ok", "{pr:?}");
+                let synth = plan.ini.lock().unwrap().clone().expect("ST 应进 Z3");
+                assert_eq!(synth.matches("UdpSourceApp").count(), 1, "{synth}");
+                assert!(synth.contains("pcp: 7"), "{synth}");
+                assert_eq!(flow_plans_count(&pool).await, 1, "plan 产物=GCL 落库");
+
+                let mut csv = healthy_csv("TsnAgentFlowTasNetwork.es2.app[0].sink", 3);
+                csv.push_str(clock_csv_rows_gm_es1());
+                let runner = ScriptedRunner::new(vec![Ok(outcome(Some(&csv)))]);
+                let r = verify_tas_inner(&pool, "s1", &runner).await.unwrap();
+                assert_eq!(r.status, "ok", "{r:?}");
+                assert!(r.rounds.is_none(), "纯 ST：单轮健康、无 rounds：{r:?}");
+                assert_eq!(runner.inis().len(), 1, "只提交一轮");
+                assert_eq!(r.per_stream.len(), 1);
+                assert_eq!(r.per_stream[0].class, "ST");
+                assert!(r.per_stream[0].judged && r.per_stream[0].pass, "{r:?}");
+                assert!(
+                    r.gptp_diag.is_some(),
+                    "R15：纯 ST 会话也有顶层诊断行：{r:?}"
+                );
+                let pin = &runner.inis()[0];
+                assert!(pin.contains("transmissionGate[7]"), "{pin}");
+                assert!(!pin.contains("hasStreamRedundancy"), "纯 ST 无 FRER：{pin}");
+                assert!(
+                    !pin.contains("transmissionGate[0]"),
+                    "纯 ST 不生成互补关窗（KTD5 基线）：{pin}"
+                );
+            });
+        }
+
+        /// 矩阵行 2「ST+BE」：进 Z3=仅 ST（BE 的 app/端口不进 synth）；plan 产物=GCL；
+        /// verify=单轮健康；判据=ST 三项 + BE 连通（都 judged，BE 带送达率）。pin ini
+        /// 带互补关窗（BE 保护面）。
+        #[test]
+        fn matrix_st_be_single_round_complement_and_be_connectivity() {
+            tauri::async_runtime::block_on(async {
+                let pool = fresh_pool().await;
+                seed(&pool).await;
+                sqlx::query("INSERT INTO topology_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener) VALUES ('s1', 1, 'BE', 0, 500, 512, 3, '1', '2')")
+                    .execute(&pool).await.unwrap();
+                clear_flow_plans(&pool).await;
+                let plan = plan_gate7();
+                let pr = crate::flow_plan_command::plan_tas_inner(&pool, "s1", &plan, "http://x")
+                    .await
+                    .unwrap();
+                assert_eq!(pr.status, "ok", "{pr:?}");
+                let synth = plan.ini.lock().unwrap().clone().expect("ST 应进 Z3");
+                assert_eq!(
+                    synth.matches("UdpSourceApp").count(),
+                    1,
+                    "只有 ST 进 Z3：{synth}"
+                );
+                assert!(!synth.contains("pcp: 0"), "BE 不得进 synth bundle：{synth}");
+                assert_eq!(flow_plans_count(&pool).await, 1);
+
+                // ST=app[0]、BE=app[1]（specs 按 stream_seq 序）。
+                let mut csv = healthy_csv("TsnAgentFlowTasNetwork.es2.app[0].sink", 3);
+                let be = healthy_csv("TsnAgentFlowTasNetwork.es2.app[1].sink", 3);
+                csv.push_str(be.strip_prefix(&header()).unwrap());
+                let runner = ScriptedRunner::new(vec![Ok(outcome(Some(&csv)))]);
+                let r = verify_tas_inner(&pool, "s1", &runner).await.unwrap();
+                assert_eq!(r.status, "ok", "{r:?}");
+                assert!(r.rounds.is_none(), "无 RC：单轮：{r:?}");
+                assert!(r.per_stream.iter().all(|v| v.judged && v.pass), "{r:?}");
+                let be = r.per_stream.iter().find(|v| v.class == "BE").unwrap();
+                assert_eq!(be.delivery_ratio, Some(0.75), "收 3/实发 4：{r:?}");
+                let pin = &runner.inis()[0];
+                assert!(
+                    pin.contains("transmissionGate[0].durations"),
+                    "混流生成互补关窗（R8）：{pin}"
+                );
+                assert!(!pin.contains("hasStreamRedundancy"), "无 RC 无 FRER：{pin}");
+            });
+        }
+
+        /// 矩阵行 3「ST+RC」：进 Z3=仅 ST；plan 产物=GCL；verify=健康+断A+断B 三轮；
+        /// 判据=ST 三项（仅健康轮判）+ RC 两态（健康与故障轮都判）。
+        #[test]
+        fn matrix_st_rc_three_rounds_st_healthy_only() {
+            tauri::async_runtime::block_on(async {
+                let pool = fresh_pool().await;
+                seed_dual_plane_rc(&pool, RC_PATHS).await; // RC seq0。
+                sqlx::query("INSERT INTO topology_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener, max_latency_us) VALUES ('s1', 1, 'ST', 7, 500, 512, 2000, '1', '2', 400)")
+                    .execute(&pool).await.unwrap();
+                let plan = plan_gate7();
+                let pr = crate::flow_plan_command::plan_tas_inner(&pool, "s1", &plan, "http://x")
+                    .await
+                    .unwrap();
+                assert_eq!(pr.status, "ok", "{pr:?}");
+                let synth = plan.ini.lock().unwrap().clone().expect("ST 应进 Z3");
+                assert_eq!(
+                    synth.matches("UdpSourceApp").count(),
+                    1,
+                    "只有 ST 进 Z3：{synth}"
+                );
+                assert!(!synth.contains("pcp: 6"), "RC 不得进 synth bundle：{synth}");
+                assert_eq!(flow_plans_count(&pool).await, 1);
+
+                // RC=app[0]、ST=app[1]。
+                let mut csv = healthy_csv("TsnAgentFlowTasNetwork.es2.app[0].sink", 2001);
+                let st = healthy_csv("TsnAgentFlowTasNetwork.es2.app[1].sink", 2001);
+                csv.push_str(st.strip_prefix(&header()).unwrap());
+                let runner = ScriptedRunner::new(vec![
+                    Ok(outcome(Some(&csv))),
+                    Ok(outcome(Some(&csv))),
+                    Ok(outcome(Some(&csv))),
+                ]);
+                let r = verify_tas_inner(&pool, "s1", &runner).await.unwrap();
+                assert_eq!(r.status, "ok", "{r:?}");
+                let rounds = r.rounds.as_ref().expect("有 RC 应三轮");
+                assert_eq!(
+                    rounds.iter().map(|x| x.round.as_str()).collect::<Vec<_>>(),
+                    vec!["healthy", "fault_a", "fault_b"]
+                );
+                // 健康轮：ST+RC 都判；故障轮：只判 RC，ST 报告态。
+                assert!(rounds[0].per_stream.iter().all(|v| v.judged), "{rounds:?}");
+                for fault in &rounds[1..] {
+                    let st = fault.per_stream.iter().find(|v| v.class == "ST").unwrap();
+                    assert!(!st.judged, "{fault:?}");
+                    assert!(
+                        st.note.as_deref().unwrap().contains("仅健康轮判"),
+                        "{fault:?}"
+                    );
+                    let rc = fault.per_stream.iter().find(|v| v.class == "RC").unwrap();
+                    assert!(rc.judged && rc.pass, "{fault:?}");
+                }
+                let pin = &runner.inis()[0];
+                assert!(pin.contains("hasStreamRedundancy"), "RC FRER 装配：{pin}");
+                assert!(pin.contains("transmissionGate[7]"), "ST 门 pin：{pin}");
+            });
+        }
+
+        /// 矩阵行 4「三类全有」：进 Z3=仅 ST；plan 产物=GCL；verify=三轮；判据=全部
+        /// （ST 三项 + RC 两态 + BE 连通；故障轮 ST/BE 报告态）。
+        #[test]
+        fn matrix_all_three_classes_full_criteria() {
+            tauri::async_runtime::block_on(async {
+                let pool = fresh_pool().await;
+                seed_mixed_three_classes(&pool).await; // RC0+ST1+BE2 + 手工 GCL。
+                clear_flow_plans(&pool).await; // 真管线：GCL 由 plan 落库。
+                let plan = plan_gate7();
+                let pr = crate::flow_plan_command::plan_tas_inner(&pool, "s1", &plan, "http://x")
+                    .await
+                    .unwrap();
+                assert_eq!(pr.status, "ok", "{pr:?}");
+                let synth = plan.ini.lock().unwrap().clone().expect("ST 应进 Z3");
+                assert_eq!(
+                    synth.matches("UdpSourceApp").count(),
+                    1,
+                    "只有 ST 进 Z3：{synth}"
+                );
+                assert!(!synth.contains("pcp: 6"), "{synth}");
+                assert!(!synth.contains("pcp: 0"), "{synth}");
+                assert_eq!(flow_plans_count(&pool).await, 1);
+
+                let csv = mixed_csv(false);
+                let runner = ScriptedRunner::new(vec![
+                    Ok(outcome(Some(&csv))),
+                    Ok(outcome(Some(&csv))),
+                    Ok(outcome(Some(&csv))),
+                ]);
+                let r = verify_tas_inner(&pool, "s1", &runner).await.unwrap();
+                assert_eq!(r.status, "ok", "{r:?}");
+                let rounds = r.rounds.as_ref().expect("有 RC 应三轮");
+                assert_eq!(
+                    rounds.iter().map(|x| x.round.as_str()).collect::<Vec<_>>(),
+                    vec!["healthy", "fault_a", "fault_b"]
+                );
+                // 健康轮：三类都判、全绿（BE 带送达率）。
+                assert!(
+                    rounds[0].per_stream.iter().all(|v| v.judged && v.pass),
+                    "{rounds:?}"
+                );
+                let be = rounds[0]
+                    .per_stream
+                    .iter()
+                    .find(|v| v.class == "BE")
+                    .unwrap();
+                assert_eq!(be.delivery_ratio, Some(1.0), "{rounds:?}");
+                // 故障轮：只判 RC；ST/BE 报告态。
+                for fault in &rounds[1..] {
+                    for v in &fault.per_stream {
+                        assert_eq!(v.judged, v.class == "RC", "{fault:?}");
+                    }
+                }
+                assert!(r.overall.contains("另 2 个仅报告"), "{}", r.overall);
+            });
+        }
+
+        /// 矩阵行 5「纯 RC」：进 Z3=无（求解器不被调）；plan 产物=no_gating + 清表；
+        /// verify=三轮照跑；判据=RC 两态；pin ini **门全开**（无任何 transmissionGate 行、
+        /// 无互补关窗）但带 FRER。R15：顶层诊断行=健康轮同值。
+        #[test]
+        fn matrix_pure_rc_three_rounds_all_gates_open() {
+            tauri::async_runtime::block_on(async {
+                let pool = fresh_pool().await;
+                seed_dual_plane_rc(&pool, RC_PATHS).await;
+                // 存量旧 GCL（上一轮 ST 规划残留）——no_gating 应清掉，verify 不得 pin 它。
+                sqlx::query("INSERT INTO flow_plans (session_id, stream_seq, node, eth_n, gate_index, initially_open, offset_ns, durations_ns, solver) VALUES ('s1', 0, '0', 1, 7, 1, 0, '[300000,700000]', 'Z3')")
+                    .execute(&pool).await.unwrap();
+                let plan = plan_gate7();
+                let pr = crate::flow_plan_command::plan_tas_inner(&pool, "s1", &plan, "http://x")
+                    .await
+                    .unwrap();
+                assert_eq!(pr.status, "no_gating", "{pr:?}");
+                assert!(plan.ini.lock().unwrap().is_none(), "无 ST 不进 Z3");
+                assert_eq!(flow_plans_count(&pool).await, 0, "no_gating 清表");
+
+                let mut csv = healthy_csv("TsnAgentFlowTasNetwork.es2.app[0].sink", 2001);
+                csv.push_str(clock_csv_rows());
+                let runner = ScriptedRunner::new(vec![
+                    Ok(outcome(Some(&csv))),
+                    Ok(outcome(Some(&csv))),
+                    Ok(outcome(Some(&csv))),
+                ]);
+                let r = verify_tas_inner(&pool, "s1", &runner).await.unwrap();
+                assert_eq!(r.status, "ok", "{r:?}");
+                let rounds = r.rounds.as_ref().expect("纯 RC 三轮照跑");
+                assert_eq!(
+                    rounds.iter().map(|x| x.round.as_str()).collect::<Vec<_>>(),
+                    vec!["healthy", "fault_a", "fault_b"]
+                );
+                // RC 两态：每轮都判（单 RC 流覆盖两平面断点）。
+                for round in rounds {
+                    assert!(
+                        round
+                            .per_stream
+                            .iter()
+                            .all(|v| v.class == "RC" && v.judged && v.pass),
+                        "{round:?}"
+                    );
+                }
+                for pin in &runner.inis() {
+                    assert!(
+                        !pin.contains("transmissionGate["),
+                        "纯 RC 门全开：无 pin 门、无互补关窗：{pin}"
+                    );
+                    assert!(pin.contains("hasStreamRedundancy"), "{pin}");
+                }
+                // R15：顶层诊断=健康轮同值。
+                assert!(r.gptp_diag.is_some(), "{r:?}");
+                assert_eq!(r.gptp_diag, rounds[0].gptp_diag, "{r:?}");
+            });
+        }
+
+        /// 矩阵行 6「纯 BE」：进 Z3=无；plan 产物=no_gating + 清表；verify=单轮；判据=BE
+        /// 连通（送达率随行）。R15/R10：顶层诊断行在（pcp0 争用下时钟收敛可见的机器面）。
+        #[test]
+        fn matrix_pure_be_single_round_connectivity_and_diag_line() {
+            tauri::async_runtime::block_on(async {
+                let pool = fresh_pool().await;
+                seed(&pool).await; // 带存量 ST GCL——no_gating 应清掉。
+                sqlx::query("DELETE FROM topology_streams WHERE session_id='s1'")
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+                sqlx::query("INSERT INTO topology_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener) VALUES ('s1', 0, 'BE', 0, 500, 512, 3, '1', '2')")
+                    .execute(&pool).await.unwrap();
+                let plan = plan_gate7();
+                let pr = crate::flow_plan_command::plan_tas_inner(&pool, "s1", &plan, "http://x")
+                    .await
+                    .unwrap();
+                assert_eq!(pr.status, "no_gating", "{pr:?}");
+                assert!(plan.ini.lock().unwrap().is_none(), "无 ST 不进 Z3");
+                assert_eq!(flow_plans_count(&pool).await, 0, "no_gating 清掉存量 GCL");
+
+                let mut csv = healthy_csv("TsnAgentFlowTasNetwork.es2.app[0].sink", 3);
+                csv.push_str(clock_csv_rows_gm_es1());
+                let runner = ScriptedRunner::new(vec![Ok(outcome(Some(&csv)))]);
+                let r = verify_tas_inner(&pool, "s1", &runner).await.unwrap();
+                assert_eq!(r.status, "ok", "{r:?}");
+                assert!(r.rounds.is_none(), "纯 BE：单轮：{r:?}");
+                assert_eq!(runner.inis().len(), 1);
+                assert_eq!(r.per_stream[0].class, "BE");
+                assert!(
+                    r.per_stream[0].judged && r.per_stream[0].pass,
+                    "BE 连通判：{r:?}"
+                );
+                assert_eq!(
+                    r.per_stream[0].delivery_ratio,
+                    Some(0.75),
+                    "收 3/实发 4：{r:?}"
+                );
+                assert!(
+                    r.gptp_diag.is_some(),
+                    "R15/R10：纯 BE 会话顶层诊断行在：{r:?}"
+                );
+                let pin = &runner.inis()[0];
+                assert!(!pin.contains("transmissionGate["), "门全开：{pin}");
+                assert!(!pin.contains("hasStreamRedundancy"), "{pin}");
+            });
+        }
     }
 }

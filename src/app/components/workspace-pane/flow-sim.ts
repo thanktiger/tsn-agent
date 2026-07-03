@@ -78,6 +78,9 @@ export interface VerifyTasResult {
   message?: string;
   /** U6/U7 多轮结果：有 RC 流 → [healthy, fault_a, fault_b]；无 RC → 缺席（老形状）。 */
   rounds?: VerifyRound[];
+  /** 顶层 gPTP 收敛诊断（R15 收尾，U8）：恒为健康轮诊断——无 rounds 会话（纯 ST/ST+BE/
+   * 纯 BE）也有诊断行；有 rounds 时与健康轮 gptpDiag 同值（轮小节已渲染，顶层不重复画）。 */
+  gptpDiag?: GptpDiag;
 }
 
 /** App 级规划运行态——切 tab 不丢、按 status 恢复。 */
