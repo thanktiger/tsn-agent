@@ -484,8 +484,8 @@ function SimResultArea({
   );
 }
 
-// 区分度优先的定性调色板（Okabe–Ito 色盲友好系，去掉过浅的黄）。
-const CHART_COLORS = [
+// 区分度优先的定性调色板（Okabe–Ito 色盲友好系，去掉过浅的黄）。export 供流量规划时序图同源取色。
+export const CHART_COLORS = [
   "#0072B2",
   "#E69F00",
   "#009E73",

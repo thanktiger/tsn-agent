@@ -2715,6 +2715,163 @@ textarea:focus-visible {
   background: #ffffff;
 }
 
+/* U2/U3：流量规划面板（flow-gcl-* 类族）——与时间同步同设计语言：命令栏/居中 CTA/
+   sim-overall 判定条/sim-badge 徽章/sim-chart 图表手法复用，此处只补 flow 专有增量。 */
+.flow-panel {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  gap: 10px;
+}
+
+/* R21 诚实边界标注：命令栏左侧常驻（对位 timesync 子 tab 的空间）。 */
+.flow-honesty-note {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.flow-progress {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.flow-plan-result,
+.flow-verify-result {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* sim-overall 判定条内的求解器出处徽章（R8/KTD7 诚实边界）。 */
+.flow-solver-badge {
+  margin-left: 8px;
+  padding: 1px 7px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.flow-solver-badge.guaranteed {
+  color: #15803d;
+  background: rgba(236, 253, 245, 0.95);
+}
+
+.flow-solver-badge.besteffort {
+  color: #b45309;
+  background: rgba(255, 251, 235, 0.95);
+}
+
+/* 蓝色信息条（KTD1/KTD3：流集无 ST 流 → 无需门控，非成功非失败的中性事实）。 */
+.flow-gcl-info {
+  padding: 8px 12px;
+  border: 1px solid rgba(22, 119, 255, 0.3);
+  border-radius: 6px;
+  color: #1d4ed8;
+  font-size: 12px;
+  font-weight: 600;
+  background: rgba(239, 246, 255, 0.95);
+}
+
+.flow-message {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 11px;
+  white-space: pre-wrap;
+}
+
+.flow-message.flow-error {
+  color: #b91c1c;
+}
+
+/* 门控时序图（U2）：泳道轨底色（关窗）与刻度网格；开窗色块 fill 走 CHART_COLORS[0] 内联。 */
+.flow-gcl-chart {
+  margin: 4px 0 0;
+}
+
+.flow-gcl-grid {
+  stroke: #e2e8f0;
+  stroke-width: 1;
+}
+
+.flow-gcl-track {
+  fill: rgba(148, 163, 184, 0.16);
+}
+
+.flow-gcl-swatch-track {
+  background: rgba(148, 163, 184, 0.35);
+}
+
+.flow-gcl-detail {
+  margin-top: 2px;
+}
+
+.flow-gcl-table {
+  margin-top: 6px;
+}
+
+/* U3：验证多轮小节卡片 + 徽章条头（轮名 + sim-badge 状态 + 标注 chips）。 */
+.flow-verify-round {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--border);
+  border-radius: 6px;
+  background: #ffffff;
+}
+
+.flow-verify-round.ok {
+  border-left-color: var(--success);
+}
+
+.flow-verify-round.fail {
+  border-left-color: var(--error);
+}
+
+.flow-round-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.flow-round-name {
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.flow-round-chip {
+  padding: 1px 8px;
+  border-radius: 10px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  background: var(--bg-tertiary);
+}
+
+.flow-verdict-note {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.flow-gptp-diag {
+  margin: 0;
+}
+
+.flow-round-untested {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  color: var(--text-muted);
+  font-size: 11px;
+  list-style: none;
+}
+
 .config-tabs {
   display: flex;
   align-items: center;

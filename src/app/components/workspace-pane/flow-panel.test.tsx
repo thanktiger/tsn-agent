@@ -2,7 +2,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import { FlowPanel, type FlowPanelProps } from "./flow-panel";
-import type { PlanResult, StreamVerdict, VerifyTasResult } from "./flow-sim";
+import type { FlowPlanDetail, PlanResult, StreamVerdict, VerifyTasResult } from "./flow-sim";
 
 function planOk(overrides: Partial<PlanResult> = {}): PlanResult {
   return {
@@ -104,6 +104,46 @@ function roundsResult(): VerifyTasResult {
   });
 }
 
+/** U2 门控明细夹具：默认未规划（entries=[] 且有 ST 流）。 */
+function planDetail(overrides: Partial<FlowPlanDetail> = {}): FlowPlanDetail {
+  return {
+    cycleNs: 1_000_000,
+    solver: "Z3",
+    stCount: 1,
+    rcCount: 0,
+    beCount: 0,
+    entries: [],
+    ...overrides,
+  };
+}
+
+/** 已规划夹具：两个端口各一条 ST 门条目（es2 开窗起点 0 在前、sw1 在后，阶梯错位）。 */
+function planDetailWithGcl(): FlowPlanDetail {
+  return planDetail({
+    beCount: 1,
+    entries: [
+      {
+        node: "0",
+        nodeName: "sw1",
+        ethN: 1,
+        gateIndex: 7,
+        initiallyOpen: false,
+        offsetNs: 0,
+        durationsNs: [472_390, 4_560, 523_050],
+      },
+      {
+        node: "2",
+        nodeName: "es2",
+        ethN: 0,
+        gateIndex: 7,
+        initiallyOpen: true,
+        offsetNs: 0,
+        durationsNs: [300_000, 700_000],
+      },
+    ],
+  });
+}
+
 function baseProps(overrides: Partial<FlowPanelProps> = {}): FlowPanelProps {
   return {
     inFlowStage: true,
@@ -114,6 +154,7 @@ function baseProps(overrides: Partial<FlowPanelProps> = {}): FlowPanelProps {
     onVerifyStateChange: vi.fn(),
     planTas: vi.fn(async () => planOk()),
     verifyTas: vi.fn(async () => verifyResult()),
+    getFlowPlan: vi.fn(async () => planDetail()),
     ...overrides,
   };
 }
@@ -214,11 +255,30 @@ describe("FlowPanel", () => {
     render(
       <FlowPanel {...baseProps({ verifyState: { status: "done", result: roundsResult() } })} />,
     );
-    expect(screen.getByText(/健康轮 · 通过/)).toBeTruthy();
-    expect(screen.getByText(/断A轮 · 通过/)).toBeTruthy();
-    expect(screen.getByText(/断B轮 · 服务占用（稍后重试）/)).toBeTruthy();
+    // U3 徽章条头：轮名与状态徽章分列（文案语义不变）。
+    expect(screen.getByText("健康轮")).toBeTruthy();
+    expect(screen.getByText("断A轮")).toBeTruthy();
+    expect(screen.getByText("断B轮")).toBeTruthy();
+    expect(screen.getAllByText("通过").length).toBe(2); // 健康轮 + 断A轮。
+    expect(screen.getByText("服务占用（稍后重试）")).toBeTruthy();
     // 顶层摘要沿 U6 overall 串联。
     expect(screen.getByText(/健康轮：3 个达标/)).toBeTruthy();
+  });
+
+  it("U3：轮状态徽章化（sim-badge ok/bad）+ 标注 chips 进徽章条", () => {
+    render(
+      <FlowPanel {...baseProps({ verifyState: { status: "done", result: roundsResult() } })} />,
+    );
+    const okBadges = screen.getAllByText("通过");
+    for (const badge of okBadges) {
+      expect(badge.className).toContain("sim-badge");
+      expect(badge.className).toContain("ok");
+    }
+    const busyBadge = screen.getByText("服务占用（稍后重试）");
+    expect(busyBadge.className).toContain("sim-badge");
+    expect(busyBadge.className).toContain("bad");
+    // 断链标注作为 chip 仍可见。
+    expect(screen.getByText(/断链：t=400ms/).className).toContain("flow-round-chip");
   });
 
   it("U7：多轮表带「类别」列，RC 行时延/抖动标「首达路实测」", () => {
@@ -284,6 +344,67 @@ describe("FlowPanel", () => {
       <FlowPanel {...baseProps({ verifyState: { status: "done", result: verifyResult() } })} />,
     );
     expect(screen.getAllByText(/gPTP 收敛/).length).toBe(1);
+  });
+
+  it("U2②：有门控明细 → 时序图行数 = 端口数、折叠明细表条目数一致（展开后出表）", async () => {
+    const getFlowPlan = vi.fn(async () => planDetailWithGcl());
+    render(<FlowPanel {...baseProps({ getFlowPlan })} />);
+    // 面板挂载即拉明细；时序图每行一个 (节点,端口)，行按首个开窗起点升序（es2 起点 0 在前）。
+    const chart = await screen.findByRole("img", { name: "门控时序图" });
+    const labels = [...chart.querySelectorAll(".flow-gcl-row-label")].map((t) => t.textContent);
+    expect(labels).toEqual(["es2·eth0", "sw1·eth1"]);
+    expect(chart.querySelectorAll(".flow-gcl-track").length).toBe(2);
+    // 开窗色块 hover title 显示精确值（sw1：472.39µs → 476.95µs，4560ns）。
+    const titles = [...chart.querySelectorAll(".flow-gcl-window title")].map((t) => t.textContent);
+    expect(titles).toContain("开 472.39µs → 476.95µs（4560ns）");
+    // 折叠明细：默认收起（无表），头部显示条目数，点开出表。
+    const toggle = screen.getByRole("button", { name: /门控明细 · 2 条目/ });
+    expect(screen.queryByRole("table")).toBeNull();
+    fireEvent.click(toggle);
+    const table = screen.getByRole("table");
+    expect(table.querySelectorAll("tbody tr").length).toBe(2);
+    expect(screen.getByText("eth1")).toBeTruthy();
+    expect(screen.getByText("472.39–476.95")).toBeTruthy(); // 开窗(µs) 列。
+    expect(screen.getByText("0.5%")).toBeTruthy(); // sw1 占空比 4560/1000000。
+    expect(screen.getByText("30.0%")).toBeTruthy(); // es2 占空比 300000/1000000。
+  });
+
+  it("U2③：no_gating（流集无 ST 流）→ 蓝色信息条、不画空图", async () => {
+    const getFlowPlan = vi.fn(async () => planDetail({ stCount: 0, beCount: 2 }));
+    render(<FlowPanel {...baseProps({ getFlowPlan })} />);
+    expect(await screen.findByText(/流集无 ST 流，无需门控/)).toBeTruthy();
+    expect(screen.queryByRole("img", { name: "门控时序图" })).toBeNull();
+    // 无 ST 无需门控 → 验证按钮放行（查询三态非未规划）。
+    expect(screen.getByRole("button", { name: "软仿验证" }).hasAttribute("disabled")).toBe(false);
+  });
+
+  it("U2④：未规划 → 居中 CTA；有结果 → 按钮收进命令栏右上（重新规划）", async () => {
+    // 未规划（entries=[] 且有 ST）：CTA 在 body、命令栏无重新规划按钮。
+    const { unmount } = render(<FlowPanel {...baseProps()} />);
+    const cta = screen.getByRole("button", { name: "规划门控表" });
+    expect(cta.closest(".panel-cta")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "重新规划" })).toBeNull();
+    unmount();
+    // 已规划（库里有门控表）：CTA 消失、重新规划进命令栏、验证放行（planState 仍 idle）。
+    const getFlowPlan = vi.fn(async () => planDetailWithGcl());
+    render(<FlowPanel {...baseProps({ getFlowPlan })} />);
+    expect(await screen.findByRole("button", { name: "重新规划" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "规划门控表" })).toBeNull();
+    expect(screen.getByRole("button", { name: "软仿验证" }).hasAttribute("disabled")).toBe(false);
+    // 切会话回来凭数据恢复展示（KTD1）：头行合成条目数 + 求解器徽章。
+    expect(screen.getByText(/门控表 · 2 条目/)).toBeTruthy();
+    expect(screen.getByText(/Z3·带可调度性保证/)).toBeTruthy();
+  });
+
+  it("U2：规划成功后自动拉取明细刷新展示（KTD3）", async () => {
+    const getFlowPlan = vi
+      .fn()
+      .mockResolvedValueOnce(planDetail()) // 挂载：未规划。
+      .mockResolvedValueOnce(planDetailWithGcl()); // 规划成功后刷新。
+    const planTas = vi.fn(async () => planOk());
+    render(<FlowPanel {...baseProps({ getFlowPlan, planTas })} />);
+    fireEvent.click(await screen.findByRole("button", { name: "规划门控表" }));
+    await waitFor(() => expect(getFlowPlan).toHaveBeenCalledTimes(2));
   });
 
   it("会话切换后迟到结果被丢弃", async () => {
