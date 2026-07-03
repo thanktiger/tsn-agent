@@ -3,7 +3,11 @@ import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { readSidecarEnv } from "./sidecar-client";
-import { createTimesyncToolRegistry, createTopologyToolRegistry } from "./topology-tools";
+import {
+  createFlowToolRegistry,
+  createTimesyncToolRegistry,
+  createTopologyToolRegistry,
+} from "./topology-tools";
 
 export const TSN_TOPOLOGY_MCP_SERVER_NAME = "tsn_topology" as const;
 
@@ -13,8 +17,12 @@ export function createTsnTopologyMcpServer(): McpServer {
     version: "0.1.0",
   });
 
-  // topology + timesync 工具同住一个 stdio server；按 stage 的放行由 worker 白名单做。
-  for (const tool of [...createTopologyToolRegistry(), ...createTimesyncToolRegistry()]) {
+  // topology + timesync + flow 工具同住一个 stdio server；按 stage 的放行由 worker 白名单做。
+  for (const tool of [
+    ...createTopologyToolRegistry(),
+    ...createTimesyncToolRegistry(),
+    ...createFlowToolRegistry(),
+  ]) {
     server.registerTool(
       tool.name,
       {

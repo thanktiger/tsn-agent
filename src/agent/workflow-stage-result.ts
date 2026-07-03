@@ -80,9 +80,9 @@ export function parseWorkflowStageResult(value: unknown): WorkflowStageResult {
   }
 
   const stage = readEnum(value.stage, WORKFLOW_STEPS, "stage");
-  if (stage === "flow-template") {
-    throw new Error("flow-template 阶段结果暂未启用（Phase B 回归）。");
-  }
+  // U4：flow-template 已解冻。flow 写库走 sidecar（flow.add_stream）、前端查 DB 渲染，
+  // 不产 flow stageResult payload；万一收到也走下面的通用占位路径（同 time-sync 先例，
+  // applyStageResults 对非 topology 阶段接受但忽略）。
 
   const producer = parseProducer(value.producer);
   const status = readEnum(value.status, ["success", "failed", "needs_input"] as const, "status");

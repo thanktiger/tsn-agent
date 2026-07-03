@@ -158,6 +158,72 @@ def submit(network_ned: str, omnetpp_ini: str, manifest_json: str, scavetool_fil
     return job.job_id
 
 
+def _execute_plan(job: Job) -> None:
+    """后台线程体（plan verb，U7）：跑 inet 带 param-recording dump GCL 到 .sca → grep
+    transmissionGate 门参数行 → 落 result。配置器只在 initialize 跑，sim-time-limit=1ms
+    足够拿到全部门参数（U1/U6 spike）。不跑 scavetool（GCL 是 .sca 里的参数、非 .vec 信号）。"""
+    run_dir = job.run_dir
+    try:
+        inet_inner = (
+            f"cd {shlex.quote(run_dir)} && inet -u Cmdenv -f omnetpp.ini -n . "
+            "--**.param-recording=true --sim-time-limit=1ms"
+        )
+        inet = _run_in_inet_env(inet_inner)
+        combined = (inet.stdout or "") + (inet.stderr or "")
+        exit_code = inet.returncode
+        if exit_code != 0:
+            _set_plan_result(job, exit_code, _tail(combined), None, None)
+            return
+        # grep .sca 门参数行（offset/durations/initiallyOpen）。|| true 让 0 匹配不算失败。
+        grep_inner = (
+            f"cd {shlex.quote(run_dir)} && "
+            r"grep -hE 'transmissionGate\[[0-9]+\] (offset|durations|initiallyOpen)' results/*.sca || true"
+        )
+        grep = _run_in_inet_env(grep_inner)
+        sca = grep.stdout or ""
+        sca_gcl = sca if sca.strip() else None
+        # solver 出处（R8）：本期 synth bundle 恒 Z3GateScheduleConfigurator；Eager 兜底后续。
+        _set_plan_result(job, exit_code, _tail(combined), sca_gcl, "Z3")
+    except subprocess.TimeoutExpired:
+        _set_failed(job, "命令超时")
+    except OSError as err:
+        _set_failed(job, f"执行出错：{err}")
+    finally:
+        gc()
+
+
+def _set_plan_result(
+    job: Job, exit_code: int, output_tail: str, sca_gcl: str | None, solver: str | None
+) -> None:
+    with _lock:
+        job.result = {
+            "exit_code": exit_code,
+            "output_tail": output_tail,
+            "sca_gcl": sca_gcl,
+            "solver": solver,
+        }
+        job.status = "done"
+
+
+def submit_plan(network_ned: str, omnetpp_ini: str, manifest_json: str) -> str:
+    """提交规划（Z3 综合 + dump GCL）。与 submit 同用单运行锁 + job 存储（plan/sim 不并发）。"""
+    with _lock:
+        if _has_active_job():
+            raise Busy("已有软仿在运行")
+        job = Job(job_id=_gen_run_id(), status="running")
+        _jobs[job.job_id] = job
+    run_dir = os.path.join(config.RUN_BASE_DIR, job.job_id)
+    job.run_dir = run_dir
+    try:
+        _write_bundle(run_dir, network_ned, omnetpp_ini, manifest_json)
+    except OSError as err:
+        _set_failed(job, f"写 bundle 失败：{err}")
+        raise
+    thread = threading.Thread(target=_execute_plan, args=(job,), daemon=True)
+    thread.start()
+    return job.job_id
+
+
 def get_job(job_id: str) -> Job | None:
     return _jobs.get(job_id)
 

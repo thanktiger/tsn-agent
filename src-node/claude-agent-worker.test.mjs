@@ -12,6 +12,7 @@ import {
   extractStreamEventText,
   extractToolCallEvents,
   extractTopologyWorkflowStageResults,
+  FLOW_MCP_ALLOWED_TOOLS,
   isCliEntryPoint,
   normalizeError,
   parseAssistantText,
@@ -25,6 +26,7 @@ import {
   undoLastChangeTool,
 } from "./claude-agent-worker.mjs";
 import {
+  FLOW_MCP_ALLOWED_TOOLS as REGISTRY_FLOW_MCP_ALLOWED_TOOLS,
   TIMESYNC_MCP_ALLOWED_TOOLS as REGISTRY_TIMESYNC_MCP_ALLOWED_TOOLS,
   TOPOLOGY_MCP_ALLOWED_TOOLS as REGISTRY_TOPOLOGY_MCP_ALLOWED_TOOLS,
 } from "./mcp/topology-tools";
@@ -106,9 +108,9 @@ describe("claude-agent-worker", () => {
         ...TOPOLOGY_MCP_ALLOWED_TOOLS,
         UNDO_TOOL_NAME,
       ]);
-      expect(input.options.settingSources).toEqual(["user", "project"]);
+      expect(input.options.settingSources).toEqual(["project"]);
       expect(input.options.skills).toEqual(["tsn-topology", "tsn-time-sync", "tsn-flow-planning"]);
-      expect(input.options.tools).toEqual({ type: "preset", preset: "claude_code" });
+      expect(input.options.tools).toEqual(["Read", "Skill"]);
       expect(input.options.allowedTools).toEqual([
         "Skill",
         "Read",
@@ -572,6 +574,35 @@ describe("claude-agent-worker", () => {
     expect(timeSyncStageNoHost).toContain(REQUEST_STAGE_CHANGE_TOOL_NAME);
   });
 
+  it("U3: worker flow allowedTools stays aligned with the flow registry (drift guard)", () => {
+    expect(FLOW_MCP_ALLOWED_TOOLS).toEqual(REGISTRY_FLOW_MCP_ALLOWED_TOOLS);
+  });
+
+  it("U3: flow-template stage whitelists flow tools + topology_inspect, not write/timesync tools", () => {
+    const flowStage = buildAllowedToolsForStage({ stage: "flow-template" }, true);
+    const topologyStage = buildAllowedToolsForStage({ stage: "topology" }, true);
+    // flow 阶段：放行全部 flow 工具。
+    for (const tool of FLOW_MCP_ALLOWED_TOOLS) {
+      expect(flowStage).toContain(tool);
+    }
+    // flow 阶段：放行只读 topology_inspect（录流要把 talker/listener 名解析成 mid）。
+    expect(flowStage).toContain("mcp__tsn_topology__topology_inspect");
+    // flow 阶段：不放行拓扑写工具、也不放行 timesync 工具（越阶段误写）。
+    expect(flowStage).not.toContain("mcp__tsn_topology__topology_apply_operations");
+    expect(flowStage).not.toContain("mcp__tsn_topology__timesync_set_gm");
+    // 反向：拓扑阶段不放行 flow 工具。
+    for (const tool of FLOW_MCP_ALLOWED_TOOLS) {
+      expect(topologyStage).not.toContain(tool);
+    }
+  });
+
+  it("U3: flow tools require the topology stdio host (gated by hasTopologyMcpConfig)", () => {
+    const flowStageNoHost = buildAllowedToolsForStage({ stage: "flow-template" }, false);
+    for (const tool of FLOW_MCP_ALLOWED_TOOLS) {
+      expect(flowStageNoHost).not.toContain(tool);
+    }
+  });
+
   it("U10: time-sync stage injects the tsn-time-sync SKILL.md as a single string after the guidance sentinel", async () => {
     const rootDir = await mkdtemp(join(tmpdir(), "tsn-agent-timesync-skill-"));
     const skillDir = join(rootDir, "tsn-time-sync");
@@ -605,6 +636,37 @@ describe("claude-agent-worker", () => {
     expect(guidance).toContain("[TIMESYNC-SKILL-PROBE] 时钟同步指引正文");
     // time-sync 阶段不注入拓扑场景 reference 分隔，也不注入拓扑 SKILL.md。
     expect(capturedSystemPrompt).not.toContain("<<<SCENARIO_REFERENCE>>>");
+    expect(capturedSystemPrompt).not.toContain("[TOPOLOGY-SKILL]");
+  });
+
+  it("U3: flow-template stage injects the tsn-flow-planning SKILL.md as a single string", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "tsn-agent-flow-skill-"));
+    const skillDir = join(rootDir, "tsn-flow-planning");
+    await mkdir(skillDir, { recursive: true });
+    await writeFile(join(skillDir, "SKILL.md"), "[FLOW-SKILL-PROBE] 流量规划指引正文", "utf8");
+    const topologyDir = join(rootDir, "tsn-topology");
+    await mkdir(topologyDir, { recursive: true });
+    await writeFile(join(topologyDir, "SKILL.md"), "[TOPOLOGY-SKILL] 不应被注入", "utf8");
+
+    let capturedSystemPrompt;
+    const query = async function* (input) {
+      capturedSystemPrompt = input.options.systemPrompt;
+      yield { type: "result", structured_output: { assistantText: "ok" } };
+    };
+
+    await runClaude(
+      "加一条 ES-1 到 ES-2 的 ST 流",
+      {
+        cwd: "/tmp/project",
+        skillRoot: rootDir,
+        stageRunnerInput: { userIntent: "加一条 ES-1 到 ES-2 的 ST 流", stage: "flow-template" },
+      },
+      query,
+    );
+
+    expect(typeof capturedSystemPrompt).toBe("string");
+    const [, guidance] = capturedSystemPrompt.split("<<<SKILL_GUIDANCE>>>");
+    expect(guidance).toContain("[FLOW-SKILL-PROBE] 流量规划指引正文");
     expect(capturedSystemPrompt).not.toContain("[TOPOLOGY-SKILL]");
   });
 

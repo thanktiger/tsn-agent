@@ -31,6 +31,14 @@ export const TIMESYNC_MCP_ALLOWED_TOOLS = [
   "mcp__tsn_topology__timesync_inspect",
   "mcp__tsn_topology__timesync_undo",
 ];
+// flow 工具同住 tsn_topology stdio server，仅在 flow-template 阶段放行（见
+// buildAllowedToolsForStage）。worker 是纯 ESM、不能 import TS registry，故此处镜像
+// topology-tools.ts 的 FLOW_MCP_ALLOWED_TOOLS；测试断言两者一致防漂移。
+export const FLOW_MCP_ALLOWED_TOOLS = [
+  "mcp__tsn_topology__flow_add_stream",
+  "mcp__tsn_topology__flow_inspect",
+  "mcp__tsn_topology__flow_remove_stream",
+];
 
 // U1（独立编排能力）：切阶段工具独立于四个阶段，用 SDK in-process 自定义工具承载，
 // 不连 sidecar、不写状态、不做合法性判断（合法性在应用层 agent-adapter）。它只把
@@ -204,13 +212,23 @@ export async function runClaude(userPrompt, options = {}, queryFn = query) {
     cwd,
     // 打包态指向随 app 分发的 claude binary；dev 态 undefined → SDK 默认用 node_modules 平台包。
     ...(claudeBinaryPath ? { pathToClaudeCodeExecutable: claudeBinaryPath } : {}),
-    settingSources: ["user", "project"],
-    // 显式 pin 模型：settingSources 含 "user" 会继承开发者个人 Claude Code 的
-    // 默认模型（如 /model 切到 worker 环境不可用的型号即整轮失败）——产品运行时
-    // 不耦合个人偏好。
+    // 只保留 "project"，砍掉 "user"：
+    // - 不含 "user" → 不继承开发者个人 Claude Code 的 enabledPlugins（compound-engineering/
+    //   gstack 等几十个 skill/agent 描述会灌进工具 schema）与个人默认模型/偏好——这是 token 大头；
+    //   debug 实测已确认：Found 0 enabled plugins / Total plugin skills loaded: 0。
+    // - 保留 "project" → SDK 才会从 .claude/skills/ 发现并注册 tsn-topology/tsn-time-sync/
+    //   tsn-flow-planning（下方 skills 数组只是「启用哪些」的过滤白名单，不负责加载；关掉
+    //   "project" 后 Skill 工具会报 Unknown skill）。debug 实测：Loaded 3 unique skills (project: 3)。
+    // - 项目 AGENTS.md/CLAUDE.md 不会进 prompt：memory 注入靠 claude_code preset，而本 worker
+    //   用的是自定义字符串 systemPrompt（见下方 systemPrompt），preset 未启用 → memory 不注入。
+    settingSources: ["project"],
     model: "claude-sonnet-4-6",
     permissionMode: "dontAsk",
-    tools: { type: "preset", preset: "claude_code" },
+    // 只发 agent 实际用到的内置工具，不用整套 claude_code 预设（预设会把 Bash/Write/
+    // Edit/Glob/Grep/Task/WebFetch/WebSearch/TodoWrite 等全套 schema 发给模型，白吃 token；
+    // allowedTools 只是免确认白名单、不裁剪发送）。Read 用于查阅其它场景 reference（SKILL.md
+    // 明示）；Skill 由 skills 选项管理、列此确保可用；领域写操作全走 mcpServers 的 MCP 工具。
+    tools: ["Read", "Skill"],
     allowedTools: buildAllowedToolsForStage(
       resolvedOptions.stageRunnerInput,
       Boolean(topologyMcpConfig),
@@ -343,6 +361,31 @@ export async function runClaude(userPrompt, options = {}, queryFn = query) {
 
     if (message.type === "result") {
       sessionId = message.session_id ?? sessionId;
+
+      // 观测（临时）：记录本轮真实 token 消耗。result.usage 来自 API 响应，后端无关
+      // （vLLM/DeepSeek 皆可）。独立 jsonl、不进 eval schema；写盘失败静默、不阻断本轮。
+      if (
+        message.usage &&
+        typeof resolvedOptions.evalDir === "string" &&
+        resolvedOptions.evalDir.trim()
+      ) {
+        const u = message.usage;
+        const usageLine =
+          JSON.stringify({
+            t: new Date().toISOString(),
+            stage: evalStage,
+            scenario: evalScenarioId,
+            model: sdkOptions.model,
+            num_turns: message.num_turns ?? null,
+            input_tokens: u.input_tokens ?? null,
+            output_tokens: u.output_tokens ?? null,
+            cache_read_input_tokens: u.cache_read_input_tokens ?? null,
+            cache_creation_input_tokens: u.cache_creation_input_tokens ?? null,
+          }) + "\n";
+        appendFile(join(resolvedOptions.evalDir, "token-usage.jsonl"), usageLine, "utf8").catch(
+          () => {},
+        );
+      }
 
       if (message.structured_output?.assistantText) {
         assistantText = message.structured_output.assistantText;
@@ -532,6 +575,13 @@ export function buildAllowedToolsForStage(stageRunnerInput, hasTopologyMcpConfig
     ...(hasTopologyMcpConfig && stage === "time-sync"
       ? ["mcp__tsn_topology__topology_inspect"]
       : []),
+    // U3：flow 工具只在流量规划阶段开放（同住 tsn_topology stdio server，故同门控
+    // hasTopologyMcpConfig）。录流写库走 sidecar + verify_flow 闸，不经 stageResult 对账。
+    ...(hasTopologyMcpConfig && stage === "flow-template" ? FLOW_MCP_ALLOWED_TOOLS : []),
+    // flow 阶段同样放行只读 topology_inspect：录流要把 talker/listener 节点名解析成 mid。
+    ...(hasTopologyMcpConfig && stage === "flow-template"
+      ? ["mcp__tsn_topology__topology_inspect"]
+      : []),
     // U6：撤销工具只在拓扑阶段开放（不像 request_stage_change 全阶段）——本期只撤 topology，
     // 在时间同步 / 流量规划阶段撤销会错误回退拓扑。撤销 in-process 不依赖拓扑 stdio server，
     // 故只门控 stage（不门控 hasTopologyMcpConfig）。time-sync 阶段撤销走 timesync.undo 工具。
@@ -563,7 +613,9 @@ function skillDirForStage(stageRunnerInput) {
     isRecord(stageRunnerInput) && typeof stageRunnerInput.stage === "string"
       ? stageRunnerInput.stage
       : undefined;
-  return stage === "time-sync" ? "tsn-time-sync" : "tsn-topology";
+  if (stage === "time-sync") return "tsn-time-sync";
+  if (stage === "flow-template") return "tsn-flow-planning";
+  return "tsn-topology";
 }
 
 async function buildSystemPromptForStage(stageRunnerInput, skillRoot) {

@@ -101,17 +101,16 @@ describe("workflow stage result contract", () => {
     });
   });
 
-  it("rejects flow-template stage results while the stage is offline", () => {
+  it("accepts flow-template stage results after unfreeze (placeholder path, like time-sync)", () => {
+    // U4：flow-template 已解冻。flow 写库走 sidecar、不产 payload，但万一收到 stage result
+    // 也走通用占位路径（不再抛「暂未启用」）。
     expect(
       validateWorkflowStageResult({
         ...topologyWorkflowResult(),
         stage: "flow-template",
         payload: { kind: "flow-template" },
       }),
-    ).toMatchObject({
-      ok: false,
-      errors: [expect.stringContaining("flow-template 阶段结果暂未启用")],
-    });
+    ).toMatchObject({ ok: true });
   });
 
   it("rejects success results when validation is false", () => {

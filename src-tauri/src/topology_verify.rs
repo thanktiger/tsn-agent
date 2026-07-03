@@ -52,6 +52,9 @@ pub struct VerifyNode {
     pub mid: String,
     pub name: Option<String>,
     pub node_type: Option<String>,
+    /// 队列数（topology_nodes.queue_count，默认 8）：软仿 bundle 用作 INET egress
+    /// numTrafficClasses（每 PCP 一个门）。结构校验不关心，测试构造给默认 8。
+    pub queue_count: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -362,6 +365,7 @@ mod tests {
             mid: sync.into(),
             name: None,
             node_type: Some(ty.into()),
+            queue_count: 8,
         }
     }
     fn link(seq: i64, src: &str, dst: &str) -> VerifyLink {
@@ -383,6 +387,7 @@ mod tests {
             mid: sync.into(),
             name: Some(name.into()),
             node_type: Some(ty.into()),
+            queue_count: 8,
         }
     }
 
@@ -466,6 +471,7 @@ mod tests {
             mid: "2".into(),
             name: None,
             node_type: None,
+            queue_count: 8,
         });
         let links = vec![link(0, "0", "1"), link(1, "0", "2")];
         let r = verify_topology(&nodes, &links);
@@ -550,6 +556,7 @@ mod tests {
                 mid: "2".into(),
                 name: Some("FOO-1".into()),
                 node_type: None,
+                queue_count: 8,
             },
         ];
         let links = vec![link(0, "0", "1"), link(1, "0", "2")];

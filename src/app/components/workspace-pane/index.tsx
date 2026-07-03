@@ -22,6 +22,8 @@ import {
   type TopologyRowSnapshot,
 } from "../../../sessions/topology-snapshot";
 import { DetailRow, Stat } from "../shared";
+import { FlowPanel } from "./flow-panel";
+import type { PlanUiState, VerifyUiState } from "./flow-sim";
 import type { HardwareUiState } from "./hardware-deploy";
 import { TimeSyncPanel, type TimesyncSubTab } from "./time-sync-panel";
 import type { SimUiState } from "./timesync-sim";
@@ -42,6 +44,7 @@ import {
 } from "./topology-flow";
 import { TsnFloatingEdge } from "./tsn-floating-edge";
 
+export type { PlanUiState, VerifyUiState } from "./flow-sim";
 export type { HardwareUiState } from "./hardware-deploy";
 export type { TimesyncSubTab } from "./time-sync-panel";
 export type { SimUiState } from "./timesync-sim";
@@ -59,11 +62,12 @@ export {
   topologySnapshotToReactFlow,
 } from "./topology-flow";
 
-export type ConfigTabId = "node-props" | "time-sync";
+export type ConfigTabId = "node-props" | "time-sync" | "flow";
 
 const CONFIG_TABS: Array<{ id: ConfigTabId; label: string }> = [
   { id: "node-props", label: "节点属性" },
   { id: "time-sync", label: "时间同步" },
+  { id: "flow", label: "流量规划" },
 ];
 
 const nodeTypes = {
@@ -174,6 +178,11 @@ export interface WorkspacePaneProps {
   /** U8：App 级硬件部署运行态（随会话重置）。 */
   hardwareState: HardwareUiState;
   onHardwareStateChange: (state: HardwareUiState) => void;
+  /** U9：App 级流量规划/软仿运行态（切 tab 不取消命令；随会话重置）。 */
+  flowPlanState: PlanUiState;
+  onFlowPlanStateChange: (state: PlanUiState) => void;
+  flowVerifyState: VerifyUiState;
+  onFlowVerifyStateChange: (state: VerifyUiState) => void;
   /** 时间同步子 tab 选择（App 级，随会话重置；reveal 可强制落 soft-sim）。 */
   activeTimesyncSubTab: TimesyncSubTab;
   onSelectTimesyncSubTab: (tab: TimesyncSubTab) => void;
@@ -206,6 +215,10 @@ export function WorkspacePane({
   onSimStateChange,
   hardwareState,
   onHardwareStateChange,
+  flowPlanState,
+  onFlowPlanStateChange,
+  flowVerifyState,
+  onFlowVerifyStateChange,
   activeTimesyncSubTab,
   onSelectTimesyncSubTab,
   timesyncTabHasBadge,
@@ -842,6 +855,18 @@ export function WorkspacePane({
                 onHardwareStateChange={onHardwareStateChange}
                 activeSubTab={activeTimesyncSubTab}
                 onSelectSubTab={onSelectTimesyncSubTab}
+              />
+            )}
+
+            {activeConfigTab === "flow" && (
+              <FlowPanel
+                key={sessionId}
+                inFlowStage={workflowStep === "flow-template"}
+                sessionId={sessionId}
+                planState={flowPlanState}
+                onPlanStateChange={onFlowPlanStateChange}
+                verifyState={flowVerifyState}
+                onVerifyStateChange={onFlowVerifyStateChange}
               />
             )}
           </div>

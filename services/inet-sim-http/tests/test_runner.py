@@ -100,6 +100,62 @@ def test_single_run_rejects_second(monkeypatch):
     assert second != first
 
 
+def _fake_plan_env(
+    inet_rc=0,
+    inet_out="inet ran",
+    grep_out='par N.sw1.eth[1].macLayer.queue.transmissionGate[0] durations "[300us, 700us]"\n',
+):
+    """plan verb 的 _run_in_inet_env mock：inet（param-recording）+ grep .sca 两步。"""
+
+    def fake(inner: str) -> subprocess.CompletedProcess:
+        if "grep" in inner:
+            return subprocess.CompletedProcess([], 0, grep_out, "")
+        return subprocess.CompletedProcess([], inet_rc, inet_out, "")
+
+    return fake
+
+
+def test_plan_happy_returns_sca_gcl(monkeypatch):
+    monkeypatch.setattr(runner, "_run_in_inet_env", _fake_plan_env())
+    job = _wait_done(runner.submit_plan(_NED, _INI, _MANIFEST))
+    assert job.status == "done"
+    assert job.result["exit_code"] == 0
+    assert "transmissionGate" in job.result["sca_gcl"]
+    assert job.result["solver"] == "Z3"
+    # bundle 写到固定布局。
+    assert os.path.isfile(os.path.join(job.run_dir, "omnetpp.ini"))
+
+
+def test_plan_inet_nonzero_no_gcl(monkeypatch):
+    monkeypatch.setattr(runner, "_run_in_inet_env", _fake_plan_env(inet_rc=1, inet_out="UNSAT"))
+    job = _wait_done(runner.submit_plan(_NED, _INI, _MANIFEST))
+    assert job.result["exit_code"] == 1
+    assert job.result["sca_gcl"] is None
+    assert job.result["solver"] is None
+
+
+def test_plan_empty_grep_is_none(monkeypatch):
+    monkeypatch.setattr(runner, "_run_in_inet_env", _fake_plan_env(grep_out="   \n"))
+    job = _wait_done(runner.submit_plan(_NED, _INI, _MANIFEST))
+    assert job.result["exit_code"] == 0
+    assert job.result["sca_gcl"] is None  # grep 0 行 → None
+
+
+def test_plan_and_sim_share_single_run_lock(monkeypatch):
+    gate = threading.Event()
+
+    def blocking(inner: str) -> subprocess.CompletedProcess:
+        gate.wait(timeout=5)
+        return subprocess.CompletedProcess([], 0, "ok", "")
+
+    monkeypatch.setattr(runner, "_run_in_inet_env", blocking)
+    first = runner.submit_plan(_NED, _INI, _MANIFEST)  # 卡住
+    with pytest.raises(runner.Busy):
+        _submit()  # sim 提交应被单运行锁拒
+    gate.set()
+    _wait_done(first)
+
+
 def test_gc_keeps_recent_n(monkeypatch):
     base = config.RUN_BASE_DIR
     os.makedirs(base, exist_ok=True)

@@ -37,6 +37,25 @@ pub trait InetSimHttpClient {
     fn result(&self, base_url: &str, job_id: &str) -> Result<HttpSimResult, String>;
 }
 
+/// 规划（Z3 综合）result：exit + 日志尾 + `.sca` 里 param-recording 出的 transmissionGate
+/// 门参数文本（U1/U6 spike：跑 inet 带 `--**.param-recording=true`、grep .sca 门行）。
+#[derive(Debug, Clone, Deserialize)]
+pub struct HttpPlanResult {
+    pub exit_code: i32,
+    pub output_tail: String,
+    pub sca_gcl: Option<String>,
+    /// 求解器出处（R8）：服务端跑 Z3 成功记 "Z3"，退 Eager 记 "Eager"。缺省视为 Z3。
+    #[serde(default)]
+    pub solver: Option<String>,
+}
+
+/// 规划路径 HTTP 客户端（KTD1：与验证路径的 `RemoteRunner` 分开——plan 回 GCL 文本不是 CSV，
+/// 不扩 `RemoteRunner` 以免逼 `MockRunner` 也改）。`plan_gcl` 阻塞至 job 完成，回 GCL 文本。
+/// U7 单测用 `MockPlanClient` 注入（绕过 HTTP）。
+pub trait InetSimPlanClient {
+    fn plan_gcl(&self, base_url: &str, bundle: &InetBundle) -> Result<HttpPlanResult, String>;
+}
+
 // ---------- 真实现：ReqwestInetSimClient ----------
 
 #[derive(Serialize)]
@@ -161,6 +180,106 @@ impl InetSimHttpClient for ReqwestInetSimClient {
             }
             serde_json::from_slice::<HttpSimResult>(&bytes)
                 .map_err(|e| format!("解析结果失败：{e}"))
+        })
+    }
+}
+
+#[derive(Serialize)]
+struct PlanBody<'a> {
+    network_ned: &'a str,
+    omnetpp_ini: &'a str,
+    manifest_json: &'a str,
+}
+
+#[derive(Deserialize)]
+struct PlanStatusResp {
+    status: String,
+}
+
+/// 规划路径复用 submit→poll→result 三步，但走 `/sim/plan*` 端点、result 回 GCL 文本。
+/// 内部自轮询（阻塞）；poll 逻辑不单测（真机验证），与 submit/status/result 的 reqwest 实现同口径。
+impl InetSimPlanClient for ReqwestInetSimClient {
+    fn plan_gcl(&self, base_url: &str, bundle: &InetBundle) -> Result<HttpPlanResult, String> {
+        let submit_url = endpoint(base_url, "plan");
+        let body = PlanBody {
+            network_ned: &bundle.network_ned,
+            omnetpp_ini: &bundle.omnetpp_ini,
+            manifest_json: &bundle.manifest_json,
+        };
+        let payload = serde_json::to_vec(&body).map_err(|e| format!("序列化 bundle 失败：{e}"))?;
+        let job_id = run_async(async move {
+            let resp = http_client()
+                .post(&submit_url)
+                .header("Content-Type", "application/json")
+                .body(payload)
+                .send()
+                .await
+                .map_err(|e| format!("提交规划失败：{e}"))?;
+            let status = resp.status();
+            let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
+            if status.as_u16() == 409 {
+                return Err("软仿服务忙（已有任务在运行）".to_string());
+            }
+            if !status.is_success() {
+                return Err(format!(
+                    "提交规划失败（HTTP {status}）：{}",
+                    body_text(&bytes)
+                ));
+            }
+            serde_json::from_slice::<JobResp>(&bytes)
+                .map(|j| j.job_id)
+                .map_err(|e| format!("解析 job_id 失败：{e}"))
+        })?;
+
+        let start = Instant::now();
+        loop {
+            let status_url = endpoint(base_url, &format!("plan/{job_id}/status"));
+            let st = run_async(async move {
+                let resp = http_client()
+                    .get(&status_url)
+                    .send()
+                    .await
+                    .map_err(|e| format!("查规划状态失败：{e}"))?;
+                let code = resp.status();
+                let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
+                if !code.is_success() {
+                    return Err(format!(
+                        "查规划状态失败（HTTP {code}）：{}",
+                        body_text(&bytes)
+                    ));
+                }
+                serde_json::from_slice::<PlanStatusResp>(&bytes)
+                    .map(|s| s.status)
+                    .map_err(|e| format!("解析规划状态失败：{e}"))
+            })?;
+            match st.as_str() {
+                "done" => break,
+                "failed" => return Err("规划执行失败（服务端 job failed）".to_string()),
+                _ => {}
+            }
+            if start.elapsed() > DEFAULT_POLL_TIMEOUT {
+                return Err("规划轮询超时".to_string());
+            }
+            std::thread::sleep(DEFAULT_POLL_INTERVAL);
+        }
+
+        let result_url = endpoint(base_url, &format!("plan/{job_id}/result"));
+        run_async(async move {
+            let resp = http_client()
+                .get(&result_url)
+                .send()
+                .await
+                .map_err(|e| format!("取规划结果失败：{e}"))?;
+            let code = resp.status();
+            let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
+            if !code.is_success() {
+                return Err(format!(
+                    "取规划结果失败（HTTP {code}）：{}",
+                    body_text(&bytes)
+                ));
+            }
+            serde_json::from_slice::<HttpPlanResult>(&bytes)
+                .map_err(|e| format!("解析规划结果失败：{e}"))
         })
     }
 }

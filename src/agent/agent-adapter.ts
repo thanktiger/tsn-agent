@@ -13,6 +13,7 @@ import {
 } from "../project/project-state";
 import type { ChatMessage, TsnSession } from "../sessions/session-repository";
 import { redactSecretsInValue } from "../sessions/session-repository";
+import type { TimesyncSnapshot } from "../sessions/timesync-snapshot";
 import {
   countEndSystems,
   countSwitches,
@@ -214,11 +215,12 @@ export async function runTsnAgent(
       sessionId,
       userIntent: effectiveIntent,
     });
+    const finalWorkflow = await flagTimeSyncReadyIfPersisted(application.workflow, sessionId);
 
     return {
       events: application.events,
-      workflow: application.workflow,
-      assistantText: sanitizeClaudeAssistantText(claude.assistantText, application.workflow),
+      workflow: finalWorkflow,
+      assistantText: sanitizeClaudeAssistantText(claude.assistantText, finalWorkflow),
       mode: "claude",
       claudeSessionId: claude.sessionId,
       topologyMutationId: application.topologyMutationId,
@@ -347,6 +349,14 @@ function runAfterConfirmation(workflow: WorkflowState): TsnAgentResult {
     return runTimeSyncStage(confirmed);
   }
 
+  // U4：确认时间同步 → 进入流量规划阶段，走录流引导（取代旧的「暂下线」事件）。
+  if (
+    confirmed.currentStep === "flow-template" &&
+    confirmed.stages["flow-template"].status === "current"
+  ) {
+    return runFlowStage(confirmed);
+  }
+
   const summary = workflow.stages[workflow.currentStep].summary ?? "当前阶段已确认完成。";
   const events = [
     createEvent({
@@ -357,18 +367,6 @@ function runAfterConfirmation(workflow: WorkflowState): TsnAgentResult {
       content: summary,
       status: "success",
     }),
-    ...(confirmed.currentStep === "flow-template"
-      ? [
-          createEvent({
-            id: "event-stage-offline",
-            kind: "stage-result",
-            stage: confirmed.currentStep,
-            title: "后续阶段暂下线",
-            content: "流量规划在当前版本暂时下线，预计 Phase B 回归。",
-            status: "info",
-          }),
-        ]
-      : []),
   ];
 
   return {
@@ -421,6 +419,46 @@ function runTimeSyncStage(workflow: WorkflowState): TsnAgentResult {
   };
 }
 
+// U4：进入流量规划阶段的引导（确定性、不走大模型），镜像 runTimeSyncStage。阶段置 current：
+// 用户用自然语言录流（经大模型调 flow 工具落库），再去面板点「规划门控表」「软仿验证」。
+function runFlowStage(workflow: WorkflowState): TsnAgentResult {
+  const guidance = [
+    "进入流量规划阶段。请用自然语言把要承载的流告诉我，例如「加一条 ES-1 到 ES-2 的 ST 流，周期 500us、512 字节、发 1 万个」。",
+    "每条流至少要发送节点、接收节点、类别（ST/BE）、周期、报文长度、优先级；录入时会自动校验（周期须整除门控周期、报文不超 MTU、节点须在拓扑里等）。",
+    "流录好后，去右侧「流量规划」面板点「规划门控表」让求解器算出 802.1Qbv 门控表，再点「软仿验证」跑仿真实测抖动/丢包/时延。",
+  ].join("\n");
+  const nextWorkflow = recordStageResult(workflow, {
+    step: "flow-template",
+    summary: "等待录入流量。",
+    waitingConfirmation: false,
+  });
+  const events = [
+    createEvent({
+      id: "event-flow-start",
+      kind: "stage-start",
+      stage: "flow-template",
+      title: "流量规划阶段开始",
+      content: "请录入要承载的流。",
+      status: "info",
+    }),
+    createEvent({
+      id: "event-flow-guidance",
+      kind: "thought",
+      stage: "flow-template",
+      title: "录入流量",
+      content: guidance,
+      status: "info",
+    }),
+  ];
+
+  return {
+    events,
+    workflow: nextWorkflow,
+    assistantText: guidance,
+    mode: "local",
+  };
+}
+
 function createUnavailableResult(workflow: WorkflowState): TsnAgentResult {
   const downloadUrl = import.meta.env.VITE_DESKTOP_DOWNLOAD_URL as string | undefined;
   const content = [
@@ -453,7 +491,8 @@ interface StageChangeRequest {
   reason?: string;
 }
 
-// 只允许切回有真实处理的阶段；flow-template 暂下线，切过去是死胡同。
+// request_stage_change 只用于**回退**到已完成的阶段；flow-template 是前进阶段（经确认进入、
+// 是最后一步），不作回退目标，故不在此表（worker 的 request_stage_change 工具 enum 亦只含二者）。
 const STAGE_SWITCH_TARGETS: readonly WorkflowStep[] = ["topology", "time-sync"];
 
 function asStageChangeRequest(value: unknown): StageChangeRequest | undefined {
@@ -778,9 +817,8 @@ function buildConversationContext(
     hasTopology
       ? "重要：已有拓扑是工程数据库中的当前真实状态；本轮新请求必须通过 tsn_topology MCP 工具写入后才会更新右侧工程。"
       : "重要：当前还没有右侧工程；不要把示例或占位文本当作用户需求。",
-    "重要：只描述当前阶段已经完成或正在等待确认的内容；不要提前宣称后续阶段的控制流、规划器输入或导出文件已经生成。",
-    "重要：固定阶段顺序是拓扑 -> 时间同步 -> 流量规划。拓扑确认后必须进入时间同步，不要说进入配置控制流或流量规划。",
-    "重要：流量规划在当前版本暂时下线，不要声称可以生成流量规划或导出文件。",
+    "重要：只描述当前阶段已经完成或正在等待确认的内容；不要提前宣称后续阶段的结果已经生成。",
+    "重要：固定阶段顺序是拓扑 -> 时间同步 -> 流量规划，不要跳阶段；前进由用户点「确认并继续」完成。",
     workflow.pendingStageChange
       ? `重要：已有一个待用户确认的回退提议（目标阶段：${scenarioConfig.stageLabels[workflow.pendingStageChange]}）。不要重复调用 request_stage_change；等待用户点确认按钮。`
       : "",
@@ -794,6 +832,44 @@ function buildConversationContext(
     "工程状态：",
     topologySummary,
   ].join("\n");
+}
+
+// U9 修复：进入时间同步阶段时状态为 current（先等用户指定 GM）。GM 一经 set_gm 落库——
+// 时钟同步树即生成（timesync_domain.gm_mid 非空）——本轮结束时把阶段翻成 waiting_confirmation，
+// 「确认并继续」按钮据此显示（镜像拓扑：产出工作的那一轮进入待确认，确认链/显示/verify 闸全复用）。
+// GM 只经对话调 set_gm 设置（面板无此入口），故翻转放在回合末尾即覆盖全部路径。
+async function flagTimeSyncReadyIfPersisted(
+  workflow: WorkflowState,
+  sessionId: string | undefined,
+): Promise<WorkflowState> {
+  if (workflow.currentStep !== "time-sync" || workflow.stages["time-sync"].status !== "current") {
+    return workflow;
+  }
+
+  const gmMid = await fetchTimesyncGmMid(sessionId);
+  if (!gmMid) {
+    return workflow;
+  }
+
+  return recordStageResult(workflow, {
+    step: "time-sync",
+    summary: "时钟同步树已生成，确认无误后点「确认并继续」进入流量规划阶段。",
+  });
+}
+
+async function fetchTimesyncGmMid(sessionId: string | undefined): Promise<string | undefined> {
+  if (!sessionId) {
+    return undefined;
+  }
+
+  try {
+    const snapshot = await invoke<TimesyncSnapshot>("query_timesync", {
+      request: { sessionId },
+    });
+    return snapshot.domain?.gmMid ?? undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 async function fetchTopologySnapshot(
@@ -827,7 +903,9 @@ function mentionsFlowStageAsCurrent(text: string): boolean {
 }
 
 function sanitizeClaudeAssistantText(assistantText: string, workflow: WorkflowState): string {
-  if (isUnsupportedSimulationClaim(assistantText)) {
+  // U4：仿真否认守卫在流量规划**之外**的阶段生效——flow 阶段软仿是真能力（面板 plan/verify），
+  // 合法的「软仿/远程仿真」措辞不该被改写成否认（R1）；flow 阶段靠 SKILL 指引约束措辞（不自称已跑）。
+  if (workflow.currentStep !== "flow-template" && isUnsupportedSimulationClaim(assistantText)) {
     return "当前版本还没有接入 OMNeT++/远程服务器仿真 runner，本次不会启动仿真。请先完成当前阶段的确认。";
   }
 

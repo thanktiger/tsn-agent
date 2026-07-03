@@ -9,6 +9,9 @@ result，映射成与 SSH 路径同样的 SimRunOutcome（plan KTD1/KTD4）。
   POST /sim/run                      JSON bundle+filter，返回 job_id（忙时 409）
   GET  /sim/run/{job_id}/status      查状态（queued/running/done/failed）
   GET  /sim/run/{job_id}/result      取结果（exit_code/output_tail/csv/scavetool_failed）
+  POST /sim/plan                     JSON bundle，跑 Z3 综合 + dump GCL，返回 job_id（忙时 409）
+  GET  /sim/plan/{job_id}/status     查规划状态
+  GET  /sim/plan/{job_id}/result     取规划结果（exit_code/output_tail/sca_gcl/solver）
 """
 
 from __future__ import annotations
@@ -37,6 +40,12 @@ class RunRequest(BaseModel):
     omnetpp_ini: str
     manifest_json: str
     scavetool_filter: str
+
+
+class PlanRequest(BaseModel):
+    network_ned: str
+    omnetpp_ini: str
+    manifest_json: str
 
 
 @app.get("/sim/healthz")
@@ -76,4 +85,36 @@ def result(job_id: str) -> dict:
         raise HTTPException(status_code=500, detail=job.error or "软仿执行失败")
     if job.status != "done" or job.result is None:
         raise HTTPException(status_code=409, detail="软仿尚未完成")
+    return job.result
+
+
+@app.post("/sim/plan")
+def plan(req: PlanRequest) -> JSONResponse:
+    """提交规划（Z3 综合门控表 + dump GCL）：收三段 bundle 文本，返回 job_id。单运行忙时 409。"""
+    try:
+        job_id = runner.submit_plan(req.network_ned, req.omnetpp_ini, req.manifest_json)
+    except runner.Busy as err:
+        raise HTTPException(status_code=409, detail=str(err)) from err
+    return JSONResponse(status_code=202, content={"job_id": job_id})
+
+
+@app.get("/sim/plan/{job_id}/status")
+def plan_status(job_id: str) -> dict:
+    job = runner.get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="未知 job_id")
+    return {"status": job.status}
+
+
+@app.get("/sim/plan/{job_id}/result")
+def plan_result(job_id: str) -> dict:
+    """取规划结果：done 才回 {exit_code, output_tail, sca_gcl, solver}；
+    failed → 500；运行中 → 409；未知 → 404。"""
+    job = runner.get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="未知 job_id")
+    if job.status == "failed":
+        raise HTTPException(status_code=500, detail=job.error or "规划执行失败")
+    if job.status != "done" or job.result is None:
+        raise HTTPException(status_code=409, detail="规划尚未完成")
     return job.result

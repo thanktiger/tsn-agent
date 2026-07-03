@@ -207,12 +207,15 @@ describe("App", () => {
     expect(screen.getByText("草稿")).toBeInTheDocument();
   });
 
-  it("keeps the disabled flow step visible", () => {
+  it("keeps the flow step visible in its locked initial state", () => {
     render(<App />);
 
+    // U4 解冻后 flow-template 不再划掉，与其它步骤一致按 workflow 状态渲染；
+    // 初始为 locked（拓扑才是 current），仍完整出现在步骤条里。
     const stepper = screen.getByLabelText("配置步骤");
     const flowStep = within(stepper).getByText("流量规划").closest(".stepper-item");
-    expect(flowStep).toHaveAttribute("aria-disabled", "true");
+    expect(flowStep).toBeInTheDocument();
+    expect(flowStep).toHaveClass("locked");
   });
 
   it("defaults to the aerospace scenario and applies it to the agent session", async () => {

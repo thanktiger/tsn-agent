@@ -32,14 +32,17 @@ vi.mock("./sidecar-client", () => ({
 }));
 
 import { z } from "zod";
-import { TIMESYNC_TOOL_NAMES } from "../../src/topology/topology-service";
+import { FLOW_TOOL_NAMES, TIMESYNC_TOOL_NAMES } from "../../src/topology/topology-service";
 import type { SidecarResult } from "./sidecar-client";
 import {
   applyOperationsInputSchema,
+  assertFlowToolMapping,
   assertTopologyToolMapping,
+  createFlowToolRegistry,
   createTimesyncToolRegistry,
   createTopologyToolRegistry,
   expectedAllowedToolName,
+  FLOW_MCP_ALLOWED_TOOLS,
   initializeInputSchema,
   runTimesyncTool,
   runTopologyTool,
@@ -960,5 +963,44 @@ describe("timesync input schemas (zod boundary)", () => {
     expect(setParams.safeParse({ mid: "" }).success).toBe(false);
     // 空补丁（全部省略）是合法的——sidecar 端 COALESCE 全 no-op。
     expect(setParams.safeParse({}).success).toBe(true);
+  });
+});
+
+describe("flow MCP tool registry", () => {
+  it("registers the flow tools with the expected allowedTool mappings (drift guard)", () => {
+    const registry = createFlowToolRegistry();
+    expect(registry.map((tool) => tool.name)).toEqual(FLOW_TOOL_NAMES);
+    expect(registry.map((tool) => tool.allowedToolName)).toEqual(FLOW_MCP_ALLOWED_TOOLS);
+    expect(FLOW_MCP_ALLOWED_TOOLS).toEqual(FLOW_TOOL_NAMES.map(expectedAllowedToolName));
+    for (const name of FLOW_MCP_ALLOWED_TOOLS) {
+      expect(name.startsWith("mcp__tsn_topology__flow_")).toBe(true);
+    }
+    expect(() => assertFlowToolMapping()).not.toThrow();
+  });
+
+  it("flow.add_stream zod schema rejects out-of-range pcp / non-positive period (early fail, R6)", () => {
+    const addStream = z.object(
+      createFlowToolRegistry().find((t) => t.name === "flow.add_stream")?.inputSchema ?? {},
+    );
+    const base = {
+      class: "ST",
+      pcp: 7,
+      periodUs: 500,
+      frameBytes: 512,
+      count: 10000,
+      talker: "0",
+      listener: "1",
+    };
+    expect(addStream.safeParse(base).success).toBe(true);
+    // pcp 越界。
+    expect(addStream.safeParse({ ...base, pcp: 8 }).success).toBe(false);
+    // 周期非正。
+    expect(addStream.safeParse({ ...base, periodUs: 0 }).success).toBe(false);
+    // 报文超 MTU。
+    expect(addStream.safeParse({ ...base, frameBytes: 2000 }).success).toBe(false);
+    // class 非法。
+    expect(addStream.safeParse({ ...base, class: "XX" }).success).toBe(false);
+    // maxLatencyUs 可选（省略合法）。
+    expect(addStream.safeParse(base).success).toBe(true);
   });
 });

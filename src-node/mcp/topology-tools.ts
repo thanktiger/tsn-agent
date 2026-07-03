@@ -2,6 +2,8 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { measureJsonBytes, measureJsonDepth, TOPOLOGY_LIMITS } from "../../src/topology/limits";
 import {
+  FLOW_TOOL_NAMES,
+  type FlowToolName,
   TIMESYNC_TOOL_NAMES,
   type TimesyncToolName,
   TOPOLOGY_TOOL_NAMES,
@@ -12,6 +14,8 @@ import { fetchSidecar, type SidecarFailure, type SidecarResult } from "./sidecar
 export const TOPOLOGY_MCP_ALLOWED_TOOLS = TOPOLOGY_TOOL_NAMES.map(expectedAllowedToolName);
 
 export const TIMESYNC_MCP_ALLOWED_TOOLS = TIMESYNC_TOOL_NAMES.map(expectedAllowedToolName);
+
+export const FLOW_MCP_ALLOWED_TOOLS = FLOW_TOOL_NAMES.map(expectedAllowedToolName);
 
 export interface TopologyMcpToolDefinition {
   name: TopologyToolName;
@@ -561,7 +565,9 @@ function pruneUndefined(body: Record<string, unknown>): Record<string, unknown> 
   return out;
 }
 
-export function expectedAllowedToolName(name: TopologyToolName | TimesyncToolName): string {
+export function expectedAllowedToolName(
+  name: TopologyToolName | TimesyncToolName | FlowToolName,
+): string {
   return `mcp__tsn_topology__${name.replaceAll(".", "_")}`;
 }
 
@@ -702,6 +708,134 @@ export function runTimesyncTool(name: TimesyncToolName, args: unknown): Promise<
   }
 
   return tool.handler(args);
+}
+
+// ===================== flow 工具（流量规划阶段） =====================
+// 与 topology/timesync 同一 sidecar、同一 stdio server（tsn_topology），按 stage 门控
+// （worker buildAllowedToolsForStage：flow 工具仅 flow-template 阶段 + 只读 topology.inspect）。
+// handler 是薄 callSidecarTool('/db/flow/...')——校验闸在 Rust 路由侧（verify_flow，U2）。
+// zod .min().max() 早失败服务 R6（越界/负值在到 Rust 前就拒）。
+
+export interface FlowMcpToolDefinition {
+  name: FlowToolName;
+  allowedToolName: (typeof FLOW_MCP_ALLOWED_TOOLS)[number];
+  title: string;
+  description: string;
+  inputSchema: z.ZodRawShape;
+  handler: (args: unknown) => Promise<CallToolResult>;
+}
+
+function addStreamInputSchema(): z.ZodRawShape {
+  return {
+    class: z.enum(["ST", "BE", "RC"]).describe("流量类别：ST 时间敏感 / BE 尽力而为 / RC 冗余"),
+    pcp: z.number().int().min(0).max(7).describe("802.1Q 优先级 PCP，0–7"),
+    periodUs: z.number().int().min(1).describe("发送周期（us），须整除门控周期 1000us"),
+    frameBytes: z.number().int().min(1).max(1500).describe("报文长度（字节），≤ 链路 MTU 1500"),
+    count: z.number().int().min(1).describe("期望发送报文数（验证期判收=发）"),
+    talker: z.string().min(1).describe("发送节点 mid（先用 topology.inspect 定位）"),
+    listener: z.string().min(1).describe("接收节点 mid"),
+    maxLatencyUs: z
+      .number()
+      .int()
+      .min(1)
+      .optional()
+      .describe("端到端最大时延（us）；省略则规划期从 docx 窗口推导、再回退取周期"),
+  };
+}
+
+export function createFlowToolRegistry(): FlowMcpToolDefinition[] {
+  return [
+    {
+      name: "flow.add_stream",
+      allowedToolName: "mcp__tsn_topology__flow_add_stream",
+      title: "Add a traffic stream",
+      description:
+        "Record one traffic stream (ST/BE/RC) for the session. Runs the verify_flow gate first " +
+        "(period must divide the 1000us gate cycle, frame <= link MTU, talker/listener must be existing " +
+        "node mids, same PCP must map to one class); on violation the stream is rejected with the offending " +
+        "field and NOT persisted. talker/listener are node mids (call topology.inspect to find them). " +
+        "maxLatencyUs is optional (planning derives it from the docx window when omitted). Returns the " +
+        "assigned streamSeq on success.",
+      inputSchema: addStreamInputSchema(),
+      handler: async (args) =>
+        callSidecarTool("/db/flow/add_stream", args, {
+          class: pickString(args, "class"),
+          pcp: pickValue(args, "pcp"),
+          periodUs: pickValue(args, "periodUs"),
+          frameBytes: pickValue(args, "frameBytes"),
+          count: pickValue(args, "count"),
+          talker: pickString(args, "talker"),
+          listener: pickString(args, "listener"),
+          maxLatencyUs: pickValue(args, "maxLatencyUs"),
+        }),
+    },
+    {
+      name: "flow.inspect",
+      allowedToolName: "mcp__tsn_topology__flow_inspect",
+      title: "Inspect recorded streams + gate plans",
+      description:
+        "Return the session's recorded streams[] { streamSeq, class, pcp, periodUs, frameBytes, count, " +
+        "talker, listener, maxLatencyUs, redundant, paths } and any synthesized gate plans[] " +
+        "{ streamSeq, node, ethN, gateIndex, initiallyOpen, offsetNs, durationsNs, solver }. No parameters. " +
+        "Call this to see what's recorded / planned before adding or removing streams.",
+      inputSchema: {},
+      handler: async (args) => callSidecarTool("/db/flow/inspect", args, {}),
+    },
+    {
+      name: "flow.remove_stream",
+      allowedToolName: "mcp__tsn_topology__flow_remove_stream",
+      title: "Remove a traffic stream",
+      description:
+        "Remove the stream with the given streamSeq (from flow.inspect) and its synthesized gate plan. " +
+        "No-op (removed=0) when the seq doesn't exist. Only touches flow tables.",
+      inputSchema: {
+        streamSeq: z
+          .number()
+          .int()
+          .min(0)
+          .describe("要删除的流 streamSeq（先用 flow.inspect 定位）"),
+      },
+      handler: async (args) =>
+        callSidecarTool("/db/flow/remove_stream", args, {
+          streamSeq: pickValue(args, "streamSeq"),
+        }),
+    },
+  ];
+}
+
+export function runFlowTool(name: FlowToolName, args: unknown): Promise<CallToolResult> {
+  const tool = createFlowToolRegistry().find((candidate) => candidate.name === name);
+  if (!tool) {
+    return Promise.resolve(
+      toCallToolResult({
+        ok: false,
+        errors: [
+          {
+            code: "UNKNOWN_TOOL",
+            message: `Unknown flow tool: ${name}`,
+            path: "$.name",
+            severity: "error",
+            retryable: false,
+            requiresUserClarification: false,
+          },
+        ],
+      }),
+    );
+  }
+  return tool.handler(args);
+}
+
+export function assertFlowToolMapping(): void {
+  const registry = createFlowToolRegistry();
+  const names = registry.map((tool) => tool.name);
+  if (JSON.stringify(names) !== JSON.stringify(FLOW_TOOL_NAMES)) {
+    throw new Error(`Flow MCP tool registry drifted: ${names.join(", ")}`);
+  }
+  for (const tool of registry) {
+    if (tool.allowedToolName !== expectedAllowedToolName(tool.name)) {
+      throw new Error(`Flow MCP allowed tool mapping drifted for ${tool.name}.`);
+    }
+  }
 }
 
 // 2^n 集合校验：syncPeriod/measurePeriod 取 1..32768（n=0..15），meanLinkDelayThresh

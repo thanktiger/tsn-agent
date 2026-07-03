@@ -16,6 +16,7 @@ use sqlx::{Pool, Row, Sqlite, SqliteConnection};
 
 pub const TOPOLOGY_DOMAIN: &str = "topology";
 pub const TIMESYNC_DOMAIN: &str = "timesync";
+pub const FLOW_DOMAIN: &str = "flow";
 
 /// pre-image blob 的整体形状：两表各一段。列清单与 `SESSION_SCOPED_TABLES`
 /// 的 topology_* 条目一一对应，避免漂移。
@@ -93,6 +94,50 @@ struct TimesyncNodeRow {
     offset_threshold: Option<i64>,
 }
 
+/// flow domain 的 pre-image：录入流表 + 综合门控表。列清单与 `topology_streams` /
+/// `flow_plans` schema 一一对应（与 SESSION_SCOPED_TABLES 同源，避免漂移）。
+/// flow 的单步撤销触发（按钮/命令）本期 defer，但 snapshot/restore 分派须域安全
+/// （domain="flow" 绝不落到 topology 表名上）——故两段都实现。
+#[derive(Debug, Serialize, Deserialize)]
+struct FlowPreImage {
+    streams: Vec<FlowStreamRow>,
+    plans: Vec<FlowPlanRow>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct FlowStreamRow {
+    session_id: String,
+    stream_seq: i64,
+    class: String,
+    pcp: i64,
+    period_us: i64,
+    frame_bytes: i64,
+    count: i64,
+    talker: String,
+    listener: String,
+    src_ip: Option<String>,
+    dst_ip: Option<String>,
+    src_l4_port: Option<i64>,
+    dst_l4_port: Option<i64>,
+    l4_protocol: Option<String>,
+    max_latency_us: Option<i64>,
+    redundant: i64,
+    paths: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct FlowPlanRow {
+    session_id: String,
+    stream_seq: i64,
+    node: String,
+    eth_n: i64,
+    gate_index: i64,
+    initially_open: i64,
+    offset_ns: i64,
+    durations_ns: String,
+    solver: String,
+}
+
 /// serde_json 错误折进 sqlx::Error，保持函数签名为 `Result<_, sqlx::Error>`
 /// （与邻近 DB 函数一致）。
 fn json_err(e: serde_json::Error) -> sqlx::Error {
@@ -118,6 +163,7 @@ pub async fn snapshot_pre_image(
 ) -> Result<(), sqlx::Error> {
     let blob_json = match domain {
         TIMESYNC_DOMAIN => snapshot_timesync_blob(conn, session_id).await?,
+        FLOW_DOMAIN => snapshot_flow_blob(conn, session_id).await?,
         // 默认（含 TOPOLOGY_DOMAIN）走 topology 两表。
         _ => snapshot_topology_blob(conn, session_id).await?,
     };
@@ -246,6 +292,71 @@ async fn snapshot_timesync_blob(
     serde_json::to_string(&pre_image).map_err(json_err)
 }
 
+/// 读 flow 两表（topology_streams / flow_plans）→ blob JSON。
+async fn snapshot_flow_blob(
+    conn: &mut SqliteConnection,
+    session_id: &str,
+) -> Result<String, sqlx::Error> {
+    let stream_rows = sqlx::query(
+        r#"SELECT session_id, stream_seq, class, pcp, period_us, frame_bytes, count,
+                  talker, listener, src_ip, dst_ip, src_l4_port, dst_l4_port, l4_protocol,
+                  max_latency_us, redundant, paths
+           FROM topology_streams WHERE session_id = ? ORDER BY stream_seq"#,
+    )
+    .bind(session_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    let plan_rows = sqlx::query(
+        r#"SELECT session_id, stream_seq, node, eth_n, gate_index, initially_open,
+                  offset_ns, durations_ns, solver
+           FROM flow_plans WHERE session_id = ? ORDER BY stream_seq, node, eth_n, gate_index"#,
+    )
+    .bind(session_id)
+    .fetch_all(&mut *conn)
+    .await?;
+
+    let pre_image = FlowPreImage {
+        streams: stream_rows
+            .into_iter()
+            .map(|r| FlowStreamRow {
+                session_id: r.get("session_id"),
+                stream_seq: r.get("stream_seq"),
+                class: r.get("class"),
+                pcp: r.get("pcp"),
+                period_us: r.get("period_us"),
+                frame_bytes: r.get("frame_bytes"),
+                count: r.get("count"),
+                talker: r.get("talker"),
+                listener: r.get("listener"),
+                src_ip: r.get("src_ip"),
+                dst_ip: r.get("dst_ip"),
+                src_l4_port: r.get("src_l4_port"),
+                dst_l4_port: r.get("dst_l4_port"),
+                l4_protocol: r.get("l4_protocol"),
+                max_latency_us: r.get("max_latency_us"),
+                redundant: r.get("redundant"),
+                paths: r.get("paths"),
+            })
+            .collect(),
+        plans: plan_rows
+            .into_iter()
+            .map(|r| FlowPlanRow {
+                session_id: r.get("session_id"),
+                stream_seq: r.get("stream_seq"),
+                node: r.get("node"),
+                eth_n: r.get("eth_n"),
+                gate_index: r.get("gate_index"),
+                initially_open: r.get("initially_open"),
+                offset_ns: r.get("offset_ns"),
+                durations_ns: r.get("durations_ns"),
+                solver: r.get("solver"),
+            })
+            .collect(),
+    };
+
+    serde_json::to_string(&pre_image).map_err(json_err)
+}
+
 /// 撤销：读对应 domain 的 pre-image（无则 no-op 返 false），自开事务把该 domain
 /// 的表盖回，清除 pre-image（使再次撤销返 false），commit 后返 true。
 /// 盖回的 DELETE/INSERT 目标表集合严格按 domain 分派——绝不触碰别的 domain 的表。
@@ -272,6 +383,7 @@ pub async fn restore_pre_image(
 
     match domain {
         TIMESYNC_DOMAIN => restore_timesync(&mut tx, session_id, &blob_json).await?,
+        FLOW_DOMAIN => restore_flow(&mut tx, session_id, &blob_json).await?,
         // 默认（含 TOPOLOGY_DOMAIN）走 topology 两表。
         _ => restore_topology(&mut tx, session_id, &blob_json).await?,
     }
@@ -392,6 +504,73 @@ async fn restore_timesync(
         .bind(node.report_enable)
         .bind(node.mean_link_delay_thresh)
         .bind(node.offset_threshold)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    Ok(())
+}
+
+/// 盖回 flow 两表（topology_streams / flow_plans）。目标表集合严格限于 flow domain。
+async fn restore_flow(
+    tx: &mut SqliteConnection,
+    session_id: &str,
+    blob_json: &str,
+) -> Result<(), sqlx::Error> {
+    let pre_image: FlowPreImage = serde_json::from_str(blob_json).map_err(json_err)?;
+
+    for table in ["topology_streams", "flow_plans"] {
+        sqlx::query(&format!("DELETE FROM {table} WHERE session_id = ?"))
+            .bind(session_id)
+            .execute(&mut *tx)
+            .await?;
+    }
+
+    for s in &pre_image.streams {
+        sqlx::query(
+            r#"INSERT INTO topology_streams
+               (session_id, stream_seq, class, pcp, period_us, frame_bytes, count,
+                talker, listener, src_ip, dst_ip, src_l4_port, dst_l4_port, l4_protocol,
+                max_latency_us, redundant, paths)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
+        )
+        .bind(&s.session_id)
+        .bind(s.stream_seq)
+        .bind(&s.class)
+        .bind(s.pcp)
+        .bind(s.period_us)
+        .bind(s.frame_bytes)
+        .bind(s.count)
+        .bind(&s.talker)
+        .bind(&s.listener)
+        .bind(&s.src_ip)
+        .bind(&s.dst_ip)
+        .bind(s.src_l4_port)
+        .bind(s.dst_l4_port)
+        .bind(&s.l4_protocol)
+        .bind(s.max_latency_us)
+        .bind(s.redundant)
+        .bind(&s.paths)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    for p in &pre_image.plans {
+        sqlx::query(
+            r#"INSERT INTO flow_plans
+               (session_id, stream_seq, node, eth_n, gate_index, initially_open,
+                offset_ns, durations_ns, solver)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
+        )
+        .bind(&p.session_id)
+        .bind(p.stream_seq)
+        .bind(&p.node)
+        .bind(p.eth_n)
+        .bind(p.gate_index)
+        .bind(p.initially_open)
+        .bind(p.offset_ns)
+        .bind(&p.durations_ns)
+        .bind(&p.solver)
         .execute(&mut *tx)
         .await?;
     }
@@ -875,6 +1054,98 @@ mod tests {
                     .unwrap(),
                 "撤销后 pre-image 已清除，再撤返 false（R11）"
             );
+        });
+    }
+
+    /// 写一条 ST 流 + 一条 GCL 门样本。
+    async fn seed_flow(pool: &Pool<Sqlite>) {
+        sqlx::query(
+            "INSERT INTO topology_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener, max_latency_us, redundant, paths) \
+             VALUES ('s1', 0, 'ST', 7, 500, 512, 10000, '0', '1', 200, 0, NULL)",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO flow_plans (session_id, stream_seq, node, eth_n, gate_index, initially_open, offset_ns, durations_ns, solver) \
+             VALUES ('s1', 0, '1', 2, 0, 1, 100, '[500,500]', 'Z3')",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn count_streams(pool: &Pool<Sqlite>) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM topology_streams WHERE session_id='s1'")
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    /// flow snapshot → 改库 → restore 盖回：流表与 GCL 表逐字段还原。
+    #[test]
+    fn flow_snapshot_restore_round_trips() {
+        tauri::async_runtime::block_on(async {
+            let pool = fresh_pool().await;
+            seed_flow(&pool).await;
+            snapshot_domain(&pool, FLOW_DOMAIN).await;
+
+            // 删光两表。
+            sqlx::query("DELETE FROM topology_streams WHERE session_id='s1'")
+                .execute(&pool)
+                .await
+                .unwrap();
+            sqlx::query("DELETE FROM flow_plans WHERE session_id='s1'")
+                .execute(&pool)
+                .await
+                .unwrap();
+            assert_eq!(count_streams(&pool).await, 0);
+
+            assert!(restore_pre_image(&pool, "s1", FLOW_DOMAIN).await.unwrap());
+            assert_eq!(count_streams(&pool).await, 1, "流表盖回");
+            let (durations, solver): (String, String) = sqlx::query_as(
+                "SELECT durations_ns, solver FROM flow_plans WHERE session_id='s1' AND stream_seq=0",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(durations, "[500,500]", "GCL durations 盖回");
+            assert_eq!(solver, "Z3", "GCL solver 出处盖回");
+        });
+    }
+
+    /// 域安全（R19 核心）：snapshot/restore FLOW_DOMAIN **绝不**触碰 topology 表。
+    /// 造 topology + flow 都有数据，snapshot flow → 删一个 topology 节点 → restore flow，
+    /// 断言被删节点没被 flow 撤销「复活」（否则说明分派跑到了 topology 表名上）。
+    #[test]
+    fn flow_restore_does_not_touch_topology_tables() {
+        tauri::async_runtime::block_on(async {
+            let pool = fresh_pool().await;
+            seed_topology(&pool).await;
+            seed_flow(&pool).await;
+            snapshot_domain(&pool, FLOW_DOMAIN).await;
+
+            // 删 flow 表 + 删一个 topology 节点。
+            sqlx::query("DELETE FROM topology_streams WHERE session_id='s1'")
+                .execute(&pool)
+                .await
+                .unwrap();
+            sqlx::query("DELETE FROM topology_nodes WHERE session_id='s1' AND mid='1'")
+                .execute(&pool)
+                .await
+                .unwrap();
+
+            assert!(restore_pre_image(&pool, "s1", FLOW_DOMAIN).await.unwrap());
+            // flow 盖回。
+            assert_eq!(count_streams(&pool).await, 1, "flow 撤销盖回流表");
+            // topology 节点仍然是删掉的（flow 撤销没碰 topology_nodes）。
+            let node_left: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM topology_nodes WHERE session_id='s1' AND mid='1'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(node_left, 0, "flow 撤销绝不复活 topology 节点");
         });
     }
 }

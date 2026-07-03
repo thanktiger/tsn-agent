@@ -64,6 +64,56 @@ def test_run_status_result_happy(monkeypatch):
     assert body["scavetool_failed"] is False
 
 
+_PLAN_BODY = {
+    "network_ned": "network Net {}",
+    "omnetpp_ini": "[General]\n",
+    "manifest_json": "{}",
+}
+
+
+def _mock_plan_ok(
+    monkeypatch,
+    grep_out='par N.sw1.eth[1].macLayer.queue.transmissionGate[0] durations "[300us, 700us]"\n',
+):
+    def fake(inner: str) -> subprocess.CompletedProcess:
+        if "grep" in inner:
+            return subprocess.CompletedProcess([], 0, grep_out, "")
+        return subprocess.CompletedProcess([], 0, "inet ran", "")
+
+    monkeypatch.setattr(runner, "_run_in_inet_env", fake)
+
+
+def _poll_plan_status(job_id: str, timeout=5.0) -> str:
+    deadline = time.time() + timeout
+    last = None
+    while time.time() < deadline:
+        last = client.get(f"/sim/plan/{job_id}/status").json()["status"]
+        if last in ("done", "failed"):
+            return last
+        time.sleep(0.02)
+    return last
+
+
+def test_plan_status_result_happy(monkeypatch):
+    _mock_plan_ok(monkeypatch)
+    resp = client.post("/sim/plan", json=_PLAN_BODY)
+    assert resp.status_code == 202
+    job_id = resp.json()["job_id"]
+    assert _poll_plan_status(job_id) == "done"
+    result = client.get(f"/sim/plan/{job_id}/result")
+    assert result.status_code == 200
+    body = result.json()
+    assert body["exit_code"] == 0
+    assert "transmissionGate" in body["sca_gcl"]
+    assert body["solver"] == "Z3"
+
+
+def test_plan_missing_fields_422(monkeypatch):
+    _mock_plan_ok(monkeypatch)
+    resp = client.post("/sim/plan", json={"network_ned": "x"})
+    assert resp.status_code == 422
+
+
 def test_missing_fields_returns_422(monkeypatch):
     _mock_ok(monkeypatch)
     resp = client.post("/sim/run", json={"network_ned": "x"})  # 缺字段

@@ -47,13 +47,17 @@ pub async fn list_sessions(
     store: tauri::State<'_, SessionStore>,
 ) -> Result<Vec<SessionPayload>, String> {
     let pool = store.pool(&app).await?;
+    query_sessions(pool).await
+}
+
+/// 列出全部 session，按 updated_at 倒序。抽成 pool 级 helper 以便单测。
+async fn query_sessions(pool: &Pool<Sqlite>) -> Result<Vec<SessionPayload>, String> {
     let rows = sqlx::query(
         r#"
         SELECT id, title, created_at, updated_at, message_count, event_count,
                has_project, project_name, bundle_file_count, payload
         FROM sessions
         ORDER BY updated_at DESC
-        LIMIT 12
         "#,
     )
     .fetch_all(pool)
@@ -345,7 +349,7 @@ fn db_error(error: sqlx::Error) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{SessionPayload, upsert_session};
+    use super::{SessionPayload, query_sessions, upsert_session};
     use sqlx::sqlite::SqlitePoolOptions;
     use sqlx::{Pool, Row, Sqlite};
 
@@ -657,6 +661,29 @@ mod tests {
                 "resave must not cascade-delete topology links"
             );
             assert_eq!(title, "t1-updated");
+        });
+    }
+
+    #[test]
+    fn list_sessions_returns_all_rows_not_capped_at_twelve() {
+        // 回归：list_sessions 曾硬写 LIMIT 12（MVP 遗留），库里 >12 条时列表被截断。
+        // 插 15 条应全部返回。
+        tauri::async_runtime::block_on(async {
+            let pool = fresh_memory_pool().await;
+            for i in 0..15 {
+                upsert_session(
+                    &pool,
+                    &sample_session_payload(&format!("s{i:02}"), &format!("t{i}")),
+                )
+                .await
+                .expect("insert session");
+            }
+            let sessions = query_sessions(&pool).await.expect("list sessions");
+            assert_eq!(
+                sessions.len(),
+                15,
+                "list_sessions 必须返回全部行，不得截断在 12"
+            );
         });
     }
 

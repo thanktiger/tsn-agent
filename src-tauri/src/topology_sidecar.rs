@@ -201,6 +201,18 @@ pub fn build_router(token: SecretToken, route_state: Arc<RouteState>) -> Router 
             "/db/timesync/undo",
             post(crate::timesync_sidecar_routes::undo),
         )
+        .route(
+            "/db/flow/add_stream",
+            post(crate::flow_sidecar_routes::add_stream),
+        )
+        .route(
+            "/db/flow/inspect",
+            post(crate::flow_sidecar_routes::inspect),
+        )
+        .route(
+            "/db/flow/remove_stream",
+            post(crate::flow_sidecar_routes::remove_stream),
+        )
         .with_state(route_state)
         .route_layer(middleware::from_fn_with_state(
             token_state,
