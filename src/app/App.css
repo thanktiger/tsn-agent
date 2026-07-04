@@ -2754,11 +2754,7 @@ textarea:focus-visible {
   font-weight: 500;
 }
 
-.flow-solver-badge.guaranteed {
-  color: #15803d;
-  background: rgba(236, 253, 245, 0.95);
-}
-
+/* z3 带保证徽章复用 sim-badge ok 绿（见 SolverBadge），此处只留兜底解的琥珀色。 */
 .flow-solver-badge.besteffort {
   color: #b45309;
   background: rgba(255, 251, 235, 0.95);
@@ -2767,12 +2763,12 @@ textarea:focus-visible {
 /* 蓝色信息条（KTD1/KTD3：流集无 ST 流 → 无需门控，非成功非失败的中性事实）。 */
 .flow-gcl-info {
   padding: 8px 12px;
-  border: 1px solid rgba(22, 119, 255, 0.3);
+  border: 1px solid var(--info);
   border-radius: 6px;
-  color: #1d4ed8;
+  color: var(--info);
   font-size: 12px;
   font-weight: 600;
-  background: rgba(239, 246, 255, 0.95);
+  background: var(--info-dim);
 }
 
 .flow-message {

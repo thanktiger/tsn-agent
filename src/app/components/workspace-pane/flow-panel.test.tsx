@@ -1,8 +1,26 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { describe, expect, it, vi } from "vitest";
 
 import { FlowPanel, type FlowPanelProps } from "./flow-panel";
-import type { FlowPlanDetail, PlanResult, StreamVerdict, VerifyTasResult } from "./flow-sim";
+import type {
+  FlowPlanDetail,
+  PlanResult,
+  PlanUiState,
+  StreamVerdict,
+  VerifyTasResult,
+} from "./flow-sim";
+
+// item 8：flow 面板订阅 session_db 变更（domain flow）→ 重拉。jsdom 下真 hook 恒 no-op，
+// mock 出来捕获 onChange，以模拟 mutation 通知触发重拉。
+const dbListenerOnChange = vi.hoisted(() => ({
+  current: undefined as undefined | (() => void),
+}));
+vi.mock("../../hooks/use-session-db-listener", () => ({
+  useSessionDbListener: ({ onChange }: { onChange: () => void }) => {
+    dbListenerOnChange.current = onChange;
+  },
+}));
 
 function planOk(overrides: Partial<PlanResult> = {}): PlanResult {
   return {
@@ -165,16 +183,18 @@ describe("FlowPanel", () => {
     expect(screen.getByText(/仿真实测 · 非 T10 硬件判决/)).toBeTruthy();
   });
 
-  it("非 flow 阶段规划按钮禁用", () => {
+  it("非 flow 阶段规划按钮禁用", async () => {
     render(<FlowPanel {...baseProps({ inFlowStage: false })} />);
-    expect(screen.getByRole("button", { name: "规划门控表" }).hasAttribute("disabled")).toBe(true);
+    expect(
+      (await screen.findByRole("button", { name: "规划门控表" })).hasAttribute("disabled"),
+    ).toBe(true);
   });
 
   it("点击规划 → 调 plan_tas，onPlanStateChange running→done", async () => {
     const planTas = vi.fn(async () => planOk());
     const onPlanStateChange = vi.fn();
     render(<FlowPanel {...baseProps({ planTas, onPlanStateChange })} />);
-    fireEvent.click(screen.getByRole("button", { name: "规划门控表" }));
+    fireEvent.click(await screen.findByRole("button", { name: "规划门控表" }));
     await waitFor(() => expect(planTas).toHaveBeenCalledTimes(1));
     expect(onPlanStateChange).toHaveBeenCalledWith({ status: "running" });
     await waitFor(() =>
@@ -186,7 +206,7 @@ describe("FlowPanel", () => {
     let resolveFn: (r: PlanResult) => void = () => {};
     const planTas = vi.fn(() => new Promise<PlanResult>((res) => (resolveFn = res)));
     render(<FlowPanel {...baseProps({ planTas })} />);
-    const btn = screen.getByRole("button", { name: "规划门控表" });
+    const btn = await screen.findByRole("button", { name: "规划门控表" });
     fireEvent.click(btn);
     fireEvent.click(btn); // 第二次应被 ref 守卫拦
     expect(planTas).toHaveBeenCalledTimes(1);
@@ -251,16 +271,17 @@ describe("FlowPanel", () => {
     expect(screen.getByText(/结果为空/)).toBeTruthy();
   });
 
-  it("U7：有 rounds 按轮分组渲染（健康轮/断A轮/断B轮小节 + 顶层摘要串联）", () => {
+  it("U7：有 rounds 按轮分组渲染（轮名↔状态 within 小节绑定 + 顶层摘要串联）", () => {
     render(
       <FlowPanel {...baseProps({ verifyState: { status: "done", result: roundsResult() } })} />,
     );
-    // U3 徽章条头：轮名与状态徽章分列（文案语义不变）。
-    expect(screen.getByText("健康轮")).toBeTruthy();
-    expect(screen.getByText("断A轮")).toBeTruthy();
-    expect(screen.getByText("断B轮")).toBeTruthy();
-    expect(screen.getAllByText("通过").length).toBe(2); // 健康轮 + 断A轮。
-    expect(screen.getByText("服务占用（稍后重试）")).toBeTruthy();
+    // U3 徽章条头：轮名与其状态徽章绑定在各自小节内（within，防跨轮误配 count 断言）。
+    const healthy = screen.getByText("健康轮").closest("section") as HTMLElement;
+    const faultA = screen.getByText("断A轮").closest("section") as HTMLElement;
+    const faultB = screen.getByText("断B轮").closest("section") as HTMLElement;
+    expect(within(healthy).getByText("通过")).toBeTruthy();
+    expect(within(faultA).getByText("通过")).toBeTruthy();
+    expect(within(faultB).getByText("服务占用（稍后重试）")).toBeTruthy();
     // 顶层摘要沿 U6 overall 串联。
     expect(screen.getByText(/健康轮：3 个达标/)).toBeTruthy();
   });
@@ -381,7 +402,7 @@ describe("FlowPanel", () => {
   it("U2④：未规划 → 居中 CTA；有结果 → 按钮收进命令栏右上（重新规划）", async () => {
     // 未规划（entries=[] 且有 ST）：CTA 在 body、命令栏无重新规划按钮。
     const { unmount } = render(<FlowPanel {...baseProps()} />);
-    const cta = screen.getByRole("button", { name: "规划门控表" });
+    const cta = await screen.findByRole("button", { name: "规划门控表" });
     expect(cta.closest(".panel-cta")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "重新规划" })).toBeNull();
     unmount();
@@ -396,15 +417,107 @@ describe("FlowPanel", () => {
     expect(screen.getByText(/Z3·带可调度性保证/)).toBeTruthy();
   });
 
-  it("U2：规划成功后自动拉取明细刷新展示（KTD3）", async () => {
+  it("U2/item5：planState→done 经 effect 刷新明细（非 handlePlan 内联，切 tab 重挂后完成也刷新）", async () => {
+    const getFlowPlan = vi
+      .fn()
+      .mockResolvedValueOnce(planDetail()) // 挂载（模拟切回 tab、命令仍在跑）：未规划、无图。
+      .mockResolvedValue(planDetailWithGcl()); // done 刷新：已规划、出图。
+    // 以 running 挂载、从不点击规划按钮——刷新只可能来自 done effect。
+    const { rerender } = render(
+      <FlowPanel {...baseProps({ getFlowPlan, planState: { status: "running" } })} />,
+    );
+    await waitFor(() => expect(getFlowPlan).toHaveBeenCalledTimes(1));
+    expect(screen.queryByRole("img", { name: "门控时序图" })).toBeNull();
+    rerender(
+      <FlowPanel
+        {...baseProps({ getFlowPlan, planState: { status: "done", result: planOk() } })}
+      />,
+    );
+    expect(await screen.findByRole("img", { name: "门控时序图" })).toBeTruthy();
+    expect(getFlowPlan).toHaveBeenCalledTimes(2);
+  });
+
+  it("item6①：挂载取数失败 → CTA 仍渲染（回退未规划）、不抛未处理拒绝", async () => {
+    const getFlowPlan = vi.fn(async () => {
+      throw new Error("db down");
+    });
+    render(<FlowPanel {...baseProps({ getFlowPlan })} />);
+    expect(await screen.findByRole("button", { name: "规划门控表" })).toBeTruthy();
+  });
+
+  it("item6②：plan 成功后明细刷新失败 → planState 仍 done、显不可用态不画旧图", async () => {
     const getFlowPlan = vi
       .fn()
       .mockResolvedValueOnce(planDetail()) // 挂载：未规划。
-      .mockResolvedValueOnce(planDetailWithGcl()); // 规划成功后刷新。
-    const planTas = vi.fn(async () => planOk());
-    render(<FlowPanel {...baseProps({ getFlowPlan, planTas })} />);
-    fireEvent.click(await screen.findByRole("button", { name: "规划门控表" }));
+      .mockRejectedValue(new Error("db down")); // done 刷新：失败。
+    const { rerender } = render(
+      <FlowPanel {...baseProps({ getFlowPlan, planState: { status: "idle" } })} />,
+    );
+    await screen.findByRole("button", { name: "规划门控表" });
+    rerender(
+      <FlowPanel
+        {...baseProps({ getFlowPlan, planState: { status: "done", result: planOk() } })}
+      />,
+    );
+    // 明细读取失败：出显式「不可用」提示、不画旧/空图；planState 成功判定不被改写成 error。
+    expect(await screen.findByText(/门控明细暂不可用/)).toBeTruthy();
+    expect(screen.queryByRole("img", { name: "门控时序图" })).toBeNull();
+    expect(screen.getByText(/已综合 4 个门控条目/)).toBeTruthy();
+  });
+
+  it("item7：挂载取数未回（loading）时不渲染 CTA（防已规划会话 CTA 闪现被误点）", () => {
+    // getFlowPlan 永不 resolve → planQuery 恒 loading。
+    const getFlowPlan = vi.fn(() => new Promise<FlowPlanDetail>(() => {}));
+    render(<FlowPanel {...baseProps({ getFlowPlan })} />);
+    expect(screen.queryByRole("button", { name: "规划门控表" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "重新规划" })).toBeNull();
+  });
+
+  it("item8：flow domain 变更（onChange）→ 二次取数（照 timesync 消费先例）", async () => {
+    const getFlowPlan = vi.fn(async () => planDetail());
+    render(<FlowPanel {...baseProps({ getFlowPlan })} />);
+    await waitFor(() => expect(getFlowPlan).toHaveBeenCalledTimes(1));
+    await act(async () => {
+      dbListenerOnChange.current?.();
+    });
     await waitFor(() => expect(getFlowPlan).toHaveBeenCalledTimes(2));
+  });
+
+  it("item4：流集无 ST 但库里残留门控表（矛盾态）→ 蓝条『验证不会消费』、不画旧图", async () => {
+    const getFlowPlan = vi.fn(async () =>
+      planDetail({ stCount: 0, beCount: 2, entries: planDetailWithGcl().entries }),
+    );
+    render(<FlowPanel {...baseProps({ getFlowPlan })} />);
+    expect(await screen.findByText(/存量门控表与当前流集不符，验证不会消费/)).toBeTruthy();
+    expect(screen.queryByRole("img", { name: "门控时序图" })).toBeNull();
+  });
+
+  it("item10.7：error 态 × 库里有旧门控表 → 不画旧图（态未定、避误导）", async () => {
+    const getFlowPlan = vi.fn(async () => planDetailWithGcl()); // 有 ST + 旧 GCL。
+    render(
+      <FlowPanel
+        {...baseProps({ getFlowPlan, planState: { status: "error", message: "boom" } })}
+      />,
+    );
+    expect(await screen.findByText(/规划失败：boom/)).toBeTruthy();
+    expect(screen.queryByRole("img", { name: "门控时序图" })).toBeNull();
+  });
+
+  it("item10.7：solver_failed × 库里有旧门控表（有 ST）→ 保留旧图（旧 GCL 仍会被 pin，诚实）", async () => {
+    const solverFailed = planOk({
+      status: "solver_failed",
+      solver: undefined,
+      gateCount: 0,
+      overall: "门控综合失败：约束不可行或配置器出错，未产出门控表。",
+    });
+    const getFlowPlan = vi.fn(async () => planDetailWithGcl());
+    render(
+      <FlowPanel
+        {...baseProps({ getFlowPlan, planState: { status: "done", result: solverFailed } })}
+      />,
+    );
+    expect(await screen.findByRole("img", { name: "门控时序图" })).toBeTruthy();
+    expect(screen.getByText(/门控综合失败/)).toBeTruthy();
   });
 
   it("会话切换后迟到结果被丢弃", async () => {
@@ -414,7 +527,7 @@ describe("FlowPanel", () => {
     const { rerender } = render(
       <FlowPanel {...baseProps({ sessionId: "s1", planTas, onPlanStateChange })} />,
     );
-    fireEvent.click(screen.getByRole("button", { name: "规划门控表" }));
+    fireEvent.click(await screen.findByRole("button", { name: "规划门控表" }));
     await waitFor(() => expect(planTas).toHaveBeenCalled());
     // 切到 s2，再让 s1 的命令落地。
     rerender(<FlowPanel {...baseProps({ sessionId: "s2", planTas, onPlanStateChange })} />);
@@ -422,5 +535,70 @@ describe("FlowPanel", () => {
     await Promise.resolve();
     // 只应有 running（发起时）；done 被丢弃（runSessionId !== 当前）。
     expect(onPlanStateChange).not.toHaveBeenCalledWith({ status: "done", result: planOk() });
+  });
+
+  // item9：复刻 App.tsx 的会话绑定守卫 + 生产 key={sessionId} 重挂——面板内 sessionIdRef 随 key
+  // 重挂冻结失效（上一 test 靠无 key rerender 测的是内部守卫），此处靠 App 侧守卫兜底。守卫代码
+  // 与 App.tsx setFlowPlanStateGuarded 同形（会话绑定 + 当前会话 ref 比对）。
+  function AppGuardHarness({
+    planTas,
+    getFlowPlan,
+  }: {
+    planTas: (sessionId: string) => Promise<PlanResult>;
+    getFlowPlan: (sessionId: string) => Promise<FlowPlanDetail>;
+  }) {
+    const [sessionId, setSessionId] = useState("s1");
+    const [planState, setPlanState] = useState<PlanUiState>({ status: "idle" });
+    const currentSessionIdRef = useRef(sessionId);
+    currentSessionIdRef.current = sessionId;
+    const setPlanStateGuarded = useCallback(
+      (state: PlanUiState) => {
+        if (currentSessionIdRef.current === sessionId) setPlanState(state);
+      },
+      [sessionId],
+    );
+    // 会话切换归零（复刻 App reset effect）。
+    // biome-ignore lint/correctness/useExhaustiveDependencies: 仅按 sessionId 归零，与 App 一致。
+    useEffect(() => {
+      setPlanState({ status: "idle" });
+    }, [sessionId]);
+    return (
+      <>
+        <button type="button" onClick={() => setSessionId("s2")}>
+          切到 s2
+        </button>
+        <FlowPanel
+          key={sessionId}
+          inFlowStage
+          sessionId={sessionId}
+          planState={planState}
+          onPlanStateChange={setPlanStateGuarded}
+          verifyState={{ status: "idle" }}
+          onVerifyStateChange={() => {}}
+          planTas={planTas}
+          verifyTas={vi.fn(async () => verifyResult())}
+          getFlowPlan={getFlowPlan}
+        />
+      </>
+    );
+  }
+
+  it("item9：生产 key 重挂 + App 会话守卫——旧会话迟到 done 不污染新会话", async () => {
+    let resolvePlan: (r: PlanResult) => void = () => {};
+    const planTas = vi.fn(() => new Promise<PlanResult>((res) => (resolvePlan = res)));
+    const getFlowPlan = vi.fn(async () => planDetail()); // 两会话都未规划 → CTA。
+    render(<AppGuardHarness planTas={planTas} getFlowPlan={getFlowPlan} />);
+    // s1：点规划（handlePlan 捕获 s1 绑定的守卫 setter）。
+    fireEvent.click(await screen.findByRole("button", { name: "规划门控表" }));
+    await waitFor(() => expect(planTas).toHaveBeenCalledTimes(1));
+    // 切到 s2：面板按 key 重挂、planState 归零。
+    fireEvent.click(screen.getByRole("button", { name: "切到 s2" }));
+    // s1 的 plan 迟到落地 → 守卫按发起会话丢弃，不写进 s2。
+    await act(async () => {
+      resolvePlan(planOk());
+    });
+    // s2 未被污染：无 s1 综合结果，CTA 仍在。
+    expect(screen.queryByText(/已综合 4 个门控条目/)).toBeNull();
+    expect(await screen.findByRole("button", { name: "规划门控表" })).toBeTruthy();
   });
 });

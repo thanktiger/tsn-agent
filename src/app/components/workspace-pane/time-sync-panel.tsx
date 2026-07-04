@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { CHART_COLORS } from "./chart-palette";
 import { HardDeployPanel } from "./hard-deploy-panel";
 import type { HardwareUiState } from "./hardware-deploy";
 import { PanelCta } from "./panel-cta";
@@ -483,18 +484,6 @@ function SimResultArea({
     </div>
   );
 }
-
-// 区分度优先的定性调色板（Okabe–Ito 色盲友好系，去掉过浅的黄）。export 供流量规划时序图同源取色。
-export const CHART_COLORS = [
-  "#0072B2",
-  "#E69F00",
-  "#009E73",
-  "#D55E00",
-  "#CC79A7",
-  "#56B4E9",
-  "#8C564B",
-  "#5D3FD3",
-];
 
 /** 阈值标签格式化：整 µs 显示 µs，否则 ns（如 1000→±1µs、500→±500ns）。 */
 function formatThreshold(ns: number): string {

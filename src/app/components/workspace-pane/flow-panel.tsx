@@ -1,5 +1,7 @@
 import type { ReactNode } from "react";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { useSessionDbListener } from "../../hooks/use-session-db-listener";
+import { CHART_COLORS } from "./chart-palette";
 import {
   buildGateTimelineRows,
   type FlowPlanDetail,
@@ -27,7 +29,6 @@ import {
   verifyAllPass,
 } from "./flow-sim";
 import { PanelCta } from "./panel-cta";
-import { CHART_COLORS } from "./time-sync-panel";
 
 export interface FlowPanelProps {
   /** 当前阶段是否 flow-template。 */
@@ -65,19 +66,33 @@ export function FlowPanel({
 
   // U2/KTD1：门控明细查询态——面板挂载即拉，展示态由数据推导（切会话回来凭数据恢复）。
   const [planQuery, setPlanQuery] = useState<FlowPlanQueryState>({ status: "loading" });
-  useEffect(() => {
-    let alive = true;
-    getFlowPlan(sessionId)
-      .then((detail) => {
-        if (alive) setPlanQuery({ status: "loaded", detail });
-      })
-      .catch(() => {
-        if (alive) setPlanQuery({ status: "unavailable" });
-      });
-    return () => {
-      alive = false;
-    };
+  // 单一取数口径：三触发源（挂载·切会话 / 规划完成 / flow domain DB 变更）共用；requestSeq 丢弃
+  // 过期响应（会话已切或更新请求在途）。失败置 unavailable（不吞、头行仍由 planState 供）。
+  const planQueryReqRef = useRef(0);
+  const refreshPlanQuery = useCallback(async () => {
+    const seq = ++planQueryReqRef.current;
+    try {
+      const detail = await getFlowPlan(sessionId);
+      if (planQueryReqRef.current === seq) setPlanQuery({ status: "loaded", detail });
+    } catch {
+      if (planQueryReqRef.current === seq) setPlanQuery({ status: "unavailable" });
+    }
   }, [getFlowPlan, sessionId]);
+
+  // 挂载 / 切会话：先回 loading（避免闪旧数据 + 抑制 CTA 闪现），再取。
+  useEffect(() => {
+    setPlanQuery({ status: "loading" });
+    void refreshPlanQuery();
+  }, [refreshPlanQuery]);
+
+  // 规划完成（含 no_gating 清表 / solver_failed 旧表保留）后刷新明细；切 tab 卸载重挂后再变 done
+  // 也刷新（不再在 handlePlan 里内联取数——重挂后内联块随旧闭包丢失）。
+  useEffect(() => {
+    if (planState.status === "done") void refreshPlanQuery();
+  }, [planState, refreshPlanQuery]);
+
+  // flow domain 写库（agent 录流 / 规划落库）→ 重拉（照 timesync 消费先例，非 Tauri 环境 no-op）。
+  useSessionDbListener({ sessionId, onChange: () => void refreshPlanQuery() });
 
   const planning = planState.status === "running";
   const verifying = verifyState.status === "running";
@@ -90,8 +105,12 @@ export function FlowPanel({
   const havePlan =
     (planState.status === "done" && planAllowsVerify(planState.result)) ||
     queryPresentation !== "unplanned";
-  // KTD3 渐进式：未规划（无运行/错误/结果记忆，且数据推导=未规划）→ 居中 CTA；否则按钮收命令栏右上。
-  const fresh = planState.status === "idle" && queryPresentation === "unplanned";
+  // 挂载取数未回前（planState 无瞬态记忆）：既不下判 fresh 也不出结果——空占位，防已规划会话
+  // 挂载时 CTA 闪现被误点（loading 一律不出 CTA，等数据落定再决定 CTA/结果，item 7）。
+  const idleLoading = planState.status === "idle" && planQuery.status === "loading";
+  // KTD3 渐进式：未规划（无运行/错误/结果记忆，数据推导=未规划，且已非 loading）→ 居中 CTA；
+  // 否则按钮收命令栏右上。
+  const fresh = planState.status === "idle" && !idleLoading && queryPresentation === "unplanned";
 
   const planDisabled = !inFlowStage || planning;
   const verifyDisabled = !inFlowStage || verifying || planning || !havePlan;
@@ -104,14 +123,9 @@ export function FlowPanel({
     try {
       const result = await planTas(runSessionId);
       if (runSessionId !== sessionIdRef.current) return;
+      // 规划落地 → planState 转 done；明细刷新由 done effect 统一驱动（切 tab 重挂后完成也刷新，
+      // 且刷新失败不吞——见 refreshPlanQuery）。
       onPlanStateChange({ status: "done", result });
-      // 规划落地（含 no_gating 清表）后刷新明细展示（KTD3）。失败保持现状。
-      try {
-        const detail = await getFlowPlan(runSessionId);
-        if (runSessionId === sessionIdRef.current) setPlanQuery({ status: "loaded", detail });
-      } catch {
-        // 明细取数失败不影响规划结果展示（overall/徽章仍来自 planState）。
-      }
     } catch (error) {
       if (runSessionId !== sessionIdRef.current) return;
       onPlanStateChange({
@@ -155,7 +169,7 @@ export function FlowPanel({
       <div className="timesync-commandbar flow-commandbar">
         <p className="flow-honesty-note">仿真实测 · 非 T10 硬件判决</p>
         <div className="timesync-commandbar__actions" role="group" aria-label="流量规划操作">
-          {!fresh && (
+          {!fresh && !idleLoading && (
             <button
               type="button"
               className="btn primary"
@@ -185,7 +199,7 @@ export function FlowPanel({
         </p>
       )}
 
-      {fresh ? (
+      {idleLoading ? null : fresh ? (
         <PanelCta
           label="规划门控表"
           hint="用 INET Z3 配置器综合 802.1Qbv 门控表（GCL），结果落库并在此可视化。"
@@ -209,8 +223,9 @@ export function FlowPanel({
 
 /** 求解器出处徽章（R8/KTD7 诚实边界）：Z3 带保证 / Eager 兜底无保证。 */
 function SolverBadge({ solver, z3 }: { solver: string; z3: boolean }) {
+  // z3 复用 sim-badge ok 绿（与收敛/达标同语义，不再复制一份同色对）；兜底解走 besteffort 琥珀色。
   return (
-    <span className={`flow-solver-badge ${z3 ? "guaranteed" : "besteffort"}`}>
+    <span className={`flow-solver-badge ${z3 ? "sim-badge ok" : "besteffort"}`}>
       {z3 ? `${solver}·带可调度性保证` : `${solver}·兜底解无保证`}
     </span>
   );
@@ -270,17 +285,27 @@ function PlanResultArea({
       </div>
     );
   } else if (detail && presentation === "no-gating") {
+    // 无 ST 一律不 pin：存量门控表（entries 非空）与当前流集不符时明说「验证不会消费」，不画旧图。
     head = (
       <div className="flow-gcl-info" role="status" aria-label="规划总判定">
-        流集无 ST 流，无需门控；可直接软仿验证。
+        {detail.entries.length > 0
+          ? "流集无 ST 流，无需门控；存量门控表与当前流集不符，验证不会消费。"
+          : "流集无 ST 流，无需门控；可直接软仿验证。"}
       </div>
     );
   }
 
-  // 时序图/明细：只认查询数据（entries 非空），规划失败/错误瞬态不画旧图误导。
-  const showGcl = detail !== undefined && detail.entries.length > 0 && planState.status !== "error";
+  // 时序图/明细仅在 presentation==='planned'（有 ST + 库里有门控表）时画。error（命令抛错、态未定）
+  // 不画旧图误导；solver_failed（新综合失败但旧 GCL 未被覆盖、有 ST 时仍会被 verify pin）保留旧图是
+  // 诚实的——故仅排除 error 态，不排除 done。
+  const showGcl = presentation === "planned" && planState.status !== "error";
+  // 明细读取失败但 planState 有成功结果：显式「不可用」态，绝不回退画旧/空图（判定仍由 head 供）。
+  const showUnavailableNote =
+    planQuery.status === "unavailable" &&
+    planState.status === "done" &&
+    planSucceeded(planState.result);
 
-  if (!head && !showGcl) return null;
+  if (!head && !showGcl && !showUnavailableNote) return null;
   return (
     <div className="flow-plan-result">
       {head}
@@ -289,6 +314,11 @@ function PlanResultArea({
           <GateTimelineChart detail={detail} />
           <GclDetailTable detail={detail} />
         </>
+      )}
+      {showUnavailableNote && (
+        <p className="flow-message mono">
+          门控明细暂不可用（读取失败）；判定见上，可稍后重试或重新规划。
+        </p>
       )}
     </div>
   );
