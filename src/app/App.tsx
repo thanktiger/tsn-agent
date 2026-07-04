@@ -83,6 +83,29 @@ export function App() {
   // U9：流量规划/软仿运行态持于 App 级（切 tab 不取消命令；随会话重置）。
   const [flowPlanState, setFlowPlanState] = useState<PlanUiState>({ status: "idle" });
   const [flowVerifyState, setFlowVerifyState] = useState<VerifyUiState>({ status: "idle" });
+  // 迟到结果会话守卫（治本，pre-existing）：面板 key={sessionId} 重挂后，旧实例在途命令落地仍会
+  // 调下发 setter（面板内 sessionIdRef 随重挂冻结、失效）。App 侧按「发起时会话」绑定 setter——
+  // useCallback 闭包定格发起时会话 id，与当前会话 ref 不符则丢弃，不污染新会话。
+  const currentSessionIdRef = useRef(currentSession.id);
+  currentSessionIdRef.current = currentSession.id;
+  const setFlowPlanStateGuarded = useCallback(
+    (state: PlanUiState) => {
+      if (currentSessionIdRef.current === currentSession.id) setFlowPlanState(state);
+    },
+    [currentSession.id],
+  );
+  const setFlowVerifyStateGuarded = useCallback(
+    (state: VerifyUiState) => {
+      if (currentSessionIdRef.current === currentSession.id) setFlowVerifyState(state);
+    },
+    [currentSession.id],
+  );
+  const setSimStateGuarded = useCallback(
+    (state: SimUiState) => {
+      if (currentSessionIdRef.current === currentSession.id) setSimState(state);
+    },
+    [currentSession.id],
+  );
   const {
     snapshot: topologySnapshot,
     refetch: refetchTopology,
@@ -525,13 +548,13 @@ export function App() {
           timesyncSnapshot={timesyncSnapshot}
           sessionId={currentSession.id}
           simState={simState}
-          onSimStateChange={setSimState}
+          onSimStateChange={setSimStateGuarded}
           hardwareState={hardwareState}
           onHardwareStateChange={setHardwareState}
           flowPlanState={flowPlanState}
-          onFlowPlanStateChange={setFlowPlanState}
+          onFlowPlanStateChange={setFlowPlanStateGuarded}
           flowVerifyState={flowVerifyState}
-          onFlowVerifyStateChange={setFlowVerifyState}
+          onFlowVerifyStateChange={setFlowVerifyStateGuarded}
           activeTimesyncSubTab={activeTimesyncSubTab}
           onSelectTimesyncSubTab={setActiveTimesyncSubTab}
           timesyncTabHasBadge={timesyncTabHasBadge}

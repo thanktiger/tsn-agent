@@ -420,6 +420,9 @@ pub async fn inspect(
                 "gateIndex": r.get::<i64, _>("gate_index"),
                 "initiallyOpen": r.get::<i64, _>("initially_open") != 0,
                 "offsetNs": r.get::<i64, _>("offset_ns"),
+                // durations_ns 本读面回原始 JSON 字符串（agent inspect 只读透传，不解析）；另一读面
+                // flow_query_command::get_flow_plan_inner 解析成 Vec<u64>（时序图/占空比要算）——
+                // 两面类型分叉，消费端不同，勿强行统一。
                 "durationsNs": r.get::<String, _>("durations_ns"),
                 "solver": r.get::<String, _>("solver"),
             })
