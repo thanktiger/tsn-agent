@@ -54,7 +54,7 @@ pub struct TimesyncSimBundle {
 }
 
 /// 802.1Qbv 门控表一项（KTD2b 单一序列化契约，U6 pin / U7 dump 解析 / U8 读回 三处共用）。
-/// 单位一律 ns。`node`=mid（app 规范节点身份，与 topology_streams.talker/listener 同一身份）；
+/// 单位一律 ns。`node`=mid（app 规范节点身份，与 flow_streams.talker/listener 同一身份）；
 /// 写 ini / 解析 dump 时经 node_ned_names 在 mid↔ned 名间转换。键 (node, eth_n, gate_index)
 /// 全由 app 掌控（U1 契约③ by construction）。
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]

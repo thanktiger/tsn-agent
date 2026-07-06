@@ -165,13 +165,13 @@ pub const TASK_SCHEMA_SQL: &str = r#"
         ON task(session_id, created_at DESC);
 "#;
 
-/// 流量规划（2026-07-01，flow-tas U2）：录入流表 `topology_streams` + 综合门控表
+/// 流量规划（2026-07-01，flow-tas U2）：录入流表 `flow_streams` + 综合门控表
 /// `flow_plans`。两表 session-scoped（进 SESSION_SCOPED_TABLES 随会话导出/导入），
 /// 故与 timesync_* 同口径放进 safety-net schema（**不用** `ensure_*` ——那是 `task`
 /// 这类不导出的表专用：export/import 的临时库只跑 `safety_net_schema_sql()` 建表，
 /// 若 flow 表只由 ensure_* 建，导出库无表、`INSERT ... SELECT` 直接失败）。
 ///
-/// `topology_streams`（R3 单表 + `class` 判别器 ST/BE/RC）：`max_latency_us` 可空
+/// `flow_streams`（R3 单表 + `class` 判别器 ST/BE/RC）：`max_latency_us` 可空
 /// （NULL=规划期从 docx 窗口推导/回退取周期，非空=用户覆盖）；五元组字段可空（设备级
 /// 流标识，本期规划/软仿只用 talker/listener+pcp+period+frame，五元组留后续设备下发）；
 /// `redundant`/`paths` 为 802.1CB 双平面预留槽（R4/R17，本期只留数据槽、不写 FRER 逻辑）。
@@ -182,7 +182,7 @@ pub const TASK_SCHEMA_SQL: &str = r#"
 /// open/close 时长的 JSON 数组串（单位 ns、和=gateCycleDuration），`offset_ns` 门循环相位，
 /// `solver` 记出处（Z3 带保证 / Eager 无保证，R8）。U7 写、U8 读回 pin、U10 对账共用。
 pub const FLOW_DOMAIN_SCHEMA_SQL: &str = r#"
-    CREATE TABLE IF NOT EXISTS topology_streams (
+    CREATE TABLE IF NOT EXISTS flow_streams (
         session_id     TEXT    NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
         stream_seq     INTEGER NOT NULL,
         class          TEXT    NOT NULL,
@@ -250,6 +250,39 @@ pub async fn ensure_topology_nodes_name_column(
 /// 不在 safety-net 的 15 张 P0 表内，须在 connect_app_database 显式调用。
 pub async fn ensure_task_table(pool: &sqlx::Pool<sqlx::Sqlite>) -> Result<(), sqlx::Error> {
     sqlx::query(TASK_SCHEMA_SQL).execute(pool).await?;
+    Ok(())
+}
+
+/// 流表改名迁移（2026-07-04）：`topology_streams`→`flow_streams`（表属流量域，`topology_`
+/// 前缀名不副实）。命令式 pragma 守卫范式：仅当老库仍有 `topology_streams` 表时重命名，
+/// 新库/已迁移库 no-op。**必须在 `safety_net_schema_sql()` 之后调用**——safety-net 会
+/// `CREATE IF NOT EXISTS flow_streams` 建出空壳，老库路径先 DROP 该空壳（此刻它必空，
+/// 真数据全在 `topology_streams`）再 RENAME 扶正。旧会话导出文件里表名仍是 `topology_streams`，
+/// 本迁移只治本机库。**旧导出文件（表名仍是 topology_streams）导入会整份失败回滚**——
+/// session_import 循环对源库 SELECT flow_streams 报「无此表」，非仅丢流数据、连拓扑/时钟
+/// 同步数据一并拒绝（boss 定 2026-07-04：不管旧导出、不加源表存在性兼容）。
+pub async fn ensure_flow_streams_rename(
+    pool: &sqlx::Pool<sqlx::Sqlite>,
+) -> Result<(), sqlx::Error> {
+    let has_legacy: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='topology_streams'",
+    )
+    .fetch_one(pool)
+    .await?;
+
+    if has_legacy == 0 {
+        return Ok(());
+    }
+
+    let mut tx = pool.begin().await?;
+    // safety-net 刚建的空 flow_streams 壳（老库真数据在 topology_streams），丢弃后扶正旧表。
+    sqlx::query("DROP TABLE IF EXISTS flow_streams")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("ALTER TABLE topology_streams RENAME TO flow_streams")
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
     Ok(())
 }
 
@@ -636,7 +669,7 @@ pub const SESSION_SCOPED_TABLES: &[(&str, &[&str])] = &[
         ],
     ),
     (
-        "topology_streams",
+        "flow_streams",
         &[
             "session_id",
             "stream_seq",
@@ -1243,7 +1276,7 @@ mod tests {
     async fn safety_net_creates_flow_tables_with_full_columns() {
         let pool = fresh_safety_net_pool().await;
 
-        let stream_cols = table_columns(&pool, "topology_streams").await;
+        let stream_cols = table_columns(&pool, "flow_streams").await;
         for c in [
             "session_id",
             "stream_seq",
@@ -1258,13 +1291,10 @@ mod tests {
             "redundant",
             "paths",
         ] {
-            assert!(
-                stream_cols.iter().any(|n| n == c),
-                "topology_streams 缺列 {c}"
-            );
+            assert!(stream_cols.iter().any(|n| n == c), "flow_streams 缺列 {c}");
         }
         let stream_pk: Vec<String> = sqlx::query(
-            "SELECT name FROM pragma_table_info('topology_streams') WHERE pk > 0 ORDER BY pk",
+            "SELECT name FROM pragma_table_info('flow_streams') WHERE pk > 0 ORDER BY pk",
         )
         .fetch_all(&pool)
         .await
@@ -1305,7 +1335,7 @@ mod tests {
         sqlx::query("INSERT INTO sessions (id, title, created_at, updated_at, payload) VALUES ('s1','t','t','t','{}')")
             .execute(&pool).await.unwrap();
         sqlx::query(
-            "INSERT INTO topology_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener) \
+            "INSERT INTO flow_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener) \
              VALUES ('s1', 0, 'ST', 7, 500, 512, 100, '0', '1')",
         )
         .execute(&pool)
@@ -1325,7 +1355,7 @@ mod tests {
             .unwrap();
 
         let streams_left: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM topology_streams WHERE session_id = 's1'")
+            sqlx::query_scalar("SELECT COUNT(*) FROM flow_streams WHERE session_id = 's1'")
                 .fetch_one(&pool)
                 .await
                 .unwrap();
@@ -1334,7 +1364,7 @@ mod tests {
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-        assert_eq!(streams_left, 0, "删 session 应级联清 topology_streams");
+        assert_eq!(streams_left, 0, "删 session 应级联清 flow_streams");
         assert_eq!(plans_left, 0, "删 session 应级联清 flow_plans");
     }
 
@@ -1342,7 +1372,7 @@ mod tests {
     fn session_scoped_tables_include_flow_tables() {
         for (table, required) in [
             (
-                "topology_streams",
+                "flow_streams",
                 &["session_id", "stream_seq", "class", "talker", "listener"][..],
             ),
             (
@@ -1360,5 +1390,78 @@ mod tests {
                 assert!(cols.contains(c), "{table} 导出清单缺列 {c}");
             }
         }
+    }
+
+    /// 流表改名迁移（2026-07-04）：模拟老库有 topology_streams 数据 + safety-net 已建空
+    /// flow_streams 壳 → 迁移后数据落 flow_streams、旧表消失，且幂等。
+    #[tokio::test]
+    async fn flow_streams_rename_migrates_legacy_db_and_is_idempotent() {
+        let opts = SqliteConnectOptions::new()
+            .in_memory(true)
+            .foreign_keys(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(opts)
+            .await
+            .unwrap();
+        // 老库：sessions + 旧名 topology_streams（含一行真数据）。
+        sqlx::query(SESSION_SCHEMA_SQL)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE topology_streams (session_id TEXT NOT NULL, stream_seq INTEGER NOT NULL, \
+             class TEXT NOT NULL, pcp INTEGER NOT NULL, period_us INTEGER NOT NULL, \
+             frame_bytes INTEGER NOT NULL, count INTEGER NOT NULL, talker TEXT NOT NULL, \
+             listener TEXT NOT NULL, redundant INTEGER NOT NULL DEFAULT 0, paths TEXT, \
+             PRIMARY KEY (session_id, stream_seq))",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO sessions (id, title, created_at, updated_at, payload) VALUES ('s1','t','n','n','{}')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO topology_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener) \
+             VALUES ('s1', 0, 'ST', 7, 500, 512, 3, '1', '2')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        // safety-net 建出空 flow_streams 壳（真实启动顺序：safety-net 先于本迁移）。
+        sqlx::query(&safety_net_schema_sql())
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        ensure_flow_streams_rename(&pool).await.unwrap();
+
+        // 旧表消失、新表承接同一行数据。
+        let legacy: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='topology_streams'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(legacy, 0, "旧 topology_streams 表应已改名");
+        let (class, pcp): (String, i64) = sqlx::query_as(
+            "SELECT class, pcp FROM flow_streams WHERE session_id='s1' AND stream_seq=0",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!((class.as_str(), pcp), ("ST", 7), "数据保真");
+
+        // 幂等：已迁移库再跑 no-op。
+        ensure_flow_streams_rename(&pool).await.unwrap();
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM flow_streams")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(rows, 1, "幂等：再跑不丢数据");
     }
 }

@@ -94,7 +94,7 @@ struct TimesyncNodeRow {
     offset_threshold: Option<i64>,
 }
 
-/// flow domain 的 pre-image：录入流表 + 综合门控表。列清单与 `topology_streams` /
+/// flow domain 的 pre-image：录入流表 + 综合门控表。列清单与 `flow_streams` /
 /// `flow_plans` schema 一一对应（与 SESSION_SCOPED_TABLES 同源，避免漂移）。
 /// flow 的单步撤销触发（按钮/命令）本期 defer，但 snapshot/restore 分派须域安全
 /// （domain="flow" 绝不落到 topology 表名上）——故两段都实现。
@@ -292,7 +292,7 @@ async fn snapshot_timesync_blob(
     serde_json::to_string(&pre_image).map_err(json_err)
 }
 
-/// 读 flow 两表（topology_streams / flow_plans）→ blob JSON。
+/// 读 flow 两表（flow_streams / flow_plans）→ blob JSON。
 async fn snapshot_flow_blob(
     conn: &mut SqliteConnection,
     session_id: &str,
@@ -301,7 +301,7 @@ async fn snapshot_flow_blob(
         r#"SELECT session_id, stream_seq, class, pcp, period_us, frame_bytes, count,
                   talker, listener, src_ip, dst_ip, src_l4_port, dst_l4_port, l4_protocol,
                   max_latency_us, redundant, paths
-           FROM topology_streams WHERE session_id = ? ORDER BY stream_seq"#,
+           FROM flow_streams WHERE session_id = ? ORDER BY stream_seq"#,
     )
     .bind(session_id)
     .fetch_all(&mut *conn)
@@ -511,7 +511,7 @@ async fn restore_timesync(
     Ok(())
 }
 
-/// 盖回 flow 两表（topology_streams / flow_plans）。目标表集合严格限于 flow domain。
+/// 盖回 flow 两表（flow_streams / flow_plans）。目标表集合严格限于 flow domain。
 async fn restore_flow(
     tx: &mut SqliteConnection,
     session_id: &str,
@@ -519,7 +519,7 @@ async fn restore_flow(
 ) -> Result<(), sqlx::Error> {
     let pre_image: FlowPreImage = serde_json::from_str(blob_json).map_err(json_err)?;
 
-    for table in ["topology_streams", "flow_plans"] {
+    for table in ["flow_streams", "flow_plans"] {
         sqlx::query(&format!("DELETE FROM {table} WHERE session_id = ?"))
             .bind(session_id)
             .execute(&mut *tx)
@@ -528,7 +528,7 @@ async fn restore_flow(
 
     for s in &pre_image.streams {
         sqlx::query(
-            r#"INSERT INTO topology_streams
+            r#"INSERT INTO flow_streams
                (session_id, stream_seq, class, pcp, period_us, frame_bytes, count,
                 talker, listener, src_ip, dst_ip, src_l4_port, dst_l4_port, l4_protocol,
                 max_latency_us, redundant, paths)
@@ -1060,7 +1060,7 @@ mod tests {
     /// 写一条 ST 流 + 一条 GCL 门样本。
     async fn seed_flow(pool: &Pool<Sqlite>) {
         sqlx::query(
-            "INSERT INTO topology_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener, max_latency_us, redundant, paths) \
+            "INSERT INTO flow_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener, max_latency_us, redundant, paths) \
              VALUES ('s1', 0, 'ST', 7, 500, 512, 10000, '0', '1', 200, 0, NULL)",
         )
         .execute(pool)
@@ -1076,7 +1076,7 @@ mod tests {
     }
 
     async fn count_streams(pool: &Pool<Sqlite>) -> i64 {
-        sqlx::query_scalar("SELECT COUNT(*) FROM topology_streams WHERE session_id='s1'")
+        sqlx::query_scalar("SELECT COUNT(*) FROM flow_streams WHERE session_id='s1'")
             .fetch_one(pool)
             .await
             .unwrap()
@@ -1091,7 +1091,7 @@ mod tests {
             snapshot_domain(&pool, FLOW_DOMAIN).await;
 
             // 删光两表。
-            sqlx::query("DELETE FROM topology_streams WHERE session_id='s1'")
+            sqlx::query("DELETE FROM flow_streams WHERE session_id='s1'")
                 .execute(&pool)
                 .await
                 .unwrap();
@@ -1126,7 +1126,7 @@ mod tests {
             snapshot_domain(&pool, FLOW_DOMAIN).await;
 
             // 删 flow 表 + 删一个 topology 节点。
-            sqlx::query("DELETE FROM topology_streams WHERE session_id='s1'")
+            sqlx::query("DELETE FROM flow_streams WHERE session_id='s1'")
                 .execute(&pool)
                 .await
                 .unwrap();
