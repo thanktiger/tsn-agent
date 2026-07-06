@@ -1,6 +1,6 @@
 //! 流量规划写库 sidecar route（`/db/flow/*`）。镜像 `timesync_sidecar_routes`：
 //! 复用同一 `RouteState` / Bearer / session middleware。
-//! - `add_stream`：`verify_flow` 校验闸 → 单一 `insert_stream` 落 `topology_streams`。
+//! - `add_stream`：`verify_flow` 校验闸 → 单一 `insert_stream` 落 `flow_streams`。
 //! - `inspect`：读 streams + flow_plans 给 agent（talker/listener→mid 解析用）。
 //! - `remove_stream`：删某 `stream_seq`。
 //!
@@ -53,7 +53,7 @@ fn fail_with_flow_errors(errors: &[VerifyError]) -> Response {
     (StatusCode::OK, Json(payload)).into_response()
 }
 
-/// 单一插入助手（KTD6）：分配 `stream_seq = max+1`，落 `topology_streams` 全部结构列。
+/// 单一插入助手（KTD6）：分配 `stream_seq = max+1`，落 `flow_streams` 全部结构列。
 /// 所有写入路径共用——校验闸 `verify_flow` 由调用方在此之前跑。返回分配的 stream_seq。
 pub async fn insert_stream(
     conn: &mut SqliteConnection,
@@ -61,7 +61,7 @@ pub async fn insert_stream(
     s: &StreamInput,
 ) -> Result<i64, String> {
     let next_seq: i64 = sqlx::query_scalar(
-        "SELECT COALESCE(MAX(stream_seq), -1) + 1 FROM topology_streams WHERE session_id = ?",
+        "SELECT COALESCE(MAX(stream_seq), -1) + 1 FROM flow_streams WHERE session_id = ?",
     )
     .bind(session_id)
     .fetch_one(&mut *conn)
@@ -69,7 +69,7 @@ pub async fn insert_stream(
     .map_err(|e| format!("compute next stream_seq failed: {e}"))?;
 
     sqlx::query(
-        r#"INSERT INTO topology_streams
+        r#"INSERT INTO flow_streams
            (session_id, stream_seq, class, pcp, period_us, frame_bytes, count,
             talker, listener, src_ip, dst_ip, src_l4_port, dst_l4_port, l4_protocol,
             max_latency_us, redundant, paths)
@@ -94,7 +94,7 @@ pub async fn insert_stream(
     .bind(&s.paths)
     .execute(&mut *conn)
     .await
-    .map_err(|e| format!("insert topology_streams failed: {e}"))?;
+    .map_err(|e| format!("insert flow_streams failed: {e}"))?;
 
     Ok(next_seq)
 }
@@ -292,7 +292,7 @@ pub async fn remove_stream(
 
     // 一并清该流已综合的 GCL（flow_plans 归 flow domain，pre-image 已快照可撤）。
     let removed =
-        match sqlx::query("DELETE FROM topology_streams WHERE session_id = ? AND stream_seq = ?")
+        match sqlx::query("DELETE FROM flow_streams WHERE session_id = ? AND stream_seq = ?")
             .bind(&req.session_id)
             .bind(req.stream_seq)
             .execute(&mut *tx)
@@ -357,7 +357,7 @@ pub async fn inspect(
     let stream_rows = match sqlx::query(
         r#"SELECT stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener,
                   max_latency_us, redundant, paths
-           FROM topology_streams WHERE session_id = ? ORDER BY stream_seq"#,
+           FROM flow_streams WHERE session_id = ? ORDER BY stream_seq"#,
     )
     .bind(&req.session_id)
     .fetch_all(&state.pool)
@@ -548,7 +548,7 @@ mod tests {
         })
     }
 
-    /// add_stream 过校验闸 → 落 topology_streams，SELECT 断言**结构列本身**有值。
+    /// add_stream 过校验闸 → 落 flow_streams，SELECT 断言**结构列本身**有值。
     #[test]
     fn add_stream_persists_structural_columns() {
         tauri::async_runtime::block_on(async {
@@ -567,7 +567,7 @@ mod tests {
             // 断言结构列本身（非 JSON blob）。
             let (class, pcp, period, talker, listener): (String, i64, i64, String, String) =
                 sqlx::query_as(
-                    "SELECT class, pcp, period_us, talker, listener FROM topology_streams \
+                    "SELECT class, pcp, period_us, talker, listener FROM flow_streams \
                      WHERE session_id='s1' AND stream_seq=0",
                 )
                 .fetch_one(&pool)
@@ -598,7 +598,7 @@ mod tests {
             assert_eq!(parsed["code"], "PERIOD_NOT_DIVISOR");
 
             let count: i64 =
-                sqlx::query_scalar("SELECT COUNT(*) FROM topology_streams WHERE session_id='s1'")
+                sqlx::query_scalar("SELECT COUNT(*) FROM flow_streams WHERE session_id='s1'")
                     .fetch_one(&pool)
                     .await
                     .unwrap();
@@ -627,7 +627,7 @@ mod tests {
             }
 
             let rows: Vec<(i64, String, i64, Option<String>)> = sqlx::query_as(
-                "SELECT stream_seq, class, redundant, paths FROM topology_streams \
+                "SELECT stream_seq, class, redundant, paths FROM flow_streams \
                  WHERE session_id='s1' ORDER BY stream_seq",
             )
             .fetch_all(&pool)
@@ -667,7 +667,7 @@ mod tests {
             assert_eq!(parsed["ok"], true, "{parsed:?}");
 
             let (redundant, paths): (i64, Option<String>) = sqlx::query_as(
-                "SELECT redundant, paths FROM topology_streams WHERE session_id='s1' AND stream_seq=0",
+                "SELECT redundant, paths FROM flow_streams WHERE session_id='s1' AND stream_seq=0",
             )
             .fetch_one(&pool)
             .await
@@ -704,7 +704,7 @@ mod tests {
             assert_eq!(parsed["code"], "NOT_DUAL_PLANE");
 
             let count: i64 =
-                sqlx::query_scalar("SELECT COUNT(*) FROM topology_streams WHERE session_id='s1'")
+                sqlx::query_scalar("SELECT COUNT(*) FROM flow_streams WHERE session_id='s1'")
                     .fetch_one(&pool)
                     .await
                     .unwrap();
@@ -737,7 +737,7 @@ mod tests {
             assert_eq!(parsed["ok"], true, "{parsed:?}");
 
             let paths_col: Option<String> = sqlx::query_scalar(
-                "SELECT paths FROM topology_streams WHERE session_id='s1' AND stream_seq=0",
+                "SELECT paths FROM flow_streams WHERE session_id='s1' AND stream_seq=0",
             )
             .fetch_one(&pool)
             .await
@@ -842,7 +842,7 @@ mod tests {
             assert_eq!(parsed["summary"]["removed"], 1);
 
             let count: i64 =
-                sqlx::query_scalar("SELECT COUNT(*) FROM topology_streams WHERE session_id='s1'")
+                sqlx::query_scalar("SELECT COUNT(*) FROM flow_streams WHERE session_id='s1'")
                     .fetch_one(&pool)
                     .await
                     .unwrap();

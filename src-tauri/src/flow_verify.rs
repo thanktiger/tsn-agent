@@ -196,7 +196,7 @@ pub async fn verify_flow(
     //    per-端口细化（真同端口冲突）随路由 U5，此处取 session 级 pcp↔class 一致的安全超集。
     if FLOW_CLASSES.contains(&s.class.as_str()) {
         let conflict: Option<String> = sqlx::query(
-            "SELECT class FROM topology_streams WHERE session_id = ? AND pcp = ? AND class <> ? LIMIT 1",
+            "SELECT class FROM flow_streams WHERE session_id = ? AND pcp = ? AND class <> ? LIMIT 1",
         )
         .bind(session_id)
         .bind(s.pcp)
@@ -403,7 +403,7 @@ mod tests {
 
     async fn insert_existing_stream(pool: &Pool<Sqlite>, seq: i64, class: &str, pcp: i64) {
         sqlx::query(
-            "INSERT INTO topology_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener) \
+            "INSERT INTO flow_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener) \
              VALUES ('s1', ?, ?, ?, 500, 512, 100, '0', '1')",
         )
         .bind(seq)

@@ -262,6 +262,12 @@ pub async fn connect_app_database(app: &tauri::AppHandle) -> Result<Pool<Sqlite>
         .await
         .map_err(db_error)?;
 
+    // 流表改名（2026-07-04）：老库 topology_streams→flow_streams。须在 safety-net 之后
+    // （守卫会 DROP safety-net 刚建的空 flow_streams 壳再 RENAME 扶正旧表，见 db.rs）。
+    crate::db::ensure_flow_streams_rename(&pool)
+        .await
+        .map_err(db_error)?;
+
     Ok(pool)
 }
 

@@ -45,12 +45,12 @@ pub async fn get_flow_plan_inner(
 ) -> Result<FlowPlanDetail, String> {
     let (mut st_count, mut rc_count, mut be_count) = (0i64, 0i64, 0i64);
     let count_rows = sqlx::query(
-        "SELECT class, COUNT(*) AS n FROM topology_streams WHERE session_id = ? GROUP BY class",
+        "SELECT class, COUNT(*) AS n FROM flow_streams WHERE session_id = ? GROUP BY class",
     )
     .bind(session_id)
     .fetch_all(pool)
     .await
-    .map_err(|e| format!("读 topology_streams 计数失败：{e}"))?;
+    .map_err(|e| format!("读 flow_streams 计数失败：{e}"))?;
     for r in &count_rows {
         let class: String = r.get("class");
         let n: i64 = r.get("n");
@@ -176,7 +176,7 @@ mod tests {
     }
 
     async fn add_stream(pool: &sqlx::Pool<sqlx::Sqlite>, seq: i64, class: &str, pcp: i64) {
-        sqlx::query("INSERT INTO topology_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener) VALUES ('s1', ?, ?, ?, 500, 512, 10000, '1', '2')")
+        sqlx::query("INSERT INTO flow_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener) VALUES ('s1', ?, ?, ?, 500, 512, 10000, '1', '2')")
             .bind(seq).bind(class).bind(pcp).execute(pool).await.unwrap();
     }
 

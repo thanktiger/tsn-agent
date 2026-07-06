@@ -54,7 +54,7 @@ impl PlanResult {
     }
 }
 
-/// 库内流行（topology_streams 子集，plan/verify 共用）。
+/// 库内流行（flow_streams 子集，plan/verify 共用）。
 pub(crate) struct DbStream {
     pub(crate) stream_seq: i64,
     pub(crate) class: String,
@@ -79,12 +79,12 @@ pub(crate) async fn load_streams(
 ) -> Result<Vec<DbStream>, String> {
     let rows = sqlx::query(
         "SELECT stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener, max_latency_us, redundant, paths \
-         FROM topology_streams WHERE session_id = ? ORDER BY stream_seq",
+         FROM flow_streams WHERE session_id = ? ORDER BY stream_seq",
     )
     .bind(session_id)
     .fetch_all(pool)
     .await
-    .map_err(|e| format!("读 topology_streams 失败：{e}"))?;
+    .map_err(|e| format!("读 flow_streams 失败：{e}"))?;
     Ok(rows
         .iter()
         .map(|r| DbStream {
@@ -591,7 +591,7 @@ par TsnAgentFlowTasNetwork.sw1.eth[1].macLayer.queue.transmissionGate[1] duratio
     }
 
     async fn add_stream(pool: &sqlx::Pool<sqlx::Sqlite>, seq: i64, class: &str, pcp: i64) {
-        sqlx::query("INSERT INTO topology_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener) VALUES ('s1', ?, ?, ?, 500, 512, 10000, '1', '2')")
+        sqlx::query("INSERT INTO flow_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener) VALUES ('s1', ?, ?, ?, 500, 512, 10000, '1', '2')")
             .bind(seq).bind(class).bind(pcp).execute(pool).await.unwrap();
     }
 
@@ -805,7 +805,7 @@ par TsnAgentFlowTasNetwork.sw1.eth[1].macLayer.queue.transmissionGate[1] duratio
                     .bind(mid).execute(&pool).await.unwrap();
             }
             // ST 流 es1(0) → es2(1)（add_stream helper 固定 1→2，与此拓扑不符，直插）。
-            sqlx::query("INSERT INTO topology_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener) VALUES ('s1', 0, 'ST', 7, 500, 512, 10000, '0', '1')")
+            sqlx::query("INSERT INTO flow_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener) VALUES ('s1', 0, 'ST', 7, 500, 512, 10000, '0', '1')")
                 .execute(&pool).await.unwrap();
             let client = CapturingPlanClient {
                 result: ok_plan_result(),

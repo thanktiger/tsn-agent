@@ -1134,7 +1134,7 @@ mod tests {
             sqlx::query("INSERT INTO timesync_nodes (session_id, mid, master_port, slave_port) VALUES ('s1', ?, '[]', '[]')")
                 .bind(mid).execute(pool).await.unwrap();
         }
-        sqlx::query("INSERT INTO topology_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener, max_latency_us) VALUES ('s1', 0, 'ST', 7, 500, 512, 3, '1', '2', 400)")
+        sqlx::query("INSERT INTO flow_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener, max_latency_us) VALUES ('s1', 0, 'ST', 7, 500, 512, 3, '1', '2', 400)")
             .execute(pool).await.unwrap();
         // pin GCL 一条（sw1=mid0, eth1, gate7=ST 门）。
         sqlx::query("INSERT INTO flow_plans (session_id, stream_seq, node, eth_n, gate_index, initially_open, offset_ns, durations_ns, solver) VALUES ('s1', 0, '0', 1, 7, 1, 0, '[300000,700000]', 'Z3')")
@@ -1281,7 +1281,7 @@ mod tests {
                 sqlx::query("INSERT INTO topology_nodes (session_id, mid, name, x, y, node_type, port_count, queue_count, insert_order) VALUES ('s1', ?, NULL, 0, 0, ?, 8, 8, ?)")
                     .bind(mid).bind(ty).bind(ord).execute(&pool).await.unwrap();
             }
-            sqlx::query("INSERT INTO topology_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener) VALUES ('s1', 0, 'ST', 7, 500, 512, 3, '1', '2')")
+            sqlx::query("INSERT INTO flow_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener) VALUES ('s1', 0, 'ST', 7, 500, 512, 3, '1', '2')")
                 .execute(&pool).await.unwrap();
             let r = verify_tas_inner(
                 &pool,
@@ -1304,7 +1304,7 @@ mod tests {
             let pool = fresh_pool().await;
             seed(&pool).await;
             // 换成纯 BE 流集 + 清掉 GCL。
-            sqlx::query("DELETE FROM topology_streams WHERE session_id='s1'")
+            sqlx::query("DELETE FROM flow_streams WHERE session_id='s1'")
                 .execute(&pool)
                 .await
                 .unwrap();
@@ -1312,7 +1312,7 @@ mod tests {
                 .execute(&pool)
                 .await
                 .unwrap();
-            sqlx::query("INSERT INTO topology_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener, max_latency_us) VALUES ('s1', 0, 'BE', 0, 500, 512, 3, '1', '2', 400)")
+            sqlx::query("INSERT INTO flow_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener, max_latency_us) VALUES ('s1', 0, 'BE', 0, 500, 512, 3, '1', '2', 400)")
                 .execute(&pool).await.unwrap();
             let csv = format!(
                 "{}TsnAgentFlowTasNetwork.es2.app[0].sink,packetLifeTime:vector,0 0 0,0.0001 0.00012 0.00011\nTsnAgentFlowTasNetwork.es2.app[0].sink,packetJitter:vector,0 0 0,0.0000002 0.0000003 0.0000001\n",
@@ -1340,11 +1340,11 @@ mod tests {
             let pool = fresh_pool().await;
             seed(&pool).await; // 带 gate7 flow_plans 存量。
             // 删光 ST，只留 BE（不清 flow_plans——模拟删流后残留）。
-            sqlx::query("DELETE FROM topology_streams WHERE session_id='s1'")
+            sqlx::query("DELETE FROM flow_streams WHERE session_id='s1'")
                 .execute(&pool)
                 .await
                 .unwrap();
-            sqlx::query("INSERT INTO topology_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener) VALUES ('s1', 0, 'BE', 0, 500, 512, 3, '1', '2')")
+            sqlx::query("INSERT INTO flow_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener) VALUES ('s1', 0, 'BE', 0, 500, 512, 3, '1', '2')")
                 .execute(&pool).await.unwrap();
             let csv = format!(
                 "{}TsnAgentFlowTasNetwork.es2.app[0].sink,packetLifeTime:vector,0 0 0,0.0001 0.00012 0.00011\nTsnAgentFlowTasNetwork.es2.app[0].sink,packetJitter:vector,0 0 0,0.0000002 0.0000003 0.0000001\n",
@@ -1401,7 +1401,7 @@ mod tests {
         tauri::async_runtime::block_on(async {
             let pool = fresh_pool().await;
             seed(&pool).await; // ST 流 + gate7 GCL（sw1 eth1 开 [0,300us)）。
-            sqlx::query("INSERT INTO topology_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener, max_latency_us) VALUES ('s1', 1, 'BE', 0, 500, 512, 3, '1', '2', 400)")
+            sqlx::query("INSERT INTO flow_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener, max_latency_us) VALUES ('s1', 1, 'BE', 0, 500, 512, 3, '1', '2', 400)")
                 .execute(&pool).await.unwrap();
             // 两个 sink（es2.app[0]=ST、app[1]=BE）都给健康向量。
             let csv = format!(
@@ -1442,7 +1442,7 @@ mod tests {
         tauri::async_runtime::block_on(async {
             let pool = fresh_pool().await;
             seed(&pool).await;
-            sqlx::query("UPDATE topology_streams SET pcp=3 WHERE session_id='s1'")
+            sqlx::query("UPDATE flow_streams SET pcp=3 WHERE session_id='s1'")
                 .execute(&pool)
                 .await
                 .unwrap();
@@ -1495,7 +1495,7 @@ mod tests {
             sqlx::query("INSERT INTO timesync_nodes (session_id, mid, master_port, slave_port) VALUES ('s1', ?, '[]', '[]')")
                 .bind(mid).execute(pool).await.unwrap();
         }
-        sqlx::query("INSERT INTO topology_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener, max_latency_us, redundant, paths) VALUES ('s1', 0, 'RC', 6, 500, 512, 2000, '1', '2', 400, 1, ?)")
+        sqlx::query("INSERT INTO flow_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener, max_latency_us, redundant, paths) VALUES ('s1', 0, 'RC', 6, 500, 512, 2000, '1', '2', 400, 1, ?)")
             .bind(paths).execute(pool).await.unwrap();
     }
 
@@ -1795,7 +1795,7 @@ mod tests {
                 .bind(mid).execute(pool).await.unwrap();
         }
         for (seq, talker, listener) in [(0, "1", "2"), (1, rc1.0, rc1.1)] {
-            sqlx::query("INSERT INTO topology_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener, max_latency_us, redundant, paths) VALUES ('s1', ?, 'RC', 6, 500, 512, 2000, ?, ?, 400, 1, NULL)")
+            sqlx::query("INSERT INTO flow_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener, max_latency_us, redundant, paths) VALUES ('s1', ?, 'RC', 6, 500, 512, 2000, ?, ?, 400, 1, NULL)")
                 .bind(seq).bind(talker).bind(listener).execute(pool).await.unwrap();
         }
     }
@@ -1869,7 +1869,7 @@ mod tests {
         tauri::async_runtime::block_on(async {
             let pool = fresh_pool().await;
             seed_dual_plane_rc(&pool, RC_PATHS).await;
-            sqlx::query("UPDATE topology_streams SET count=100 WHERE session_id='s1'")
+            sqlx::query("UPDATE flow_streams SET count=100 WHERE session_id='s1'")
                 .execute(&pool)
                 .await
                 .unwrap();
@@ -1895,13 +1895,11 @@ mod tests {
             let pool = fresh_pool().await;
             seed_dual_plane_rc(&pool, RC_PATHS).await;
             // RC 意图窗缩到 100ms（旧分母下断后 0 帧必拒）；ST 长流把 sim 拉到 10s。
-            sqlx::query(
-                "UPDATE topology_streams SET count=100, period_us=1000 WHERE session_id='s1'",
-            )
-            .execute(&pool)
-            .await
-            .unwrap();
-            sqlx::query("INSERT INTO topology_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener, max_latency_us) VALUES ('s1', 1, 'ST', 7, 1000, 512, 10000, '1', '2', 800)")
+            sqlx::query("UPDATE flow_streams SET count=100, period_us=1000 WHERE session_id='s1'")
+                .execute(&pool)
+                .await
+                .unwrap();
+            sqlx::query("INSERT INTO flow_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener, max_latency_us) VALUES ('s1', 1, 'ST', 7, 1000, 512, 10000, '1', '2', 800)")
                 .execute(&pool).await.unwrap();
             sqlx::query("INSERT INTO flow_plans (session_id, stream_seq, node, eth_n, gate_index, initially_open, offset_ns, durations_ns, solver) VALUES ('s1', 1, '0', 1, 7, 1, 0, '[300000,700000]', 'Z3')")
                 .execute(&pool).await.unwrap();
@@ -1933,7 +1931,7 @@ mod tests {
             let pool = fresh_pool().await;
             seed_dual_plane_rc(&pool, RC_PATHS).await;
             // 加 ST 流（平面 A：es1→es2）+ 其 GCL（有 ST 无 GCL 会 no_plan 早退）。
-            sqlx::query("INSERT INTO topology_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener, max_latency_us) VALUES ('s1', 1, 'ST', 7, 500, 512, 2000, '1', '2', 400)")
+            sqlx::query("INSERT INTO flow_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener, max_latency_us) VALUES ('s1', 1, 'ST', 7, 500, 512, 2000, '1', '2', 400)")
                 .execute(&pool).await.unwrap();
             sqlx::query("INSERT INTO flow_plans (session_id, stream_seq, node, eth_n, gate_index, initially_open, offset_ns, durations_ns, solver) VALUES ('s1', 0, '0', 1, 7, 1, 0, '[300000,700000]', 'Z3')")
                 .execute(&pool).await.unwrap();
@@ -2273,9 +2271,9 @@ mod tests {
     /// 全部 es1→es2、count=2000×500us（sim=1s、每流实发 2001）。
     async fn seed_mixed_three_classes(pool: &sqlx::Pool<sqlx::Sqlite>) {
         seed_dual_plane_rc(pool, RC_PATHS).await;
-        sqlx::query("INSERT INTO topology_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener, max_latency_us) VALUES ('s1', 1, 'ST', 7, 500, 512, 2000, '1', '2', 400)")
+        sqlx::query("INSERT INTO flow_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener, max_latency_us) VALUES ('s1', 1, 'ST', 7, 500, 512, 2000, '1', '2', 400)")
             .execute(pool).await.unwrap();
-        sqlx::query("INSERT INTO topology_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener) VALUES ('s1', 2, 'BE', 0, 500, 512, 2000, '1', '2')")
+        sqlx::query("INSERT INTO flow_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener) VALUES ('s1', 2, 'BE', 0, 500, 512, 2000, '1', '2')")
             .execute(pool).await.unwrap();
         sqlx::query("INSERT INTO flow_plans (session_id, stream_seq, node, eth_n, gate_index, initially_open, offset_ns, durations_ns, solver) VALUES ('s1', 1, '0', 1, 7, 1, 0, '[300000,700000]', 'Z3')")
             .execute(pool).await.unwrap();
@@ -2377,7 +2375,7 @@ mod tests {
             // 零收包：CSV 只有表头（该流无向量行）→ FAIL。
             let pool = fresh_pool().await;
             seed(&pool).await;
-            sqlx::query("DELETE FROM topology_streams WHERE session_id='s1'")
+            sqlx::query("DELETE FROM flow_streams WHERE session_id='s1'")
                 .execute(&pool)
                 .await
                 .unwrap();
@@ -2385,7 +2383,7 @@ mod tests {
                 .execute(&pool)
                 .await
                 .unwrap();
-            sqlx::query("INSERT INTO topology_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener) VALUES ('s1', 0, 'BE', 0, 500, 512, 3, '1', '2')")
+            sqlx::query("INSERT INTO flow_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener) VALUES ('s1', 0, 'BE', 0, 500, 512, 3, '1', '2')")
                 .execute(&pool).await.unwrap();
             let r = verify_tas_inner(
                 &pool,
@@ -2437,7 +2435,7 @@ mod tests {
         tauri::async_runtime::block_on(async {
             let pool = fresh_pool().await;
             seed_dual_plane_rc(&pool, RC_PATHS).await;
-            sqlx::query("INSERT INTO topology_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener, max_latency_us) VALUES ('s1', 1, 'ST', 7, 500, 512, 2000, '1', '2', 400)")
+            sqlx::query("INSERT INTO flow_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener, max_latency_us) VALUES ('s1', 1, 'ST', 7, 500, 512, 2000, '1', '2', 400)")
                 .execute(&pool).await.unwrap();
             sqlx::query("INSERT INTO flow_plans (session_id, stream_seq, node, eth_n, gate_index, initially_open, offset_ns, durations_ns, solver) VALUES ('s1', 1, '0', 1, 7, 1, 0, '[300000,700000]', 'Z3')")
                 .execute(&pool).await.unwrap();
@@ -2731,7 +2729,7 @@ mod tests {
             tauri::async_runtime::block_on(async {
                 let pool = fresh_pool().await;
                 seed(&pool).await;
-                sqlx::query("INSERT INTO topology_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener) VALUES ('s1', 1, 'BE', 0, 500, 512, 3, '1', '2')")
+                sqlx::query("INSERT INTO flow_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener) VALUES ('s1', 1, 'BE', 0, 500, 512, 3, '1', '2')")
                     .execute(&pool).await.unwrap();
                 clear_flow_plans(&pool).await;
                 let plan = plan_gate7();
@@ -2775,7 +2773,7 @@ mod tests {
             tauri::async_runtime::block_on(async {
                 let pool = fresh_pool().await;
                 seed_dual_plane_rc(&pool, RC_PATHS).await; // RC seq0。
-                sqlx::query("INSERT INTO topology_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener, max_latency_us) VALUES ('s1', 1, 'ST', 7, 500, 512, 2000, '1', '2', 400)")
+                sqlx::query("INSERT INTO flow_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener, max_latency_us) VALUES ('s1', 1, 'ST', 7, 500, 512, 2000, '1', '2', 400)")
                     .execute(&pool).await.unwrap();
                 let plan = plan_gate7();
                 let pr = crate::flow_plan_command::plan_tas_inner(&pool, "s1", &plan, "http://x")
@@ -2945,11 +2943,11 @@ mod tests {
             tauri::async_runtime::block_on(async {
                 let pool = fresh_pool().await;
                 seed(&pool).await; // 带存量 ST GCL——no_gating 应清掉。
-                sqlx::query("DELETE FROM topology_streams WHERE session_id='s1'")
+                sqlx::query("DELETE FROM flow_streams WHERE session_id='s1'")
                     .execute(&pool)
                     .await
                     .unwrap();
-                sqlx::query("INSERT INTO topology_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener) VALUES ('s1', 0, 'BE', 0, 500, 512, 3, '1', '2')")
+                sqlx::query("INSERT INTO flow_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener) VALUES ('s1', 0, 'BE', 0, 500, 512, 3, '1', '2')")
                     .execute(&pool).await.unwrap();
                 let plan = plan_gate7();
                 let pr = crate::flow_plan_command::plan_tas_inner(&pool, "s1", &plan, "http://x")
