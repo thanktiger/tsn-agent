@@ -261,7 +261,7 @@ function readCuratedChangelogEntry(version) {
 
 function writeReleaseNotes(version, entry, metadata, internalDetails) {
   const lines = [
-    `# TSN Agent v${version}`,
+    `# HIBridge Agent v${version}`,
     "",
     `升级类型：${metadata.bump}`,
     `提交数量：${metadata.commitCount}`,
