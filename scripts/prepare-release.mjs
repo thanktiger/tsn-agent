@@ -62,10 +62,21 @@ function bumpVersion(version, bump) {
 }
 
 function latestReleaseTag() {
+  // tag 触发的 CI 打包里，正在发布的 tag（如 v1.0.0）已指向 HEAD——必须排除它，否则
+  // 取到的「最新 tag」是自己，`<tag>..HEAD` 区间为空，release 正文的升级类型/提交数量/
+  // 基准版本三行元信息全失真（none / 0 / 自己）。在 release 分支预演时 HEAD 无 tag，
+  // 排除集为空、行为不变（仍取最新的上一个版本 tag）。
+  const headTags = new Set(
+    tryGit(["tag", "--points-at", "HEAD", "--list", "v[0-9]*.[0-9]*.[0-9]*"])
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean),
+  );
   return tryGit(["tag", "--merged", "HEAD", "--list", "v[0-9]*.[0-9]*.[0-9]*", "--sort=-v:refname"])
     .split("\n")
     .map((line) => line.trim())
-    .find(Boolean);
+    .filter(Boolean)
+    .find((tag) => !headTags.has(tag));
 }
 
 function readJsonFromHead(relativePath) {
