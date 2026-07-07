@@ -763,8 +763,8 @@ export function createFlowToolRegistry(): FlowMcpToolDefinition[] {
         "(class must match its fixed PCP, period must divide the 1000us gate cycle, frame <= link MTU, " +
         "talker/listener must be existing node mids, same PCP must map to one class); on violation the " +
         "stream is rejected with the offending field and NOT persisted. talker/listener are node mids " +
-        "(call topology.inspect to find them). maxLatencyUs is optional (planning derives it from the " +
-        "docx window when omitted). Returns the assigned streamSeq on success.",
+        "(call topology.inspect to find them). maxLatencyUs is optional (planning falls back to the " +
+        "stream's own period as the latency bound when omitted). Returns the assigned streamSeq on success.",
       inputSchema: addStreamInputSchema(),
       handler: async (args) =>
         callSidecarTool("/db/flow/add_stream", args, {
