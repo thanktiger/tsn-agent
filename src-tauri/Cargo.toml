@@ -1,6 +1,6 @@
 [package]
 name = "tsn-agent"
-version = "0.10.0"
+version = "1.0.0"
 description = "HIBridge Agent desktop application"
 authors = ["HIBridge Agent contributors"]
 edition = "2024"
