@@ -48,6 +48,29 @@ def _gen_run_id() -> str:
     return "run-" + secrets.token_hex(8)
 
 
+# 每次 submit 前扫一遍 RUN_BASE_DIR，清理超过此秒数的残留 run 目录。
+# 正常路径不会残留（app 取完结果后 /clean 路径尚未实现，故靠 TTL 兜底）。
+_RUN_DIR_TTL_S = 24 * 3600
+
+
+def _cleanup_old_runs() -> None:
+    base = config.RUN_BASE_DIR
+    if not os.path.isdir(base):
+        return
+    now = time.time()
+    for name in os.listdir(base):
+        if not name.startswith("run-"):
+            continue
+        path = os.path.join(base, name)
+        if not os.path.isdir(path):
+            continue
+        try:
+            if now - os.path.getmtime(path) > _RUN_DIR_TTL_S:
+                shutil.rmtree(path)
+        except OSError:
+            pass  # 权限不足/已删等不阻塞提交
+
+
 def _tail(text: str, limit: int = _OUTPUT_TAIL_MAX) -> str:
     if len(text) <= limit:
         return text
@@ -141,6 +164,7 @@ def _has_active_job() -> bool:
 
 def submit(network_ned: str, omnetpp_ini: str, manifest_json: str, scavetool_filter: str) -> str:
     """单运行：有活跃任务则抛 Busy。同步写 bundle，再起后台线程跑慢的 inet+scavetool，返回 job_id。"""
+    _cleanup_old_runs()
     with _lock:
         if _has_active_job():
             raise Busy("已有软仿在运行")
@@ -207,6 +231,7 @@ def _set_plan_result(
 
 def submit_plan(network_ned: str, omnetpp_ini: str, manifest_json: str) -> str:
     """提交规划（Z3 综合 + dump GCL）。与 submit 同用单运行锁 + job 存储（plan/sim 不并发）。"""
+    _cleanup_old_runs()
     with _lock:
         if _has_active_job():
             raise Busy("已有软仿在运行")
