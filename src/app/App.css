@@ -526,8 +526,8 @@ textarea:focus-visible {
 }
 
 .skill-detail-layout > .master-list {
-  /* 四个 skill 卡 2×2 排布。WebKit（Tauri WKWebView）下 grid + overflow 的 auto 行
-     automatic min size = 0，整行被压塌成 0 高、4 个 skill 卡不可见（同 .skill-file-list
+  /* 三个 skill 卡等分一行。WebKit（Tauri WKWebView）下 grid + overflow 的 auto 行
+     automatic min size = 0，整行被压塌成 0 高、skill 卡不可见（同 .skill-file-list
      的 row collapse，见 a7f06ff）。改 flex-wrap + overflow:visible 规避。 */
   display: flex;
   flex-wrap: wrap;
@@ -538,7 +538,8 @@ textarea:focus-visible {
 }
 
 .skill-detail-layout .master-list-item {
-  flex: 1 1 calc(50% - 4px);
+  flex: 1 1 0;
+  min-width: 0;
   width: auto;
   gap: 3px;
   padding: 10px 12px;
