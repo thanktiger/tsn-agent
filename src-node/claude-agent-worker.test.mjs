@@ -108,7 +108,7 @@ describe("claude-agent-worker", () => {
         ...TOPOLOGY_MCP_ALLOWED_TOOLS,
         UNDO_TOOL_NAME,
       ]);
-      expect(input.options.settingSources).toEqual(["project"]);
+      expect(input.options.settingSources).toEqual(["user", "project"]);
       expect(input.options.skills).toEqual(["tsn-topology", "tsn-time-sync", "tsn-flow-planning"]);
       expect(input.options.tools).toEqual(["Read", "Skill"]);
       expect(input.options.allowedTools).toEqual([
