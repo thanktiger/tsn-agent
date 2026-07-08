@@ -19,7 +19,7 @@ jobs:
         run: bash scripts/check-no-legacy-types.sh
 
   test:
-    name: Tests (vitest + Playwright e2e)
+    name: Tests (vitest)
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout
@@ -38,12 +38,8 @@ jobs:
       - name: Unit tests (vitest)
         run: npm test
 
-      - name: Install Playwright browser
-        run: npx playwright install --with-deps chromium
-
-      # web 预览（非 Tauri）fail-closed smoke；webServer 由 playwright 自动起 vite。
-      - name: E2E (Playwright)
-        run: npm run e2e
+      # e2e (Playwright) 只在打 tag 发布时跑（production-build.yml），
+      # 不阻塞每次 PR/push 的 CI 反馈速度（install browser 耗时长）。
 
   lint:
     name: Lint + Rust tests (Biome + Rust)
