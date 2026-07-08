@@ -1,0 +1,22 @@
+[Unit]
+Description=INET soft-sim HTTP service (remote backend via SSHFS + SSH exec)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=__SERVICE_DIR__
+Environment="INET_SIM_ENV_CMD=__SERVICE_DIR__/deploy/inet-remote.sh"
+Environment="INET_SIM_SSH_HOST=__SSH_HOST__"
+Environment="INET_SIM_PORT=__PORT__"
+Environment="INET_SIM_NIX_PROFILE=/bin/true"
+Environment="INET_SIM_OPP_ENV_BIN=/bin/true"
+# SSHFS 挂载 INET 机的运行目录（供 bundle 写 + 结果读）。
+ExecStartPre=/bin/bash -c "mkdir -p /tmp/tsn-agent-runs; fusermount -uz /tmp/tsn-agent-runs 2>/dev/null; true"
+ExecStartPre=/usr/bin/sshfs -o reconnect,ServerAliveInterval=15,IdentityFile=__SSH_KEY__,StrictHostKeyChecking=accept-new __SSH_HOST__:/tmp/tsn-agent-runs /tmp/tsn-agent-runs
+ExecStart=__SERVICE_DIR__/.venv/bin/uvicorn app:app --host 0.0.0.0 --port __PORT__
+ExecStopPost=/bin/bash -c "fusermount -uz /tmp/tsn-agent-runs 2>/dev/null; true"
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target
