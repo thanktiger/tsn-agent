@@ -526,8 +526,8 @@ textarea:focus-visible {
 }
 
 .skill-detail-layout > .master-list {
-  /* 四个 skill 卡 2×2 排布。WebKit（Tauri WKWebView）下 grid + overflow 的 auto 行
-     automatic min size = 0，整行被压塌成 0 高、4 个 skill 卡不可见（同 .skill-file-list
+  /* 三个 skill 卡等分一行。WebKit（Tauri WKWebView）下 grid + overflow 的 auto 行
+     automatic min size = 0，整行被压塌成 0 高、skill 卡不可见（同 .skill-file-list
      的 row collapse，见 a7f06ff）。改 flex-wrap + overflow:visible 规避。 */
   display: flex;
   flex-wrap: wrap;
@@ -538,7 +538,8 @@ textarea:focus-visible {
 }
 
 .skill-detail-layout .master-list-item {
-  flex: 1 1 calc(50% - 4px);
+  flex: 1 1 0;
+  min-width: 0;
   width: auto;
   gap: 3px;
   padding: 10px 12px;
@@ -976,71 +977,6 @@ textarea:focus-visible {
   padding-left: 18px;
   color: var(--text-secondary);
   word-break: break-all;
-}
-
-/* 参数合法域：模板分块 + 每参数一行（名称 | 约束）的紧凑网格。 */
-.skill-legal-domain {
-  display: grid;
-  gap: 8px;
-}
-
-.skill-legal-domain-header {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-}
-
-.skill-legal-domain-header h5 {
-  margin: 0;
-  color: var(--text-primary);
-  font-size: 13px;
-}
-
-.skill-legal-domain-header small {
-  color: var(--text-muted);
-  font-size: 11px;
-}
-
-.skill-legal-domain-templates {
-  display: grid;
-  gap: 6px;
-}
-
-.skill-legal-domain-template {
-  padding: 8px 10px;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  background: var(--bg-secondary);
-}
-
-.skill-legal-domain-template > .mono {
-  display: block;
-  margin-bottom: 5px;
-  color: var(--accent);
-  font-size: 12px;
-  font-weight: 600;
-}
-
-.skill-legal-domain-params {
-  display: grid;
-  grid-template-columns: minmax(150px, max-content) 1fr;
-  gap: 2px 16px;
-  margin: 0;
-}
-
-.skill-legal-domain-param {
-  display: contents;
-}
-
-.skill-legal-domain-param dt {
-  color: var(--text-primary);
-  font-size: 12px;
-}
-
-.skill-legal-domain-param dd {
-  margin: 0;
-  color: var(--text-secondary);
-  font-size: 12px;
 }
 
 .toggle-row {

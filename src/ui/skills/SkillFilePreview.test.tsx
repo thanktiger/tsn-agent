@@ -45,11 +45,6 @@ function createService(overrides: Partial<SkillFileService> = {}): SkillFileServ
       removed: ["tsn-topology/package.json"],
       preserved: ["tsn-topology/my-notes.md"],
     })),
-    describeTopologyTemplates: vi.fn().mockResolvedValue({
-      templateCount: 2,
-      templateIds: ["hop-linear", "dual-plane-redundant"],
-      templates: [],
-    }),
     ...overrides,
   };
 }
@@ -159,41 +154,6 @@ describe("SkillFilePreview", () => {
     expect(screen.queryByRole("button", { name: "编辑文件" })).not.toBeInTheDocument();
     expect(screen.getByText(/当前为只读指引/)).toBeInTheDocument();
     expect(screen.getByText(/可写 skill 副本不可用/)).toBeInTheDocument();
-  });
-
-  it("renders the topology legal-domain from the catalog", async () => {
-    const service = createService({
-      describeTopologyTemplates: vi.fn().mockResolvedValue({
-        templateCount: 1,
-        templateIds: ["hop-linear"],
-        templates: [
-          {
-            id: "hop-linear",
-            name: "通用线型拓扑",
-            params: [
-              { name: "switchCount", type: "integer", minimum: 1, maximum: 12 },
-              { name: "dataRateMbps", type: "enum", values: [10, 100, 1000, 10000] },
-            ],
-          },
-        ],
-      }),
-    });
-
-    render(<SkillFilePreview skillId="tsn-topology" service={service} />);
-
-    expect(await screen.findByRole("region", { name: "参数合法域" })).toBeInTheDocument();
-    expect(await screen.findByText("switchCount")).toBeInTheDocument();
-    expect(screen.getByText("dataRateMbps")).toBeInTheDocument();
-  });
-
-  it("shows legal-domain unavailable when the catalog command fails", async () => {
-    const service = createService({
-      describeTopologyTemplates: vi.fn().mockRejectedValue(new Error("命令不可用")),
-    });
-
-    render(<SkillFilePreview skillId="tsn-topology" service={service} />);
-
-    expect(await screen.findByText(/参数合法域当前不可用/)).toBeInTheDocument();
   });
 
   it("hints when the SKILL.md guidance is empty", async () => {
@@ -324,27 +284,5 @@ describe("SkillFilePreview", () => {
       const buttons = screen.getAllByRole("button", { name: /恢复内置版本/ });
       expect(buttons[buttons.length - 1]).toBeDisabled();
     });
-  });
-
-  it("does not render the legal-domain section for non-topology skills", async () => {
-    const service = createService({
-      listFiles: vi.fn().mockResolvedValue({
-        skillId: "tsn-flow-planning",
-        status: "available",
-        files: [{ path: "SKILL.md", kind: "file", sizeBytes: 10, canPreview: true, canEdit: true }],
-      }),
-      readFile: vi.fn().mockResolvedValue({
-        skillId: "tsn-flow-planning",
-        path: "SKILL.md",
-        content: "flow 内容",
-        editable: true,
-      }),
-    });
-
-    render(<SkillFilePreview skillId="tsn-flow-planning" service={service} />);
-
-    expect(await screen.findByText("flow 内容")).toBeInTheDocument();
-    expect(screen.queryByRole("region", { name: "参数合法域" })).not.toBeInTheDocument();
-    expect(service.describeTopologyTemplates).not.toHaveBeenCalled();
   });
 });
