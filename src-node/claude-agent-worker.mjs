@@ -219,9 +219,12 @@ export async function runClaude(userPrompt, options = {}, queryFn = query) {
     // - 保留 "project" → SDK 才会从 .claude/skills/ 发现并注册 tsn-topology/tsn-time-sync/
     //   tsn-flow-planning（下方 skills 数组只是「启用哪些」的过滤白名单，不负责加载；关掉
     //   "project" 后 Skill 工具会报 Unknown skill）。debug 实测：Loaded 3 unique skills (project: 3)。
+    // - 包用户机器上没有开发插件，打包态里的 "user" 只有 OAuth token 值（claude login），零 token 成本。
+    //   砍掉 "user" 导致打包版 403 认证失败：本应用无显式 API key 机制，认证全靠 SDK 读 ~/.claude/ 里的
+    //   OAuth（claude login 的存储处），去 "user" = SDK 不读该目录 = 空凭据认证被 API 拒。
     // - 项目 AGENTS.md/CLAUDE.md 不会进 prompt：memory 注入靠 claude_code preset，而本 worker
     //   用的是自定义字符串 systemPrompt（见下方 systemPrompt），preset 未启用 → memory 不注入。
-    settingSources: ["project"],
+    settingSources: ["user", "project"],
     model: "claude-sonnet-4-6",
     permissionMode: "dontAsk",
     // 只发 agent 实际用到的内置工具，不用整套 claude_code 预设（预设会把 Bash/Write/
