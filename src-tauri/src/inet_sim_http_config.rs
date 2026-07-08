@@ -11,7 +11,7 @@ const INET_SIM_HTTP_CONFIG_KEY: &str = "inet_sim_http_config";
 /// 覆盖 base_url 的环境变量。
 const INET_SIM_HTTP_URL_ENV: &str = "TSN_AGENT_INET_SIM_HTTP_URL";
 /// dev 默认 base_url：已部署的宿主机薄 HTTP 软仿服务。
-const DEFAULT_INET_SIM_HTTP_URL: &str = "http://100.104.38.106:19090";
+const DEFAULT_INET_SIM_HTTP_URL: &str = "http://100.125.25.12:19090";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -151,7 +151,7 @@ mod tests {
         assert!(is_valid_base_url("http://h:19090"));
         assert!(is_valid_base_url("https://h"));
         assert!(!is_valid_base_url("ftp://h"));
-        assert!(!is_valid_base_url("100.104.38.106:19090"));
+        assert!(!is_valid_base_url("100.125.25.12:19090"));
     }
 
     #[tokio::test]
