@@ -10,17 +10,9 @@ import {
   type SkillFileEntry,
   type SkillFileListResult,
   type SkillFileService,
-  type TopologyParam,
-  type TopologyTemplateCatalog,
 } from "../../skills/skill-file-service";
 
 const defaultSkillFileService = createSkillFileService();
-
-type CatalogState =
-  | { kind: "idle" }
-  | { kind: "loading" }
-  | { kind: "ready"; catalog: TopologyTemplateCatalog }
-  | { kind: "unavailable"; message: string };
 
 type RestoreState =
   | { kind: "idle" }
@@ -46,7 +38,6 @@ export function SkillFilePreview({
   const [isSaving, setIsSaving] = useState(false);
   const [savedNotice, setSavedNotice] = useState(false);
   const [error, setError] = useState<string>();
-  const [catalogState, setCatalogState] = useState<CatalogState>({ kind: "idle" });
   const [restoreState, setRestoreState] = useState<RestoreState>({ kind: "idle" });
   const [reloadToken, setReloadToken] = useState(0);
 
@@ -107,33 +98,6 @@ export function SkillFilePreview({
       cancelled = true;
     };
   }, [service, skillId, reloadToken]);
-
-  useEffect(() => {
-    if (!isTopologySkill) {
-      setCatalogState({ kind: "idle" });
-      return;
-    }
-
-    let cancelled = false;
-    setCatalogState({ kind: "loading" });
-
-    service
-      .describeTopologyTemplates()
-      .then((catalog) => {
-        if (!cancelled) {
-          setCatalogState({ kind: "ready", catalog });
-        }
-      })
-      .catch((cause) => {
-        if (!cancelled) {
-          setCatalogState({ kind: "unavailable", message: errorMessage(cause) });
-        }
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [service, skillId, isTopologySkill]);
 
   useEffect(() => {
     if (!selectedPath) {
@@ -429,8 +393,6 @@ export function SkillFilePreview({
           </div>
         </div>
       )}
-
-      {isTopologySkill && <TopologyLegalDomain state={catalogState} />}
     </section>
   );
 }
@@ -458,50 +420,6 @@ function splitFrontmatter(text: string): { frontmatter?: string; body: string } 
   }
 
   return { frontmatter: match[1], body: text.slice(match[0].length) };
-}
-
-function TopologyLegalDomain({ state }: { state: CatalogState }) {
-  return (
-    <section className="skill-legal-domain" aria-label="参数合法域">
-      <div className="skill-legal-domain-header">
-        <h5>参数合法域</h5>
-        <small>来自 MCP describe_templates，只读、不可编辑。</small>
-      </div>
-      {state.kind === "loading" && <div className="empty-panel mono">正在加载参数合法域...</div>}
-      {state.kind === "unavailable" && (
-        <div className="empty-panel mono">参数合法域当前不可用：{state.message}</div>
-      )}
-      {state.kind === "ready" && (
-        <div className="skill-legal-domain-templates">
-          {state.catalog.templates.map((template) => (
-            <div className="skill-legal-domain-template" key={template.id}>
-              <span className="mono">{template.id}</span>
-              <dl className="skill-legal-domain-params">
-                {template.params.map((param) => (
-                  <div className="skill-legal-domain-param" key={param.name}>
-                    <dt className="mono">{param.name}</dt>
-                    <dd>{paramConstraint(param)}</dd>
-                  </div>
-                ))}
-              </dl>
-            </div>
-          ))}
-        </div>
-      )}
-    </section>
-  );
-}
-
-function paramConstraint(param: TopologyParam): string {
-  if (typeof param.minimum === "number" && typeof param.maximum === "number") {
-    return `${param.type} ${param.minimum}–${param.maximum}`;
-  }
-
-  if (Array.isArray(param.values) && param.values.length > 0) {
-    return `枚举 ${param.values.join(" / ")}`;
-  }
-
-  return param.type;
 }
 
 function rootStatusLabel(status: SkillFileListResult["status"]): string {

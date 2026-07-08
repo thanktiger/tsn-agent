@@ -27,32 +27,6 @@ export interface SkillFileContent {
   readonlyReason?: string;
 }
 
-export interface TopologyParam {
-  name: string;
-  type: string;
-  minimum?: number;
-  maximum?: number;
-  values?: number[];
-  description?: string;
-  required?: boolean;
-  [key: string]: unknown;
-}
-
-export interface TopologyTemplateDescriptor {
-  id: string;
-  name: string;
-  description?: string;
-  tags?: string[];
-  params: TopologyParam[];
-  example?: Record<string, unknown>;
-}
-
-export interface TopologyTemplateCatalog {
-  templateCount: number;
-  templateIds: string[];
-  templates: TopologyTemplateDescriptor[];
-}
-
 export interface RestoreFactorySkillsResult {
   dryRun: boolean;
   /** 将被（或已被）恢复为出厂内容的文件。 */
@@ -71,7 +45,6 @@ export interface SkillFileService {
   writeFile(skillId: StageSkillName, path: string, content: string): Promise<SkillFileContent>;
   /** dryRun=true 仅枚举差异清单；false 执行恢复（覆写出厂文件 + 删除移除清单文件）。 */
   restoreFactorySkills(dryRun: boolean): Promise<RestoreFactorySkillsResult>;
-  describeTopologyTemplates(): Promise<TopologyTemplateCatalog>;
 }
 
 export function createSkillFileService(): SkillFileService {
@@ -100,9 +73,6 @@ export function createSkillFileService(): SkillFileService {
         request: { dryRun },
       });
     },
-    describeTopologyTemplates() {
-      return invoke<TopologyTemplateCatalog>("describe_topology_templates");
-    },
   };
 }
 
@@ -124,9 +94,6 @@ export function createBrowserSkillFileService(): SkillFileService {
     },
     async restoreFactorySkills() {
       throw new Error("请在桌面应用中恢复内置 skill 版本。");
-    },
-    async describeTopologyTemplates() {
-      throw new Error("请在桌面应用中查看拓扑参数合法域。");
     },
   };
 }

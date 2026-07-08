@@ -17,7 +17,6 @@ describe("skill file service", () => {
       files: [],
     });
     await expect(service.readFile("tsn-topology", "SKILL.md")).rejects.toThrow("桌面应用");
-    await expect(service.describeTopologyTemplates()).rejects.toThrow("桌面应用");
   });
 
   it("invokes Tauri commands with skill id and relative path only", async () => {
@@ -42,18 +41,12 @@ describe("skill file service", () => {
       content: "updated",
       editable: true,
     });
-    invokeMock.mockResolvedValueOnce({
-      templateCount: 2,
-      templateIds: ["hop-linear", "dual-plane-redundant"],
-      templates: [],
-    });
 
     const service = createSkillFileService();
 
     await service.listFiles("tsn-topology");
     await service.readFile("tsn-topology", "SKILL.md");
     await service.writeFile("tsn-topology", "SKILL.md", "updated");
-    await service.describeTopologyTemplates();
 
     expect(invokeMock).toHaveBeenNthCalledWith(1, "list_skill_files", {
       request: { skillId: "tsn-topology" },
@@ -64,7 +57,6 @@ describe("skill file service", () => {
     expect(invokeMock).toHaveBeenNthCalledWith(3, "write_skill_file", {
       request: { skillId: "tsn-topology", path: "SKILL.md", content: "updated" },
     });
-    expect(invokeMock).toHaveBeenNthCalledWith(4, "describe_topology_templates");
 
     Reflect.deleteProperty(window, "__TAURI_INTERNALS__");
   });
