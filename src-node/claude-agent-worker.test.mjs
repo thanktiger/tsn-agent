@@ -520,6 +520,20 @@ describe("claude-agent-worker", () => {
     expect(timeSyncStage).not.toContain("mcp__tsn_topology__topology_apply_operations");
   });
 
+  // 回归：flow-template 阶段收到时间同步域的请求（设/换 GM、改时钟参数）时须切回 time-sync。
+  // 现场 bug：flow 阶段说「把 GM 设成 ES-1」没触发 request_stage_change——因指引只泛泛说
+  // 「改时间同步」、没显式点名「设 GM」属该域。此断言守住显式映射，防后续编辑把它删回泛化。
+  it("flow-planning SKILL.md explicitly maps GM/timesync changes to request_stage_change", async () => {
+    const skillPath = join(process.cwd(), ".claude", "skills", "tsn-flow-planning", "SKILL.md");
+    const guidance = await readFile(skillPath, "utf8");
+    expect(guidance).toContain("request_stage_change");
+    // 显式点名时间同步域操作（设/换 GM）而非仅泛化「改时间同步」。
+    expect(guidance).toContain("GM");
+    expect(guidance).toContain('targetStage="time-sync"');
+    // 即便目标值看似已满足也切回，交用户确认——不自行判「已满足」跳过。
+    expect(guidance).toContain("已满足");
+  });
+
   it("U6: undo tool is whitelisted only in the topology stage (not in other stages)", () => {
     const topologyStage = buildAllowedToolsForStage({ stage: "topology" }, true);
     const timeSyncStage = buildAllowedToolsForStage({ stage: "time-sync" }, true);
