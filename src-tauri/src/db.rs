@@ -192,7 +192,7 @@ pub const PROJECT_TEMPLATES_SCHEMA_SQL: &str = r#"
 /// 不复种（AE4）。`created_at` 用 SQL `datetime('now')`，免 Rust 侧时间依赖。
 /// 星型无 Rust 生成器，靠 agent `apply_operations` 现搭（生成器见 plan 后续项）。
 pub const PROJECT_TEMPLATES_SEED_SQL: &str = r#"
-    INSERT INTO project_templates
+    INSERT OR IGNORE INTO project_templates
         (id, kind, scenario_config_id, title, subtitle, prompt_text, topology_snapshot, sort_order, origin, created_at)
     VALUES
         ('tpl-factory-linear', 'prompt', 'generic-tsn', '线型拓扑', '工业流水线现场总线',
@@ -299,7 +299,9 @@ pub async fn ensure_task_table(pool: &sqlx::Pool<sqlx::Sqlite>) -> Result<(), sq
 pub async fn ensure_project_templates_table(
     pool: &sqlx::Pool<sqlx::Sqlite>,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query(PROJECT_TEMPLATES_SCHEMA_SQL).execute(pool).await?;
+    sqlx::query(PROJECT_TEMPLATES_SCHEMA_SQL)
+        .execute(pool)
+        .await?;
     Ok(())
 }
 
@@ -309,20 +311,25 @@ pub async fn ensure_project_templates_table(
 pub async fn ensure_project_templates_seeded(
     pool: &sqlx::Pool<sqlx::Sqlite>,
 ) -> Result<(), sqlx::Error> {
-    let seeded: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM app_state WHERE key = 'project_templates_seeded'",
-    )
-    .fetch_one(pool)
-    .await?;
+    let seeded: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM app_state WHERE key = 'project_templates_seeded'")
+            .fetch_one(pool)
+            .await?;
 
     if seeded == 0 {
-        sqlx::query(PROJECT_TEMPLATES_SEED_SQL).execute(pool).await?;
+        // 播种行 + 置 sentinel 必须原子：否则崩溃在两者之间会让下次启动重跑固定 PK
+        // 的 INSERT → UNIQUE 冲突 → connect 失败 → 每次启动 panic（评审 adversarial/data-migration）。
+        let mut tx = pool.begin().await?;
+        sqlx::query(PROJECT_TEMPLATES_SEED_SQL)
+            .execute(&mut *tx)
+            .await?;
         sqlx::query(
             "INSERT OR REPLACE INTO app_state (key, value, updated_at) \
              VALUES ('project_templates_seeded', '1', datetime('now'))",
         )
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
+        tx.commit().await?;
     }
 
     Ok(())
@@ -1131,7 +1138,9 @@ mod tests {
 
     #[tokio::test]
     async fn project_templates_seed_is_once_and_survives_hard_delete() {
-        let opts = SqliteConnectOptions::new().in_memory(true).foreign_keys(true);
+        let opts = SqliteConnectOptions::new()
+            .in_memory(true)
+            .foreign_keys(true);
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
             .connect_with(opts)
@@ -1173,6 +1182,45 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(factory, 2);
+    }
+
+    #[tokio::test]
+    async fn seed_recovers_from_interrupted_partial_state_without_panicking() {
+        // 崩溃在「播种行已落 / sentinel 未置」之间的老库：再调 seeded 不得因固定 PK 重播撞
+        // UNIQUE 而报错（评审 P1）。INSERT OR IGNORE + 事务双保险。
+        let opts = SqliteConnectOptions::new()
+            .in_memory(true)
+            .foreign_keys(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(opts)
+            .await
+            .unwrap();
+        sqlx::query(&safety_net_schema_sql())
+            .execute(&pool)
+            .await
+            .unwrap();
+        ensure_project_templates_table(&pool).await.unwrap();
+        // 模拟 partial：直接播种行但不置 sentinel。
+        sqlx::query(PROJECT_TEMPLATES_SEED_SQL)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // sentinel 缺失 → seeded 会再跑一次；必须无错、行数仍 3、sentinel 补上。
+        ensure_project_templates_seeded(&pool).await.unwrap();
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM project_templates")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 3, "partial 恢复后应仍 3 行、不 UNIQUE 报错");
+        let sentinel: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM app_state WHERE key='project_templates_seeded'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(sentinel, 1, "恢复后 sentinel 应已置");
     }
 
     #[tokio::test]

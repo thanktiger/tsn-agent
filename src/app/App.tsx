@@ -59,6 +59,7 @@ export function App() {
     currentSession,
     setCurrentSession,
     sessionExists,
+    persistSessionIfCurrent,
     isSessionDeleted,
     updateAssistantMessage,
     updateAssistantToolCalls,
@@ -478,8 +479,13 @@ export function App() {
       return;
     }
     setLandingBusy(true);
+    const targetId = currentSession.id;
     try {
-      const result = await templateService.applySnapshotTemplate(tpl.id, currentSession.id);
+      const result = await templateService.applySnapshotTemplate(tpl.id, targetId);
+      // 重建途中该会话被删 → 不得回写复活（session-delete-revive 类，评审 P1）。
+      if (isSessionDeleted(targetId)) {
+        return;
+      }
       const now = new Date().toISOString();
       const note: ChatMessage = {
         id: createId("message"),
@@ -498,12 +504,14 @@ export function App() {
         ...currentSession,
         messages: [...currentSession.messages, note],
         workflow: nextWorkflow,
+        // 重建拓扑的 mutationId 落到会话上，否则工程抽屉徽标显示「空工程」。
+        topologyMutationId: result.mutationId,
         updatedAt: now,
       };
-      await repository.save(nextSession);
-      setCurrentSession(nextSession);
-      await reloadSessionsList();
+      // persistSessionIfCurrent：会话在途中被切走则不覆盖当前态（防串会话 clobber，评审 P1）。
+      await persistSessionIfCurrent(nextSession);
       setPendingWorkspace(true);
+      void reloadSessionsList();
       void refetchTopology();
     } catch (error) {
       setTransferNotice({ kind: "error", text: `重建失败：${error}` });
@@ -518,7 +526,14 @@ export function App() {
       const byId = new Map(prev.map((t) => [t.id, t]));
       return orderedIds.map((id) => byId.get(id)).filter((t): t is TemplateRow => t !== undefined);
     });
-    void templateService.reorderTemplates(orderedIds).then(reloadTemplates);
+    void templateService
+      .reorderTemplates(orderedIds)
+      .then(reloadTemplates)
+      .catch((error) => {
+        // 落库失败：把乐观顺序回滚为库内真值，并提示。
+        setTransferNotice({ kind: "error", text: `保存排序失败：${error}` });
+        void reloadTemplates();
+      });
   }
 
   async function confirmDeleteTemplate() {

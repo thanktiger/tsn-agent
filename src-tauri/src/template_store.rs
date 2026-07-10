@@ -3,7 +3,7 @@
 //! 出厂 prompt 行由 `db::ensure_project_templates_seeded` 一次性播种；本模块只做 CRUD。
 
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sqlx::{Pool, Row, Sqlite};
 
 /// 模板卡列表项（不含 `topology_snapshot` 大 blob——「使用」时按 id 服务端读）。
@@ -55,10 +55,7 @@ async fn list_inner(pool: &Pool<Sqlite>) -> Result<Vec<TemplateRow>, String> {
 }
 
 /// 快照当前 session 的拓扑**每一列**（含 x/y/styles_json）为 JSON。空拓扑返回 None。
-async fn snapshot_topology(
-    pool: &Pool<Sqlite>,
-    session_id: &str,
-) -> Result<Option<Value>, String> {
+async fn snapshot_topology(pool: &Pool<Sqlite>, session_id: &str) -> Result<Option<Value>, String> {
     let node_rows = sqlx::query(
         "SELECT mid, name, x, y, node_type, mac, ip, port_count, queue_count, insert_order \
          FROM topology_nodes WHERE session_id = ? ORDER BY insert_order",
@@ -107,9 +104,11 @@ async fn snapshot_topology(
                 "name": r.get::<Option<String>, _>("name"),
                 "src_node": r.get::<String, _>("src_node"),
                 "dst_node": r.get::<String, _>("dst_node"),
-                "src_port": r.get::<i64, _>("src_port"),
-                "dst_port": r.get::<i64, _>("dst_port"),
-                "speed": r.get::<i64, _>("speed"),
+                // src_port/dst_port/speed 可为 NULL（非数字端口标签/存量行永久 NULL，见 db.rs 与
+                // link-add-skips-port-columns 学习）——必须读 Option，否则非 Option 解码遇 NULL panic。
+                "src_port": r.get::<Option<i64>, _>("src_port"),
+                "dst_port": r.get::<Option<i64>, _>("dst_port"),
+                "speed": r.get::<Option<i64>, _>("speed"),
                 "styles_json": r.get::<String, _>("styles_json"),
             })
         })
@@ -235,9 +234,10 @@ async fn rebuild_from_snapshot(
         .bind(link["name"].as_str())
         .bind(src)
         .bind(dst)
-        .bind(link["src_port"].as_i64().unwrap_or(0))
-        .bind(link["dst_port"].as_i64().unwrap_or(0))
-        .bind(link["speed"].as_i64().unwrap_or(1000))
+        // as_i64() 对 JSON null 返回 None → bind NULL，逐列保真往返（含永久 NULL 端口/speed）。
+        .bind(link["src_port"].as_i64())
+        .bind(link["dst_port"].as_i64())
+        .bind(link["speed"].as_i64())
         .bind(link["styles_json"].as_str().unwrap_or("{}"))
         .execute(&mut *conn)
         .await
@@ -329,7 +329,10 @@ pub async fn create_snapshot_template(
 pub async fn use_snapshot_template(
     app: tauri::AppHandle,
     store: tauri::State<'_, crate::session_store::SessionStore>,
-    buffer: tauri::State<'_, std::sync::Arc<crate::topology_mutation_buffer::TopologyMutationBuffer>>,
+    buffer: tauri::State<
+        '_,
+        std::sync::Arc<crate::topology_mutation_buffer::TopologyMutationBuffer>,
+    >,
     request: UseSnapshotRequest,
 ) -> Result<UseSnapshotResponse, String> {
     let pool = store.pool(&app).await?;
@@ -349,7 +352,9 @@ mod tests {
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 
     async fn fresh_pool() -> Pool<Sqlite> {
-        let opts = SqliteConnectOptions::new().in_memory(true).foreign_keys(true);
+        let opts = SqliteConnectOptions::new()
+            .in_memory(true)
+            .foreign_keys(true);
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
             .connect_with(opts)
@@ -386,7 +391,10 @@ mod tests {
         assert_eq!(rows.len(), 3);
         assert_eq!(rows[0].id, "tpl-factory-linear");
         assert_eq!(rows[2].id, "tpl-factory-dualplane");
-        assert!(rows.iter().all(|r| r.kind == "prompt" && r.origin == "factory"));
+        assert!(
+            rows.iter()
+                .all(|r| r.kind == "prompt" && r.origin == "factory")
+        );
         assert!(rows[0].prompt_text.is_some());
     }
 
@@ -403,9 +411,13 @@ mod tests {
     #[tokio::test]
     async fn reorder_rewrites_sort_order() {
         let pool = fresh_pool().await;
-        for (index, id) in ["tpl-factory-dualplane", "tpl-factory-linear", "tpl-factory-star"]
-            .iter()
-            .enumerate()
+        for (index, id) in [
+            "tpl-factory-dualplane",
+            "tpl-factory-linear",
+            "tpl-factory-star",
+        ]
+        .iter()
+        .enumerate()
         {
             sqlx::query("UPDATE project_templates SET sort_order = ? WHERE id = ?")
                 .bind(index as i64)
@@ -441,9 +453,11 @@ mod tests {
         .unwrap();
         assert_eq!(row.get::<String, _>("kind"), "snapshot");
         assert_eq!(row.get::<String, _>("origin"), "user");
-        assert_eq!(row.get::<String, _>("scenario_config_id"), "aerospace-onboard");
-        let snap: Value =
-            serde_json::from_str(&row.get::<String, _>("topology_snapshot")).unwrap();
+        assert_eq!(
+            row.get::<String, _>("scenario_config_id"),
+            "aerospace-onboard"
+        );
+        let snap: Value = serde_json::from_str(&row.get::<String, _>("topology_snapshot")).unwrap();
         assert_eq!(snap["nodes"].as_array().unwrap().len(), 2);
         // 逐列往返：x/y/node_type/styles_json 都在。
         assert_eq!(snap["nodes"][0]["x"], 1.5);
@@ -524,6 +538,55 @@ mod tests {
         .await
         .unwrap_err();
         assert!(err.contains("不是快捷模板"));
+    }
+
+    #[tokio::test]
+    async fn snapshot_roundtrip_preserves_null_ports_without_panic() {
+        let pool = fresh_pool().await;
+        // 两节点 + 一条 NULL 端口/speed 的链路（存量/非数字端口行——db.rs 记为永久 NULL）。
+        sqlx::query("INSERT INTO topology_nodes (session_id, mid, name, x, y, node_type, port_count, queue_count, insert_order) VALUES ('s1','0',NULL,0,0,'switch',8,8,0)")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO topology_nodes (session_id, mid, name, x, y, node_type, port_count, queue_count, insert_order) VALUES ('s1','1',NULL,0,0,'endSystem',8,8,1)")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO topology_links (session_id, link_seq, name, src_node, dst_node, src_port, dst_port, speed, styles_json) VALUES ('s1',0,NULL,'1','0',NULL,NULL,NULL,'{}')")
+            .execute(&pool).await.unwrap();
+
+        // create 不因 NULL 端口 panic。
+        create_snapshot_inner(
+            &pool,
+            &CreateSnapshotRequest {
+                session_id: "s1".into(),
+                title: "null 端口".into(),
+                scenario_config_id: "generic-tsn".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let tpl_id: String =
+            sqlx::query_scalar("SELECT id FROM project_templates WHERE kind='snapshot'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        sqlx::query("INSERT INTO sessions (id, title, created_at, updated_at, payload) VALUES ('s2','t','n','n','{}')")
+            .execute(&pool).await.unwrap();
+
+        // use 不 panic，NULL 逐列保真。
+        use_snapshot_inner(
+            &pool,
+            &UseSnapshotRequest {
+                template_id: tpl_id,
+                session_id: "s2".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let sp: Option<i64> = sqlx::query_scalar(
+            "SELECT src_port FROM topology_links WHERE session_id='s2' AND link_seq=0",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(sp, None, "NULL 端口应逐列保真往返");
     }
 
     #[tokio::test]
