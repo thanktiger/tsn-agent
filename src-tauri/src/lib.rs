@@ -144,7 +144,8 @@ pub fn run() {
             template_store::list_project_templates,
             template_store::delete_project_template,
             template_store::reorder_project_templates,
-            template_store::create_snapshot_template
+            template_store::create_snapshot_template,
+            template_store::use_snapshot_template
         ])
         .build(tauri::generate_context!())
         .expect("failed to build HIBridge Agent")

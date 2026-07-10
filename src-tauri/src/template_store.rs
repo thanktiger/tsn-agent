@@ -60,7 +60,7 @@ async fn snapshot_topology(
     session_id: &str,
 ) -> Result<Option<Value>, String> {
     let node_rows = sqlx::query(
-        "SELECT mid, name, x, y, node_type, port_count, queue_count, insert_order \
+        "SELECT mid, name, x, y, node_type, mac, ip, port_count, queue_count, insert_order \
          FROM topology_nodes WHERE session_id = ? ORDER BY insert_order",
     )
     .bind(session_id)
@@ -81,6 +81,8 @@ async fn snapshot_topology(
                 "x": r.get::<f64, _>("x"),
                 "y": r.get::<f64, _>("y"),
                 "node_type": r.get::<Option<String>, _>("node_type"),
+                "mac": r.get::<Option<String>, _>("mac"),
+                "ip": r.get::<Option<String>, _>("ip"),
                 "port_count": r.get::<i64, _>("port_count"),
                 "queue_count": r.get::<i64, _>("queue_count"),
                 "insert_order": r.get::<i64, _>("insert_order"),
@@ -150,6 +152,127 @@ async fn create_snapshot_inner(
     Ok(())
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UseSnapshotRequest {
+    pub template_id: String,
+    pub session_id: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UseSnapshotResponse {
+    /// 快照来源 scenario——前端据此置 session.workflow.scenarioConfigId（KTD7）。
+    pub scenario_config_id: String,
+    pub mutation_id: u64,
+}
+
+/// 把快照拓扑**逐列**确定性重建到目标 session（同事务：写前撤销快照 + DELETE + INSERT）。
+/// 复刻 `topology_sidecar_routes::persist_initialized_topology` 的写法，但从快照原始行写。
+async fn rebuild_from_snapshot(
+    pool: &Pool<Sqlite>,
+    session_id: &str,
+    snapshot: &Value,
+) -> Result<(), String> {
+    let nodes = snapshot["nodes"]
+        .as_array()
+        .ok_or_else(|| "快照缺 nodes".to_string())?;
+    let links = snapshot["links"].as_array().cloned().unwrap_or_default();
+
+    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+    let conn: &mut sqlx::SqliteConnection = &mut tx;
+
+    // 写前快照（整图重置可撤，与 initialize 同口径）。
+    crate::topology_undo::snapshot_pre_image(
+        &mut *conn,
+        session_id,
+        crate::topology_undo::TOPOLOGY_DOMAIN,
+    )
+    .await
+    .map_err(|e| format!("undo snapshot failed: {e}"))?;
+
+    for table in ["topology_nodes", "topology_links"] {
+        sqlx::query(&format!("DELETE FROM {table} WHERE session_id = ?"))
+            .bind(session_id)
+            .execute(&mut *conn)
+            .await
+            .map_err(|e| format!("{table} delete failed: {e}"))?;
+    }
+
+    for (index, node) in nodes.iter().enumerate() {
+        let mid = node["mid"].as_str().ok_or("快照 node 缺 mid")?;
+        sqlx::query(
+            r#"INSERT INTO topology_nodes
+               (session_id, mid, name, x, y, node_type, mac, ip, port_count, queue_count, insert_order)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
+        )
+        .bind(session_id)
+        .bind(mid)
+        .bind(node["name"].as_str())
+        .bind(node["x"].as_f64().unwrap_or(0.0))
+        .bind(node["y"].as_f64().unwrap_or(0.0))
+        .bind(node["node_type"].as_str())
+        .bind(node["mac"].as_str())
+        .bind(node["ip"].as_str())
+        .bind(node["port_count"].as_i64().unwrap_or(8))
+        .bind(node["queue_count"].as_i64().unwrap_or(8))
+        .bind(index as i64)
+        .execute(&mut *conn)
+        .await
+        .map_err(|e| format!("topology_nodes insert failed: {e}"))?;
+    }
+
+    for (index, link) in links.iter().enumerate() {
+        let src = link["src_node"].as_str().ok_or("快照 link 缺 src_node")?;
+        let dst = link["dst_node"].as_str().ok_or("快照 link 缺 dst_node")?;
+        sqlx::query(
+            r#"INSERT INTO topology_links
+               (session_id, link_seq, name, src_node, dst_node, src_port, dst_port, speed, styles_json)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
+        )
+        .bind(session_id)
+        .bind(index as i64)
+        .bind(link["name"].as_str())
+        .bind(src)
+        .bind(dst)
+        .bind(link["src_port"].as_i64().unwrap_or(0))
+        .bind(link["dst_port"].as_i64().unwrap_or(0))
+        .bind(link["speed"].as_i64().unwrap_or(1000))
+        .bind(link["styles_json"].as_str().unwrap_or("{}"))
+        .execute(&mut *conn)
+        .await
+        .map_err(|e| format!("topology_links insert failed: {e}"))?;
+    }
+
+    tx.commit().await.map_err(|e| format!("commit failed: {e}"))
+}
+
+/// 读快照模板行 → 重建拓扑 → 返回 scenario（不含 mint/emit，便于单测）。
+async fn use_snapshot_inner(
+    pool: &Pool<Sqlite>,
+    req: &UseSnapshotRequest,
+) -> Result<String, String> {
+    let row = sqlx::query(
+        "SELECT kind, scenario_config_id, topology_snapshot FROM project_templates WHERE id = ?",
+    )
+    .bind(&req.template_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| e.to_string())?
+    .ok_or_else(|| format!("模板不存在：{}", req.template_id))?;
+
+    if row.get::<String, _>("kind") != "snapshot" {
+        return Err("该模板不是快捷模板（kind != snapshot）".to_string());
+    }
+    let snapshot_str: String = row
+        .get::<Option<String>, _>("topology_snapshot")
+        .ok_or_else(|| "快捷模板缺 topology_snapshot".to_string())?;
+    let snapshot: Value = serde_json::from_str(&snapshot_str).map_err(|e| e.to_string())?;
+
+    rebuild_from_snapshot(pool, &req.session_id, &snapshot).await?;
+    Ok(row.get::<String, _>("scenario_config_id"))
+}
+
 #[tauri::command]
 pub async fn list_project_templates(
     app: tauri::AppHandle,
@@ -200,6 +323,24 @@ pub async fn create_snapshot_template(
 ) -> Result<(), String> {
     let pool = store.pool(&app).await?;
     create_snapshot_inner(pool, &request).await
+}
+
+#[tauri::command]
+pub async fn use_snapshot_template(
+    app: tauri::AppHandle,
+    store: tauri::State<'_, crate::session_store::SessionStore>,
+    buffer: tauri::State<'_, std::sync::Arc<crate::topology_mutation_buffer::TopologyMutationBuffer>>,
+    request: UseSnapshotRequest,
+) -> Result<UseSnapshotResponse, String> {
+    let pool = store.pool(&app).await?;
+    let scenario_config_id = use_snapshot_inner(pool, &request).await?;
+    // mint mutationId + emit session_db_changed（复用既有通知链，前端 refetch 拓扑）。
+    let record = buffer.push(request.session_id.clone(), "topology".to_string());
+    crate::topology_position_command::emit_session_db_changed(&app, &record);
+    Ok(UseSnapshotResponse {
+        scenario_config_id,
+        mutation_id: record.mutation_id,
+    })
 }
 
 #[cfg(test)]
@@ -308,6 +449,81 @@ mod tests {
         assert_eq!(snap["nodes"][0]["x"], 1.5);
         assert_eq!(snap["nodes"][0]["node_type"], "switch");
         assert_eq!(snap["links"][0]["styles_json"], "{\"plane\":\"A\"}");
+    }
+
+    #[tokio::test]
+    async fn use_snapshot_rebuilds_topology_and_returns_scenario() {
+        let pool = fresh_pool().await;
+        seed_topology(&pool).await;
+        // 从 s1 建快照模板（含 aerospace 场景）。
+        create_snapshot_inner(
+            &pool,
+            &CreateSnapshotRequest {
+                session_id: "s1".into(),
+                title: "快照A".into(),
+                scenario_config_id: "aerospace-onboard".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let tpl_id: String =
+            sqlx::query_scalar("SELECT id FROM project_templates WHERE kind = 'snapshot'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+
+        // 目标空 session s2。
+        sqlx::query("INSERT INTO sessions (id, title, created_at, updated_at, payload) VALUES ('s2','t','n','n','{}')")
+            .execute(&pool).await.unwrap();
+
+        let scenario = use_snapshot_inner(
+            &pool,
+            &UseSnapshotRequest {
+                template_id: tpl_id,
+                session_id: "s2".into(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(scenario, "aerospace-onboard");
+
+        // s2 拓扑逐列 == 快照来源。
+        let node_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM topology_nodes WHERE session_id = 's2'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(node_count, 2);
+        let (x, ntype): (f64, Option<String>) = sqlx::query_as(
+            "SELECT x, node_type FROM topology_nodes WHERE session_id = 's2' AND mid = '0'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(x, 1.5);
+        assert_eq!(ntype.as_deref(), Some("switch"));
+        let styles: String = sqlx::query_scalar(
+            "SELECT styles_json FROM topology_links WHERE session_id = 's2' AND link_seq = 0",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(styles, "{\"plane\":\"A\"}");
+    }
+
+    #[tokio::test]
+    async fn use_snapshot_rejects_non_snapshot_kind() {
+        let pool = fresh_pool().await;
+        let err = use_snapshot_inner(
+            &pool,
+            &UseSnapshotRequest {
+                template_id: "tpl-factory-linear".into(), // kind=prompt
+                session_id: "s1".into(),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("不是快捷模板"));
     }
 
     #[tokio::test]
