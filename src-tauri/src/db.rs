@@ -165,6 +165,47 @@ pub const TASK_SCHEMA_SQL: &str = r#"
         ON task(session_id, created_at DESC);
 "#;
 
+/// 工程模板表（2026-07-09）：落地页画廊的两类模板同表按 `kind` 判别——
+/// `prompt`（存构建 prompt，「使用」= 提交 agent 现跑）/ `snapshot`（存拓扑几何 JSON，
+/// 「使用」= 确定性重建）。全局表（非 session-scoped，不进 SESSION_SCOPED_TABLES、不导出），
+/// 同 `task` 用独立 `ensure_project_templates_table` 守卫挂载（不进 safety-net）。
+/// `prompt_text` / `topology_snapshot` 按 kind 二选一填；`origin` 区分出厂/用户。
+pub const PROJECT_TEMPLATES_SCHEMA_SQL: &str = r#"
+    CREATE TABLE IF NOT EXISTS project_templates (
+        id                 TEXT    PRIMARY KEY NOT NULL,
+        kind               TEXT    NOT NULL,
+        scenario_config_id TEXT    NOT NULL,
+        title              TEXT    NOT NULL,
+        subtitle           TEXT,
+        prompt_text        TEXT,
+        topology_snapshot  TEXT,
+        sort_order         INTEGER NOT NULL DEFAULT 0,
+        origin             TEXT    NOT NULL,
+        created_at         TEXT    NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_project_templates_sort
+        ON project_templates(sort_order);
+"#;
+
+/// 出厂三条 prompt 模板（线型 / 星型 / 双平面冗余，见 plan U1）。一次性播种，
+/// 由 `app_state` sentinel `project_templates_seeded` 守卫——硬删后 sentinel 仍在、
+/// 不复种（AE4）。`created_at` 用 SQL `datetime('now')`，免 Rust 侧时间依赖。
+/// 星型无 Rust 生成器，靠 agent `apply_operations` 现搭（生成器见 plan 后续项）。
+pub const PROJECT_TEMPLATES_SEED_SQL: &str = r#"
+    INSERT INTO project_templates
+        (id, kind, scenario_config_id, title, subtitle, prompt_text, topology_snapshot, sort_order, origin, created_at)
+    VALUES
+        ('tpl-factory-linear', 'prompt', 'generic-tsn', '线型拓扑', '工业流水线现场总线',
+         '帮我搭一个线型 TSN 网络：5 台交换机首尾串联成一条链，链路两端各挂 1 个端系统，链路 1Gbps 全双工。',
+         NULL, 0, 'factory', datetime('now')),
+        ('tpl-factory-star', 'prompt', 'generic-tsn', '星型拓扑', '集中式控制',
+         '帮我搭一个星型 TSN 网络：1 台中央核心交换机，下接 4 个端系统，每个端系统独立千兆链路直连交换机。',
+         NULL, 1, 'factory', datetime('now')),
+        ('tpl-factory-dualplane', 'prompt', 'aerospace-onboard', '双平面冗余拓扑', '航空航天高可靠冗余',
+         '帮我搭一个双平面冗余 TSN 网络：A、B 两套完全独立平面各 2 台交换机，4 个端系统同时接入两个平面，用于航空航天等高可靠场景。',
+         NULL, 2, 'factory', datetime('now'));
+"#;
+
 /// 流量规划（2026-07-01，flow-tas U2）：录入流表 `flow_streams` + 综合门控表
 /// `flow_plans`。两表 session-scoped（进 SESSION_SCOPED_TABLES 随会话导出/导入），
 /// 故与 timesync_* 同口径放进 safety-net schema（**不用** `ensure_*` ——那是 `task`
@@ -250,6 +291,40 @@ pub async fn ensure_topology_nodes_name_column(
 /// 不在 safety-net 的 15 张 P0 表内，须在 connect_app_database 显式调用。
 pub async fn ensure_task_table(pool: &sqlx::Pool<sqlx::Sqlite>) -> Result<(), sqlx::Error> {
     sqlx::query(TASK_SCHEMA_SQL).execute(pool).await?;
+    Ok(())
+}
+
+/// 建 `project_templates` 表（2026-07-09，落地页工程模板）：CREATE IF NOT EXISTS 幂等，
+/// 老库自动建出、新库 no-op。不在 safety-net，须在 connect_app_database 显式调用。
+pub async fn ensure_project_templates_table(
+    pool: &sqlx::Pool<sqlx::Sqlite>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(PROJECT_TEMPLATES_SCHEMA_SQL).execute(pool).await?;
+    Ok(())
+}
+
+/// 一次性播种出厂 prompt 模板（AE4 防复活）：`app_state` sentinel `project_templates_seeded`
+/// 未置时 INSERT 三行并置 sentinel；此后（含硬删某行、加列迁移、重启）恒 no-op。
+/// **须在 `ensure_project_templates_table` 之后调用**（依赖表已存在）。
+pub async fn ensure_project_templates_seeded(
+    pool: &sqlx::Pool<sqlx::Sqlite>,
+) -> Result<(), sqlx::Error> {
+    let seeded: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM app_state WHERE key = 'project_templates_seeded'",
+    )
+    .fetch_one(pool)
+    .await?;
+
+    if seeded == 0 {
+        sqlx::query(PROJECT_TEMPLATES_SEED_SQL).execute(pool).await?;
+        sqlx::query(
+            "INSERT OR REPLACE INTO app_state (key, value, updated_at) \
+             VALUES ('project_templates_seeded', '1', datetime('now'))",
+        )
+        .execute(pool)
+        .await?;
+    }
+
     Ok(())
 }
 
@@ -1052,6 +1127,52 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(remaining, 0, "迁移后旧快照应清空，避免盖出损坏行");
+    }
+
+    #[tokio::test]
+    async fn project_templates_seed_is_once_and_survives_hard_delete() {
+        let opts = SqliteConnectOptions::new().in_memory(true).foreign_keys(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(opts)
+            .await
+            .unwrap();
+        // safety_net 建 app_state（sentinel 依赖），再建模板表 + 播种。
+        sqlx::query(&safety_net_schema_sql())
+            .execute(&pool)
+            .await
+            .unwrap();
+        ensure_project_templates_table(&pool).await.unwrap();
+        ensure_project_templates_seeded(&pool).await.unwrap();
+
+        let count = |pool: sqlx::SqlitePool| async move {
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM project_templates")
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        };
+        assert_eq!(count(pool.clone()).await, 3, "首次播种应 3 行");
+
+        // 二次调用（模拟重启）：sentinel 已置，不重复播种。
+        ensure_project_templates_seeded(&pool).await.unwrap();
+        assert_eq!(count(pool.clone()).await, 3, "sentinel 已置，二次不重复");
+
+        // 硬删一行出厂模板 → 再调 seeded → 不复活（AE4）。
+        sqlx::query("DELETE FROM project_templates WHERE id = 'tpl-factory-star'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        ensure_project_templates_seeded(&pool).await.unwrap();
+        assert_eq!(count(pool.clone()).await, 2, "硬删后 sentinel 仍在，不复种");
+
+        // 剩余全为 factory + kind=prompt。
+        let factory: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM project_templates WHERE origin='factory' AND kind='prompt'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(factory, 2);
     }
 
     #[tokio::test]
