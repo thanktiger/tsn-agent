@@ -31,7 +31,7 @@ export interface TemplateService {
   deleteTemplate(id: string): Promise<void>;
   reorderTemplates(orderedIds: string[]): Promise<void>;
   createSnapshotTemplate(request: CreateSnapshotRequest): Promise<void>;
-  useSnapshotTemplate(templateId: string, sessionId: string): Promise<UseSnapshotResult>;
+  applySnapshotTemplate(templateId: string, sessionId: string): Promise<UseSnapshotResult>;
 }
 
 function isTauriRuntime(): boolean {
@@ -56,7 +56,7 @@ export function createTemplateService(): TemplateService {
     createSnapshotTemplate(request) {
       return invoke<void>("create_snapshot_template", { request });
     },
-    useSnapshotTemplate(templateId, sessionId) {
+    applySnapshotTemplate(templateId, sessionId) {
       return invoke<UseSnapshotResult>("use_snapshot_template", {
         request: { templateId, sessionId },
       });
@@ -79,7 +79,7 @@ export function createBrowserTemplateService(): TemplateService {
     async createSnapshotTemplate() {
       throw new Error("请在桌面应用中把工程设为模板。");
     },
-    async useSnapshotTemplate() {
+    async applySnapshotTemplate() {
       throw new Error("请在桌面应用中使用工程模板。");
     },
   };

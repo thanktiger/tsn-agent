@@ -5,7 +5,8 @@ import "@xyflow/react/dist/style.css";
 import { createRunId, runTsnAgent } from "../agent/agent-adapter";
 import type { ToolCallRecord } from "../agent/tool-call-record";
 import tsnAgentMark from "../assets/tsn-agent-mark.png";
-import { getScenarioConfig } from "../domain/scenario-config";
+import { getScenarioConfig, SCENARIO_CONFIGS } from "../domain/scenario-config";
+import { recordStageResult } from "../project/project-state";
 import { appVersion } from "../release/release-info";
 import {
   type ChatMessage,
@@ -15,9 +16,11 @@ import {
   type TsnSession,
 } from "../sessions/session-repository";
 import { isEmptyTopologySnapshot } from "../sessions/topology-snapshot";
+import { createTemplateService, type TemplateRow } from "../templates/template-service";
 import { ConfirmDialog } from "../ui/confirm-dialog";
 import { redactProviderNamesForDisplay } from "../ui/display-redaction";
 import { ChatPane } from "./components/chat-pane";
+import { LandingPage } from "./components/landing/LandingPage";
 import {
   type ConfigTabId,
   type HardwareUiState,
@@ -41,6 +44,12 @@ import {
 } from "./session-transfer";
 
 const repository: SessionRepository = createSessionRepository();
+const templateService = createTemplateService();
+const LANDING_EXAMPLES = Object.values(SCENARIO_CONFIGS).map((config) => ({
+  id: config.id,
+  label: config.displayName,
+  intent: config.exampleIntent,
+}));
 const ASSISTANT_CONNECTING_MESSAGE = "正在连接智能助手，并结合当前工程上下文生成下一步规划...";
 const SESSION_TITLE_MAX_CHARS = 24;
 
@@ -59,6 +68,12 @@ export function App() {
     handleDeleteSession: deleteSession,
   } = useSessionRepository({ repository });
   const [input, setInput] = useState("");
+  // 落地页（U5）：工程模板列表 + 显式切出落地页的 pendingWorkspace（快捷模板确定性
+  // 重建时 async 拓扑 refetch 前先切视图，避免落地页残留）+ 卡片操作忙标 + 删除确认目标。
+  const [templates, setTemplates] = useState<TemplateRow[]>([]);
+  const [pendingWorkspace, setPendingWorkspace] = useState(false);
+  const [landingBusy, setLandingBusy] = useState(false);
+  const [deleteTemplateTarget, setDeleteTemplateTarget] = useState<TemplateRow | undefined>();
   const [activeWorkspacePanel, setActiveWorkspacePanel] = useState<
     WorkspaceToolPanel | undefined
   >();
@@ -175,6 +190,9 @@ export function App() {
   const currentStage = workflow.stages[workflow.currentStep];
   const hasUserInteraction = currentSession.messages.some((message) => message.role === "user");
   const hasTopology = !isEmptyTopologySnapshot(topologySnapshot);
+  // 落地页开关（U5/KTD2）：空 session（无交互且空拓扑）显落地页——新建工程造空 session 即入、
+  // 有工程恢复上次即工作区。pendingWorkspace 在快捷模板确定性重建后立即切出（不等 async refetch）。
+  const showLanding = !pendingWorkspace && !hasUserInteraction && !hasTopology;
 
   useEffect(() => {
     if (!topologySnapshot || !selectedNodeId) {
@@ -186,6 +204,19 @@ export function App() {
       setSelectedNodeId(undefined);
     }
   }, [topologySnapshot, selectedNodeId]);
+
+  const reloadTemplates = useCallback(async () => {
+    try {
+      const rows = await templateService.listTemplates();
+      setTemplates(Array.isArray(rows) ? rows : []);
+    } catch {
+      // 非 Tauri（浏览器预览）或读取失败：留空列表。
+    }
+  }, []);
+
+  useEffect(() => {
+    void reloadTemplates();
+  }, [reloadTemplates]);
 
   async function handleSubmit() {
     await submitIntent(input);
@@ -423,11 +454,85 @@ export function App() {
     // 不再硬替用户打字：清空输入，由场景化 placeholder（跟着选的场景变）引导（U11 配套）。
     setInput("");
     setActiveWorkspacePanel(undefined);
+    // 新建 = 空 session → 直接入落地页（KTD2）。
+    setPendingWorkspace(false);
   }
 
   async function handleSelectSession(session: TsnSession) {
     await selectSession(session);
     setActiveWorkspacePanel(undefined);
+    setPendingWorkspace(false);
+  }
+
+  // ---- 落地页（U5）handlers ----
+  function handleUsePromptTemplate(tpl: TemplateRow) {
+    // prompt 模板：把构建 prompt 当用户意图提交，复用现有 agent 主链路（KTD3）。
+    if (tpl.promptText) {
+      void submitIntent(tpl.promptText);
+    }
+  }
+
+  async function handleUseSnapshotTemplate(tpl: TemplateRow) {
+    // 快捷模板：确定性重建拓扑（Rust）+ 前端驱 workflow 到 topology 待确认 + 切出落地页（KTD4/KTD7）。
+    if (landingBusy) {
+      return;
+    }
+    setLandingBusy(true);
+    try {
+      const result = await templateService.applySnapshotTemplate(tpl.id, currentSession.id);
+      const now = new Date().toISOString();
+      const note: ChatMessage = {
+        id: createId("message"),
+        role: "assistant",
+        createdAt: now,
+        content: `已从快捷模板「${tpl.title}」重建拓扑。确认无误后点「确认并继续」进入时间同步。`,
+      };
+      const nextWorkflow = {
+        ...recordStageResult(currentSession.workflow, {
+          step: "topology",
+          summary: "已从快捷模板重建拓扑，确认后进入时间同步。",
+        }),
+        scenarioConfigId: result.scenarioConfigId,
+      };
+      const nextSession: TsnSession = {
+        ...currentSession,
+        messages: [...currentSession.messages, note],
+        workflow: nextWorkflow,
+        updatedAt: now,
+      };
+      await repository.save(nextSession);
+      setCurrentSession(nextSession);
+      await reloadSessionsList();
+      setPendingWorkspace(true);
+      void refetchTopology();
+    } catch (error) {
+      setTransferNotice({ kind: "error", text: `重建失败：${error}` });
+    } finally {
+      setLandingBusy(false);
+    }
+  }
+
+  function handleReorderTemplates(orderedIds: string[]) {
+    // 乐观本地重排 + 落库。
+    setTemplates((prev) => {
+      const byId = new Map(prev.map((t) => [t.id, t]));
+      return orderedIds.map((id) => byId.get(id)).filter((t): t is TemplateRow => t !== undefined);
+    });
+    void templateService.reorderTemplates(orderedIds).then(reloadTemplates);
+  }
+
+  async function confirmDeleteTemplate() {
+    const target = deleteTemplateTarget;
+    setDeleteTemplateTarget(undefined);
+    if (!target) {
+      return;
+    }
+    try {
+      await templateService.deleteTemplate(target.id);
+      await reloadTemplates();
+    } catch (error) {
+      setTransferNotice({ kind: "error", text: `删除模板失败：${error}` });
+    }
   }
 
   // 删除走确认弹窗；确认后保持「会话」抽屉打开，方便看到列表变化。
@@ -520,56 +625,71 @@ export function App() {
           onImportSession={handleImportSession}
           onRevealExport={(path) => void revealExportedFile(path)}
         />
-        <ChatPane
-          scenarioConfig={scenarioConfig}
-          workflow={workflow}
-          currentStage={currentStage}
-          messages={currentSession.messages}
-          pendingAssistantMessageId={pendingAssistantMessageId}
-          scrollContainerRef={scrollContainerRef}
-          input={input}
-          isAgentRunning={isAgentRunning}
-          agentRunPhase={agentRunPhase}
-          agentRunElapsedSeconds={agentRunElapsedSeconds}
-          onInputChange={setInput}
-          onSubmit={handleSubmit}
-          onConfirm={() => submitIntent("继续", { action: "confirm-stage" })}
-          onTerminate={handleTerminateRun}
-        />
-        <WorkspacePane
-          topologySnapshot={topologySnapshot}
-          selectedNodeId={selectedNodeId}
-          configPanelExpanded={configPanelExpanded}
-          activeConfigTab={activeConfigTab}
-          isAgentRunning={isAgentRunning}
-          hasUserInteraction={hasUserInteraction}
-          lastMutationId={lastMutationId}
-          workflowStep={workflow.currentStep}
-          timesyncSnapshot={timesyncSnapshot}
-          sessionId={currentSession.id}
-          simState={simState}
-          onSimStateChange={setSimStateGuarded}
-          hardwareState={hardwareState}
-          onHardwareStateChange={setHardwareState}
-          flowPlanState={flowPlanState}
-          onFlowPlanStateChange={setFlowPlanStateGuarded}
-          flowVerifyState={flowVerifyState}
-          onFlowVerifyStateChange={setFlowVerifyStateGuarded}
-          activeTimesyncSubTab={activeTimesyncSubTab}
-          onSelectTimesyncSubTab={setActiveTimesyncSubTab}
-          timesyncTabHasBadge={timesyncTabHasBadge}
-          onToggleConfigPanel={() => setConfigPanelExpanded((value) => !value)}
-          onSelectConfigTab={(tab) => {
-            setActiveConfigTab(tab);
-            // 进时间同步 tab 即清 badge（用户已看到揭示）。
-            if (tab === "time-sync") {
-              setTimesyncTabHasBadge(false);
-            }
-          }}
-          onNodeSelect={handleNodeSelect}
-          onRefreshTopology={() => void refetchTopology()}
-          onUndone={handleTopologyUndone}
-        />
+        {showLanding ? (
+          <LandingPage
+            templates={templates}
+            examples={LANDING_EXAMPLES}
+            busy={landingBusy || isAgentRunning}
+            onSubmitIntent={(text) => void submitIntent(text)}
+            onUsePrompt={handleUsePromptTemplate}
+            onUseSnapshot={handleUseSnapshotTemplate}
+            onDeleteTemplate={setDeleteTemplateTarget}
+            onReorder={handleReorderTemplates}
+          />
+        ) : (
+          <>
+            <ChatPane
+              scenarioConfig={scenarioConfig}
+              workflow={workflow}
+              currentStage={currentStage}
+              messages={currentSession.messages}
+              pendingAssistantMessageId={pendingAssistantMessageId}
+              scrollContainerRef={scrollContainerRef}
+              input={input}
+              isAgentRunning={isAgentRunning}
+              agentRunPhase={agentRunPhase}
+              agentRunElapsedSeconds={agentRunElapsedSeconds}
+              onInputChange={setInput}
+              onSubmit={handleSubmit}
+              onConfirm={() => submitIntent("继续", { action: "confirm-stage" })}
+              onTerminate={handleTerminateRun}
+            />
+            <WorkspacePane
+              topologySnapshot={topologySnapshot}
+              selectedNodeId={selectedNodeId}
+              configPanelExpanded={configPanelExpanded}
+              activeConfigTab={activeConfigTab}
+              isAgentRunning={isAgentRunning}
+              hasUserInteraction={hasUserInteraction}
+              lastMutationId={lastMutationId}
+              workflowStep={workflow.currentStep}
+              timesyncSnapshot={timesyncSnapshot}
+              sessionId={currentSession.id}
+              simState={simState}
+              onSimStateChange={setSimStateGuarded}
+              hardwareState={hardwareState}
+              onHardwareStateChange={setHardwareState}
+              flowPlanState={flowPlanState}
+              onFlowPlanStateChange={setFlowPlanStateGuarded}
+              flowVerifyState={flowVerifyState}
+              onFlowVerifyStateChange={setFlowVerifyStateGuarded}
+              activeTimesyncSubTab={activeTimesyncSubTab}
+              onSelectTimesyncSubTab={setActiveTimesyncSubTab}
+              timesyncTabHasBadge={timesyncTabHasBadge}
+              onToggleConfigPanel={() => setConfigPanelExpanded((value) => !value)}
+              onSelectConfigTab={(tab) => {
+                setActiveConfigTab(tab);
+                // 进时间同步 tab 即清 badge（用户已看到揭示）。
+                if (tab === "time-sync") {
+                  setTimesyncTabHasBadge(false);
+                }
+              }}
+              onNodeSelect={handleNodeSelect}
+              onRefreshTopology={() => void refetchTopology()}
+              onUndone={handleTopologyUndone}
+            />
+          </>
+        )}
       </main>
 
       <ConfirmDialog
@@ -580,6 +700,16 @@ export function App() {
         danger
         onConfirm={() => void confirmDeleteSession()}
         onCancel={() => setDeleteConfirmOpen(false)}
+      />
+
+      <ConfirmDialog
+        open={Boolean(deleteTemplateTarget)}
+        title="删除工程模板"
+        body={`将删除模板「${deleteTemplateTarget?.title ?? ""}」，删除后无法恢复（本期不做恢复出厂）。`}
+        confirmLabel="删除"
+        danger
+        onConfirm={() => void confirmDeleteTemplate()}
+        onCancel={() => setDeleteTemplateTarget(undefined)}
       />
     </div>
   );

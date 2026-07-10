@@ -173,11 +173,18 @@ function firstReleaseNoteItem(): string {
   return item;
 }
 
-async function typeDefaultIntent(user: ReturnType<typeof userEvent.setup>) {
-  await user.type(
-    screen.getByLabelText("输入你的 TSN 需求"),
-    "我需要4个交换机，每个交换机连接5个端系统",
-  );
+// 提交一个默认意图。空 session 显落地页（U5）→ 走落地页输入 + 「发送需求」；
+// 已在工作区（有拓扑/消息）→ 走 composer 「输入你的 TSN 需求」+「生成规划草案」。
+async function submitLandingIntent(user: ReturnType<typeof userEvent.setup>) {
+  const intent = "我需要4个交换机，每个交换机连接5个端系统";
+  const landingSend = screen.queryByRole("button", { name: "发送需求" });
+  if (landingSend) {
+    await user.type(screen.getByLabelText("描述你的 TSN 需求"), intent);
+    await user.click(landingSend);
+    return;
+  }
+  await user.type(screen.getByLabelText("输入你的 TSN 需求"), intent);
+  await user.click(screen.getByRole("button", { name: "生成规划草案" }));
 }
 
 describe("App", () => {
@@ -197,22 +204,24 @@ describe("App", () => {
     runTsnAgentMock.mockImplementation(async () => topologyAgentResult());
   });
 
-  it("shows a product empty state before the first interaction", () => {
+  it("shows the landing page (empty state) before the first interaction", () => {
     render(<App />);
 
     expect(screen.getByText(`VER ${appVersion}`)).toBeInTheDocument();
     expect(screen.getByRole("navigation", { name: "工作台工具" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "工程" })).toBeInTheDocument();
-    expect(screen.getByText("描述你的 TSN 需求后生成拓扑图")).toBeInTheDocument();
+    // 空 session 显落地页（取代旧空态 stepper/画布，U5）。
+    expect(screen.getByText("你想配置什么 TSN 网络？")).toBeInTheDocument();
     expect(screen.getByText("草稿")).toBeInTheDocument();
   });
 
-  it("keeps the flow step visible in its locked initial state", () => {
+  it("keeps the flow step visible in its locked initial state after first submit", async () => {
+    const user = userEvent.setup();
     render(<App />);
+    // 空态是落地页；提交首个意图进入工作区后，步骤条按 workflow 状态渲染（flow-template locked）。
+    await submitLandingIntent(user);
 
-    // U4 解冻后 flow-template 不再划掉，与其它步骤一致按 workflow 状态渲染；
-    // 初始为 locked（拓扑才是 current），仍完整出现在步骤条里。
-    const stepper = screen.getByLabelText("配置步骤");
+    const stepper = await screen.findByLabelText("配置步骤");
     const flowStep = within(stepper).getByText("流量规划").closest(".stepper-item");
     expect(flowStep).toBeInTheDocument();
     expect(flowStep).toHaveClass("locked");
@@ -222,12 +231,8 @@ describe("App", () => {
     const user = userEvent.setup();
     render(<App />);
 
-    // 进门默认箭载：placeholder 即双平面双跳推荐（不再展示场景选择控件）。
-    expect(screen.getByPlaceholderText(/双平面双跳/)).toBeInTheDocument();
-
-    // 提交后 agent 收到的会话 scenarioConfigId 已是 aerospace-onboard。
-    await typeDefaultIntent(user);
-    await user.click(screen.getByRole("button", { name: "生成规划草案" }));
+    // 提交后 agent 收到的会话 scenarioConfigId 已是 aerospace-onboard（进门默认箭载）。
+    await submitLandingIntent(user);
     await waitFor(() => {
       expect(runTsnAgentMock).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -243,8 +248,7 @@ describe("App", () => {
     const user = userEvent.setup();
     render(<App />);
 
-    await typeDefaultIntent(user);
-    await user.click(screen.getByRole("button", { name: "生成规划草案" }));
+    await submitLandingIntent(user);
 
     await waitFor(() => {
       expect(screen.getByText("已根据本轮需求生成拓扑草案。")).toBeInTheDocument();
@@ -277,8 +281,7 @@ describe("App", () => {
     );
     render(<App />);
 
-    await typeDefaultIntent(user);
-    await user.click(screen.getByRole("button", { name: "生成规划草案" }));
+    await submitLandingIntent(user);
 
     await waitFor(() => {
       expect(screen.getByText("已根据本轮需求生成拓扑草案。")).toBeInTheDocument();
@@ -328,8 +331,7 @@ describe("App", () => {
     );
     render(<App />);
 
-    await typeDefaultIntent(user);
-    await user.click(screen.getByRole("button", { name: "生成规划草案" }));
+    await submitLandingIntent(user);
 
     // run 中途：流式卡片已出现，且同 id 只有一张。
     await waitFor(() => {
@@ -400,8 +402,7 @@ describe("App", () => {
     );
     render(<App />);
 
-    await typeDefaultIntent(user);
-    await user.click(screen.getByRole("button", { name: "生成规划草案" }));
+    await submitLandingIntent(user);
 
     await waitFor(() => {
       expect(screen.getByText(/本轮请求失败/)).toBeInTheDocument();
@@ -422,8 +423,7 @@ describe("App", () => {
     const user = userEvent.setup();
     render(<App />);
 
-    await typeDefaultIntent(user);
-    await user.click(screen.getByRole("button", { name: "生成规划草案" }));
+    await submitLandingIntent(user);
 
     await waitFor(() => {
       expect(screen.getByText("已根据本轮需求生成拓扑草案。")).toBeInTheDocument();
@@ -440,8 +440,7 @@ describe("App", () => {
     const user = userEvent.setup();
     render(<App />);
 
-    await typeDefaultIntent(user);
-    await user.click(screen.getByRole("button", { name: "生成规划草案" }));
+    await submitLandingIntent(user);
     await waitFor(() => {
       expect(screen.getByRole("button", { name: "确认并继续" })).toBeEnabled();
     });
@@ -480,8 +479,7 @@ describe("App", () => {
     const user = userEvent.setup();
     render(<App />);
 
-    await typeDefaultIntent(user);
-    await user.click(screen.getByRole("button", { name: "生成规划草案" }));
+    await submitLandingIntent(user);
 
     await waitFor(() => {
       expect(screen.getByText(/本次生成失败：worker exited/)).toBeInTheDocument();
@@ -569,8 +567,7 @@ describe("App", () => {
     );
 
     // 下一轮 agent run 的 session.workflow 携带一次性 pendingUndoNotice（喂给 U7 注入）。
-    await typeDefaultIntent(user);
-    await user.click(screen.getByRole("button", { name: "生成规划草案" }));
+    await submitLandingIntent(user);
     await waitFor(() =>
       expect(runTsnAgentMock).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -632,8 +629,8 @@ describe("App", () => {
     await user.click(screen.getByRole("button", { name: "工程" }));
     await user.click(screen.getByRole("button", { name: "新建工程" }));
 
-    // 新会话清空输入（不再硬预填），由场景化 placeholder 引导。
-    expect(screen.getByLabelText("输入你的 TSN 需求")).toHaveValue("");
+    // 新建工程 = 空 session → 直接入落地页（U5/KTD2）。
+    expect(screen.getByText("你想配置什么 TSN 网络？")).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "工程" }));
     await waitFor(() => {
@@ -714,8 +711,7 @@ describe("App", () => {
     const run = arrangeControllableRun(["部分内容"]);
     render(<App />);
 
-    await typeDefaultIntent(user);
-    await user.click(screen.getByRole("button", { name: "生成规划草案" }));
+    await submitLandingIntent(user);
     await waitFor(() => expect(screen.getByText("部分内容")).toBeInTheDocument());
 
     await act(async () => {
@@ -748,8 +744,7 @@ describe("App", () => {
     const run = arrangeControllableRun(["部分内容"]);
     render(<App />);
 
-    await typeDefaultIntent(user);
-    await user.click(screen.getByRole("button", { name: "生成规划草案" }));
+    await submitLandingIntent(user);
     await waitFor(() => expect(screen.getByText("部分内容")).toBeInTheDocument());
 
     await act(async () => {
@@ -770,8 +765,7 @@ describe("App", () => {
     const run = arrangeControllableRun(["生成中"]);
     render(<App />);
 
-    await typeDefaultIntent(user);
-    await user.click(screen.getByRole("button", { name: "生成规划草案" }));
+    await submitLandingIntent(user);
     await waitFor(() => expect(screen.getByText("生成中")).toBeInTheDocument());
 
     await act(async () => {
@@ -789,8 +783,7 @@ describe("App", () => {
     const user = userEvent.setup();
     render(<App />);
 
-    await typeDefaultIntent(user);
-    await user.click(screen.getByRole("button", { name: "生成规划草案" }));
+    await submitLandingIntent(user);
 
     await waitFor(() =>
       expect(screen.getByText(/本次生成失败：worker exited/)).toBeInTheDocument(),
@@ -804,8 +797,7 @@ describe("App", () => {
     const run = arrangeControllableRun(["部分内容"]);
     render(<App />);
 
-    await typeDefaultIntent(user);
-    await user.click(screen.getByRole("button", { name: "生成规划草案" }));
+    await submitLandingIntent(user);
     await waitFor(() => expect(screen.getByText("部分内容")).toBeInTheDocument());
 
     await act(async () => {
@@ -825,8 +817,7 @@ describe("App", () => {
     const run = arrangeControllableRun(["部分内容"]);
     render(<App />);
 
-    await typeDefaultIntent(user);
-    await user.click(screen.getByRole("button", { name: "生成规划草案" }));
+    await submitLandingIntent(user);
     await waitFor(() => expect(screen.getByText("部分内容")).toBeInTheDocument());
 
     // 终止生效（cancelRequestedRef 置位）后、塑形前——这正是 SIGKILL 后 late chunk
@@ -849,8 +840,7 @@ describe("App", () => {
     const run = arrangeControllableRun(["部分内容"]);
     render(<App />);
 
-    await typeDefaultIntent(user);
-    await user.click(screen.getByRole("button", { name: "生成规划草案" }));
+    await submitLandingIntent(user);
     await waitFor(() => expect(screen.getByText("部分内容")).toBeInTheDocument());
 
     const runIdSent = runTsnAgentMock.mock.calls[0][0].runId as string;
@@ -871,8 +861,7 @@ describe("App", () => {
     const run = arrangeControllableRun(["部分内容"]);
     render(<App />);
 
-    await typeDefaultIntent(user);
-    await user.click(screen.getByRole("button", { name: "生成规划草案" }));
+    await submitLandingIntent(user);
     await waitFor(() => expect(screen.getByText("部分内容")).toBeInTheDocument());
     await act(async () => {
       terminateHandlerRef.current?.();
@@ -882,8 +871,7 @@ describe("App", () => {
 
     // 下一轮：不点终止，正常塑形（不应被上一轮的 cancelRequestedRef 污染成「已终止」）。
     runTsnAgentMock.mockImplementationOnce(async () => topologyAgentResult());
-    await typeDefaultIntent(user);
-    await user.click(screen.getByRole("button", { name: "生成规划草案" }));
+    await submitLandingIntent(user);
     await waitFor(() =>
       expect(screen.getByText("已根据本轮需求生成拓扑草案。")).toBeInTheDocument(),
     );
@@ -904,8 +892,7 @@ describe("App", () => {
     const run = arrangeControllableRun(["部分内容"]);
     const { container } = render(<App />);
 
-    await typeDefaultIntent(user);
-    await user.click(screen.getByRole("button", { name: "生成规划草案" }));
+    await submitLandingIntent(user);
     await waitFor(() => expect(screen.getByText("部分内容")).toBeInTheDocument());
 
     // 顶部 banner 已移除：header 区不含「已运行 N 秒」计时文案。

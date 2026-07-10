@@ -11,7 +11,7 @@ describe("template service (browser fallback)", () => {
     const service = createBrowserTemplateService();
     await expect(service.listTemplates()).resolves.toEqual([]);
     await expect(service.deleteTemplate("x")).rejects.toThrow("桌面应用");
-    await expect(service.useSnapshotTemplate("t", "s")).rejects.toThrow("桌面应用");
+    await expect(service.applySnapshotTemplate("t", "s")).rejects.toThrow("桌面应用");
   });
 });
 
@@ -34,7 +34,7 @@ describe("template service (Tauri invoke)", () => {
       scenarioConfigId: "aerospace-onboard",
     });
     invokeMock.mockResolvedValueOnce({ scenarioConfigId: "generic-tsn", mutationId: 7 });
-    await service.useSnapshotTemplate("tpl-2", "s2");
+    await service.applySnapshotTemplate("tpl-2", "s2");
 
     expect(invokeMock).toHaveBeenNthCalledWith(1, "list_project_templates");
     expect(invokeMock).toHaveBeenNthCalledWith(2, "delete_project_template", { id: "tpl-1" });
