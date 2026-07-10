@@ -196,6 +196,8 @@ export interface WorkspacePaneProps {
   onRefreshTopology: () => void;
   /** U8：撤销成功后置一次性回退通知标志（下一轮注入），由 App 经 setCurrentSession 实现。 */
   onUndone?: () => void;
+  /** 设为模板（U6）：快照当前拓扑为快捷模板。title 可空（App 侧补默认）。 */
+  onSaveAsTemplate?: (title: string) => void;
   commitNodePosition?: (args: CommitNodePositionArgs) => Promise<CommitNodePositionResult>;
   undoTopology?: (sessionId: string) => Promise<UndoTopologyResult>;
 }
@@ -227,6 +229,7 @@ export function WorkspacePane({
   onNodeSelect,
   onRefreshTopology,
   onUndone,
+  onSaveAsTemplate,
   commitNodePosition = invokeCommitNodePosition,
   undoTopology = invokeUndoTopology,
 }: WorkspacePaneProps) {
@@ -331,6 +334,8 @@ export function WorkspacePane({
   const [undoBusy, setUndoBusy] = useState(false);
   // U8：撤销无 redo、且会回滚拖拽布局——按钮加内联两步确认（点一下进确认态、再点才执行）。
   const [undoConfirming, setUndoConfirming] = useState(false);
+  // 设为模板（U6）：undefined=关闭只显按钮；string=内联输入打开（当前标题值）。
+  const [saveTplName, setSaveTplName] = useState<string | undefined>(undefined);
   const undoConfirmTimerRef = useRef<number | undefined>(undefined);
   const flowInstanceRef = useRef<ReactFlowInstance<Node, Edge> | undefined>(undefined);
   const [flowInstanceVersion, setFlowInstanceVersion] = useState(0);
@@ -663,6 +668,38 @@ export function WorkspacePane({
           >
             {undoConfirming ? "确认撤销?" : "撤销"}
           </button>
+          {onSaveAsTemplate ? (
+            saveTplName === undefined ? (
+              <button
+                type="button"
+                className="topology-undo-button"
+                aria-label="把当前拓扑设为模板"
+                disabled={!hasTopology}
+                onClick={() => setSaveTplName("")}
+              >
+                设为模板
+              </button>
+            ) : (
+              <input
+                className="topology-save-template-input"
+                aria-label="模板名称"
+                placeholder="模板名称（回车保存）"
+                value={saveTplName}
+                // biome-ignore lint/a11y/noAutofocus: 内联输入打开即聚焦，符合就地编辑预期
+                autoFocus
+                onChange={(event) => setSaveTplName(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    onSaveAsTemplate(saveTplName);
+                    setSaveTplName(undefined);
+                  } else if (event.key === "Escape") {
+                    setSaveTplName(undefined);
+                  }
+                }}
+                onBlur={() => setSaveTplName(undefined)}
+              />
+            )
+          ) : null}
         </div>
         {saveFailed && (
           <div className="transfer-notice error tsn-position-notice" role="alert">

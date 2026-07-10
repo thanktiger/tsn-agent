@@ -4348,3 +4348,19 @@ textarea:focus-visible {
   color: var(--text-primary);
   border-color: var(--accent);
 }
+
+/* U6：设为模板内联输入（与撤销/设为模板按钮同处 topology-stats 工具组）。 */
+.topology-save-template-input {
+  height: 26px;
+  width: 150px;
+  padding: 0 8px;
+  border: 1px solid var(--accent);
+  border-radius: 5px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-size: 12px;
+}
+
+.topology-save-template-input:focus {
+  outline: none;
+}

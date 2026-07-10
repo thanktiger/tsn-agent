@@ -535,6 +535,21 @@ export function App() {
     }
   }
 
+  // 设为模板（U6）：快照当前拓扑为快捷模板，scenario 显式传（KTD7），标题空则取场景显示名。
+  async function handleSaveAsTemplate(title: string) {
+    try {
+      await templateService.createSnapshotTemplate({
+        sessionId: currentSession.id,
+        title: title.trim() || scenarioConfig.displayName,
+        scenarioConfigId: workflow.scenarioConfigId,
+      });
+      await reloadTemplates();
+      setTransferNotice({ kind: "success", text: "已设为快捷模板" });
+    } catch (error) {
+      setTransferNotice({ kind: "error", text: `设为模板失败：${error}` });
+    }
+  }
+
   // 删除走确认弹窗；确认后保持「会话」抽屉打开，方便看到列表变化。
   function handleDeleteSession() {
     setDeleteConfirmOpen(true);
@@ -687,6 +702,7 @@ export function App() {
               onNodeSelect={handleNodeSelect}
               onRefreshTopology={() => void refetchTopology()}
               onUndone={handleTopologyUndone}
+              onSaveAsTemplate={(title) => void handleSaveAsTemplate(title)}
             />
           </>
         )}
