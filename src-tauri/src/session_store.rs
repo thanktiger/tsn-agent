@@ -268,6 +268,14 @@ pub async fn connect_app_database(app: &tauri::AppHandle) -> Result<Pool<Sqlite>
         .await
         .map_err(db_error)?;
 
+    // 工程模板表（2026-07-09，落地页）：建表 + 一次性播种出厂 prompt 模板（sentinel 守卫防复活）。
+    crate::db::ensure_project_templates_table(&pool)
+        .await
+        .map_err(db_error)?;
+    crate::db::ensure_project_templates_seeded(&pool)
+        .await
+        .map_err(db_error)?;
+
     Ok(pool)
 }
 

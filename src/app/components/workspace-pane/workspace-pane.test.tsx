@@ -248,6 +248,25 @@ describe("WorkspacePane", () => {
     expect(stats).toHaveTextContent("链路");
   });
 
+  it("U6: 设为模板 disabled without topology, and enter saves the typed name", async () => {
+    const user = userEvent.setup();
+    const onSaveAsTemplate = vi.fn();
+
+    // 无拓扑：按钮禁用。
+    const { unmount } = render(<WorkspacePane {...baseProps({ onSaveAsTemplate })} />);
+    expect(screen.getByRole("button", { name: "把当前拓扑设为模板" })).toBeDisabled();
+    unmount();
+
+    // 有拓扑：点击 → 内联输入 → 输入名字 → 回车保存。
+    render(
+      <WorkspacePane {...baseProps({ topologySnapshot: sampleSnapshot(), onSaveAsTemplate })} />,
+    );
+    await user.click(screen.getByRole("button", { name: "把当前拓扑设为模板" }));
+    const input = screen.getByLabelText("模板名称");
+    await user.type(input, "我的拓扑{Enter}");
+    expect(onSaveAsTemplate).toHaveBeenCalledWith("我的拓扑");
+  });
+
   it("calls onNodeSelect when a node is clicked on the canvas", async () => {
     const user = userEvent.setup();
     const onNodeSelect = vi.fn();
