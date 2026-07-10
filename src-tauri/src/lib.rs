@@ -25,6 +25,7 @@ mod skill_factory_hashes;
 mod skill_files;
 mod task_request;
 mod task_store;
+mod template_store;
 mod timesync_query_command;
 mod timesync_sidecar_routes;
 mod timesync_tree;
@@ -139,7 +140,11 @@ pub fn run() {
             skill_files::list_skill_files,
             skill_files::read_skill_file,
             skill_files::write_skill_file,
-            skill_files::restore_factory_skills
+            skill_files::restore_factory_skills,
+            template_store::list_project_templates,
+            template_store::delete_project_template,
+            template_store::reorder_project_templates,
+            template_store::create_snapshot_template
         ])
         .build(tauri::generate_context!())
         .expect("failed to build HIBridge Agent")
