@@ -22,5 +22,6 @@
 |---|---|---|
 | 双平面冗余（A/B 双平面、端系统双归属） | `dual-plane-redundant` | 完整参数结构照 `describe_templates` 返回的 `example` 抄，按确认的**组数**、**每组端系统数**扩展。单跳 = 1 个 switch group；双跳 = 2 个 group + 平面内 backbone 级联。每个 group 含一台 A、一台 B 交换机；每台端系统声明 primary（A 平面）+ backup（B 平面）双归属。`backbone` 固定 `{"mode":"line","withinPlane":true}`、`crossPlaneLinks` 固定 `{"mode":"none"}`（模板必填、只此一组合法值，别省）。 |
 | 跳线性级联（任意跳） | `hop-linear` | `switchCount`（任意 N）、`dataRateMbps`；端系统只挂链路两端各 1 台，`switchCount ≥ 5` 时画布自动蛇形折叠。 |
+| 星型（集中式） | `star` | `endSystemCount`（2–8，= 中央交换机端口数）、`dataRateMbps`；1 台中央交换机，端系统各以独立链路直连。 |
 
-用户描述不带宇航味（普通线型）时，按通用场景的 `hop-linear` 处理。
+用户描述不带宇航味（普通线型/星型）时，按通用场景的 `hop-linear` / `star` 处理。

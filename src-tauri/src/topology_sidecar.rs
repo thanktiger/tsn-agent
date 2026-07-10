@@ -414,7 +414,7 @@ mod tests {
             let bytes = to_bytes(resp.into_body(), 16_384).await.unwrap();
             let parsed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
             assert_eq!(parsed["ok"], true);
-            assert_eq!(parsed["summary"]["templateCount"], 2);
+            assert_eq!(parsed["summary"]["templateCount"], 3);
         });
     }
 

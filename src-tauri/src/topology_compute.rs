@@ -10,7 +10,7 @@
 //! - `describe_artifacts`：summary
 //! - `validate_artifacts`：`topology.json` 结构 + 连线引用校验
 //!
-//! `initialize` 支持 hop-linear 与 dual-plane-redundant 两个模板。
+//! `initialize` 支持 hop-linear、star 与 dual-plane-redundant 三个模板。
 //! - `inspect` / `validate` 实现核心校验 + selector 解析，与 TS 保持 byte-equal
 //!   summary。adjacency / portUsage 在 full 模式仍输出，但 sidecar 默认 summary。
 
@@ -100,7 +100,11 @@ pub fn describe_templates_catalog_filtered(scenario: Option<&str>) -> Value {
     // verify-skills.mjs 正则锚点：`let all = [...]` 清单与各 descriptor 函数内
     // 首个 "id" 字段（必须先于 example 的伪 id）被 R9 对账消费——改名/重排前
     // 同步 scripts/verify-skills.mjs。
-    let all = [hop_linear_descriptor(), dual_plane_descriptor()];
+    let all = [
+        hop_linear_descriptor(),
+        star_descriptor(),
+        dual_plane_descriptor(),
+    ];
     let templates: Vec<Value> = match scenario {
         None => all.to_vec(),
         Some(scenario) => all
@@ -147,6 +151,30 @@ fn hop_linear_descriptor() -> Value {
             "dataRateMbps": 1000,
         },
     })
+}
+
+fn star_descriptor() -> Value {
+    json!({
+        "id": "star",
+        "name": "星型拓扑",
+        "description": "1 台中央核心交换机，端系统各以独立链路直连交换机（集中式）。",
+        "tags": ["generic", "star"],
+        "scenarios": ["generic-tsn", "aerospace-onboard"],
+        "params": star_params(),
+        "example": {
+            "endSystemCount": 4,
+            "dataRateMbps": 1000,
+        },
+    })
+}
+
+fn star_params() -> Value {
+    json!([
+        { "name": "endSystemCount", "type": "integer",
+          "minimum": STAR_END_SYSTEM_MIN, "maximum": STAR_END_SYSTEM_MAX,
+          "description": "端系统数量（= 中央交换机端口数）。" },
+        data_rate_param()
+    ])
 }
 
 fn dual_plane_descriptor() -> Value {
@@ -267,7 +295,10 @@ pub struct InitializeSummary {
 pub fn initialize_topology(
     intent: &InitializeIntent,
 ) -> Result<(IntermediateTopology, InitializeSummary), Vec<TopologyErrorOut>> {
-    if intent.template_id != "hop-linear" && intent.template_id != "dual-plane-redundant" {
+    if intent.template_id != "hop-linear"
+        && intent.template_id != "star"
+        && intent.template_id != "dual-plane-redundant"
+    {
         return Err(vec![
             TopologyErrorOut::new(
                 "UNKNOWN_TEMPLATE_ID",
@@ -307,6 +338,32 @@ pub fn initialize_topology(
         );
         // 防御兜底：sidecar initialize 路径不复验生成结果，参数校验之外的结构性
         // 损坏（自环 / 重复 node id / 重复端口）须在落库前被结构校验拦截。
+        let report =
+            validate_intermediate_topology(&serde_json::to_value(&topology).unwrap_or(Value::Null));
+        if !report.ok {
+            return Err(report.errors);
+        }
+        let summary = InitializeSummary {
+            template_id: intent.template_id.clone(),
+            node_count: topology.nodes.len(),
+            link_count: topology.links.len(),
+            switch_count: topology.switch_count(),
+            end_system_count: topology.end_system_count(),
+            server_count: topology.server_count(),
+        };
+        return Ok((topology, summary));
+    }
+
+    if intent.template_id == "star" {
+        let data_rate = normalize_data_rate(params_obj.get("dataRateMbps"))?;
+        let end_system_count = normalize_integer_param(
+            params_obj.get("endSystemCount"),
+            STAR_END_SYSTEM_MIN,
+            STAR_END_SYSTEM_MAX,
+            "$.params.endSystemCount",
+        )?;
+        let topology = create_star_topology(end_system_count as usize, data_rate);
+        // 同 dual-plane：落库前结构校验兜底（自环 / 重复 id / 端口冲突）。
         let report =
             validate_intermediate_topology(&serde_json::to_value(&topology).unwrap_or(Value::Null));
         if !report.ok {
@@ -466,6 +523,13 @@ const LINE_X_PITCH: f64 = 300.0;
 const LINE_ES_GAP: f64 = 220.0;
 const LINE_FOLD_THRESHOLD: usize = 5;
 
+// 星型：端系统数下限 2、上限 8（= 中央交换机端口数，须 < 端口越界校验上界 8）。
+const STAR_END_SYSTEM_MIN: i64 = 2;
+const STAR_END_SYSTEM_MAX: i64 = 8;
+const STAR_CENTER_X: f64 = 520.0;
+const STAR_CENTER_Y: f64 = 360.0;
+const STAR_RADIUS: f64 = 260.0;
+
 struct LineEndsOnlyLayout {
     switch_positions: Vec<IntermediatePosition>,
     first_end_system: IntermediatePosition,
@@ -525,6 +589,75 @@ fn layout_line_ends_only(switch_count: usize) -> LineEndsOnlyLayout {
         first_end_system,
         last_end_system,
         folded,
+    }
+}
+
+/// star：1 台中央交换机 + N 个端系统，各以独立链路直连。端系统绕交换机成环分布。
+fn create_star_topology(end_system_count: usize, data_rate: i64) -> IntermediateTopology {
+    let mut nodes: Vec<IntermediateNode> = Vec::new();
+    let mut links: Vec<IntermediateLink> = Vec::new();
+
+    // 中央交换机：端口数 = 端系统数（每端系统一条链路）。
+    nodes.push(IntermediateNode {
+        id: "sw1".to_string(),
+        numeric_id: 0,
+        name: "SW-1".to_string(),
+        node_type: IntermediateNodeType::Switch,
+        ports: create_ports(end_system_count),
+        position: IntermediatePosition {
+            x: STAR_CENTER_X,
+            y: STAR_CENTER_Y,
+        },
+        mac_address: None,
+        ip_address: None,
+    });
+
+    // 端系统：顶部起顺时针均分成环；ip octet 取 1..N 保证唯一。
+    for i in 0..end_system_count {
+        let angle = -std::f64::consts::FRAC_PI_2
+            + std::f64::consts::TAU * (i as f64) / (end_system_count as f64);
+        nodes.push(IntermediateNode {
+            id: format!("es{}", i + 1),
+            numeric_id: (i + 1) as i64,
+            name: format!("ES-{}", i + 1),
+            node_type: IntermediateNodeType::EndSystem,
+            ports: create_ports(1),
+            position: IntermediatePosition {
+                x: STAR_CENTER_X + STAR_RADIUS * angle.cos(),
+                y: STAR_CENTER_Y + STAR_RADIUS * angle.sin(),
+            },
+            mac_address: Some(derive_mac_address(i as i64 + 1)),
+            ip_address: Some(format!("10.0.{}.1", i + 1)),
+        });
+    }
+
+    // 每端系统一条到中央交换机的链路（交换机端口 first-free：P0..P(N-1)）。
+    for i in 0..end_system_count {
+        let es_id = format!("es{}", i + 1);
+        links.push(create_link(
+            i as i64,
+            &es_id,
+            "P0",
+            "sw1",
+            &format!("P{i}"),
+            data_rate,
+        ));
+    }
+
+    IntermediateTopology {
+        schema_version: INTERMEDIATE_TOPOLOGY_SCHEMA_VERSION.to_string(),
+        metadata: IntermediateTopologyMetadata {
+            template_id: Some("star".to_string()),
+            template_params: Some(json!({
+                "endSystemCount": end_system_count,
+                "dataRateMbps": data_rate,
+            })),
+            layout: Some("star".into()),
+            source: Some("template".into()),
+        },
+        nodes,
+        links,
+        diagnostics: Vec::new(),
     }
 }
 
@@ -2316,9 +2449,10 @@ mod tests {
     #[test]
     fn describe_templates_includes_all_templates() {
         let catalog = describe_templates_catalog();
-        assert_eq!(catalog["templateCount"], 2);
+        assert_eq!(catalog["templateCount"], 3);
         let ids = catalog["templateIds"].as_array().unwrap();
         assert!(ids.iter().any(|v| v == "hop-linear"));
+        assert!(ids.iter().any(|v| v == "star"));
         assert!(ids.iter().any(|v| v == "dual-plane-redundant"));
     }
 
@@ -2330,6 +2464,37 @@ mod tests {
                 "dataRateMbps": 1000,
             }),
         }
+    }
+
+    #[test]
+    fn star_topology_has_central_switch_and_direct_links() {
+        // 4 端系统星型：5 节点（1 SW + 4 ES）、4 链路、全接中央交换机、结构校验过。
+        let (topo, summary) = initialize_topology(&InitializeIntent {
+            template_id: "star".into(),
+            params: json!({ "endSystemCount": 4, "dataRateMbps": 1000 }),
+        })
+        .unwrap();
+        assert_eq!(summary.node_count, 5);
+        assert_eq!(summary.link_count, 4);
+        assert_eq!(summary.switch_count, 1);
+        assert_eq!(summary.end_system_count, 4);
+        for link in &topo.links {
+            let touches_hub = link.source.node_id == "sw1" || link.target.node_id == "sw1";
+            assert!(touches_hub, "星型每条链路须直连中央交换机");
+        }
+        let report = validate_intermediate_topology(&serde_json::to_value(&topo).unwrap());
+        assert!(report.ok, "star 结构校验应通过: {:?}", report.errors);
+    }
+
+    #[test]
+    fn star_rejects_out_of_range_end_system_count() {
+        // 上界 8：9 超界 → 参数错误（非 panic）。
+        let err = initialize_topology(&InitializeIntent {
+            template_id: "star".into(),
+            params: json!({ "endSystemCount": 9, "dataRateMbps": 1000 }),
+        })
+        .unwrap_err();
+        assert!(!err.is_empty());
     }
 
     #[test]
@@ -2507,8 +2672,8 @@ mod tests {
 
         let aero = describe_templates_catalog_filtered(Some("aerospace-onboard"));
         assert_eq!(
-            aero["templateCount"], 2,
-            "宇航场景含 hop-linear + dual-plane-redundant"
+            aero["templateCount"], 3,
+            "宇航场景含 hop-linear + star + dual-plane-redundant"
         );
         // 匹配场景与全量均不得携带 warning（否则 agent 每次过滤都收到误导警告）。
         assert!(aero.get("warning").is_none());
@@ -2516,9 +2681,10 @@ mod tests {
         assert!(full.get("scenario").is_none());
 
         let generic = describe_templates_catalog_filtered(Some("generic-tsn"));
-        assert_eq!(generic["templateCount"], 1);
+        assert_eq!(generic["templateCount"], 2);
         let ids = generic["templateIds"].as_array().unwrap();
         assert!(ids.iter().any(|v| v == "hop-linear"));
+        assert!(ids.iter().any(|v| v == "star"));
         assert!(!ids.iter().any(|v| v == "dual-plane-redundant"));
 
         let unknown = describe_templates_catalog_filtered(Some("industrial"));

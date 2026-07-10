@@ -18,5 +18,7 @@
 | 类型 | `templateId` | 关键参数 / 结构 |
 |---|---|---|
 | 线型（任意跳） | `hop-linear` | `switchCount`（任意 N）、`dataRateMbps`；端系统只挂链路两端各 1 台。 |
+| 星型（集中式） | `star` | `endSystemCount`（2–8，= 中央交换机端口数）、`dataRateMbps`；1 台中央交换机，端系统各以独立链路直连。 |
 
 例：「4 个交换机线型互联」→ `hop-linear`，`switchCount=4`。
+例：「1 台中央交换机接 4 个端系统的星型」→ `star`，`endSystemCount=4`。

@@ -190,7 +190,7 @@ pub const PROJECT_TEMPLATES_SCHEMA_SQL: &str = r#"
 /// 出厂三条 prompt 模板（线型 / 星型 / 双平面冗余，见 plan U1）。一次性播种，
 /// 由 `app_state` sentinel `project_templates_seeded` 守卫——硬删后 sentinel 仍在、
 /// 不复种（AE4）。`created_at` 用 SQL `datetime('now')`，免 Rust 侧时间依赖。
-/// 星型无 Rust 生成器，靠 agent `apply_operations` 现搭（生成器见 plan 后续项）。
+/// 三种拓扑均有 `topology_initialize` 生成器（`star` 见 topology_compute），agent 按 prompt 选模板直接确定性搭建。
 pub const PROJECT_TEMPLATES_SEED_SQL: &str = r#"
     INSERT OR IGNORE INTO project_templates
         (id, kind, scenario_config_id, title, subtitle, prompt_text, topology_snapshot, sort_order, origin, created_at)
