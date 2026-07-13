@@ -302,9 +302,39 @@ export function gptpDiagLine(d: GptpDiag): string {
   return `gPTP 收敛：${d.convergedNodes}/${d.totalNodes} 节点 ≤ 阈值（${d.thresholdSummary}），最差 ${d.worstOffsetNs.toFixed(0)} ns @${d.worstNode}`;
 }
 
+/** 单流行（15 列），对齐 flow_query_command::ListFlowStreamRow。
+ * 新五列（srcMac/dstMac/vlanId/earliestSendOffsetNs/latestSendOffsetNs）老行为 null。 */
+export interface ListFlowStreamRow {
+  streamSeq: number;
+  class: string;
+  pcp: number;
+  periodUs: number;
+  frameBytes: number;
+  count: number;
+  talker: string;
+  listener: string;
+  maxLatencyUs: number | null;
+  redundant: boolean;
+  srcMac: string | null;
+  dstMac: string | null;
+  vlanId: number | null;
+  earliestSendOffsetNs: number | null;
+  latestSendOffsetNs: number | null;
+}
+
+/** 流集查询结果（对齐 flow_query_command::ListFlowStreamsResult）。 */
+export interface ListFlowStreamsResult {
+  streams: ListFlowStreamRow[];
+}
+
 /** 默认门控明细读通道 = get_flow_plan Tauri command（测试可注入替身）。 */
 export async function invokeGetFlowPlan(sessionId: string): Promise<FlowPlanDetail> {
   return await invoke<FlowPlanDetail>("get_flow_plan", { request: { sessionId } });
+}
+
+/** 流集查询读通道 = list_flow_streams Tauri command（测试可注入替身）。 */
+export async function invokeListFlowStreams(sessionId: string): Promise<ListFlowStreamsResult> {
+  return await invoke<ListFlowStreamsResult>("list_flow_streams", { request: { sessionId } });
 }
 
 /** 默认规划写通道 = plan_tas Tauri command（测试可注入替身）。 */

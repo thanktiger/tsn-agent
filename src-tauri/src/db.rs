@@ -224,23 +224,28 @@ pub const PROJECT_TEMPLATES_SEED_SQL: &str = r#"
 /// `solver` 记出处（Z3 带保证 / Eager 无保证，R8）。U7 写、U8 读回 pin、U10 对账共用。
 pub const FLOW_DOMAIN_SCHEMA_SQL: &str = r#"
     CREATE TABLE IF NOT EXISTS flow_streams (
-        session_id     TEXT    NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-        stream_seq     INTEGER NOT NULL,
-        class          TEXT    NOT NULL,
-        pcp            INTEGER NOT NULL,
-        period_us      INTEGER NOT NULL,
-        frame_bytes    INTEGER NOT NULL,
-        count          INTEGER NOT NULL,
-        talker         TEXT    NOT NULL,
-        listener       TEXT    NOT NULL,
-        src_ip         TEXT,
-        dst_ip         TEXT,
-        src_l4_port    INTEGER,
-        dst_l4_port    INTEGER,
-        l4_protocol    TEXT,
-        max_latency_us INTEGER,
-        redundant      INTEGER NOT NULL DEFAULT 0,
-        paths          TEXT,
+        session_id              TEXT    NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        stream_seq              INTEGER NOT NULL,
+        class                   TEXT    NOT NULL,
+        pcp                     INTEGER NOT NULL,
+        period_us               INTEGER NOT NULL,
+        frame_bytes             INTEGER NOT NULL,
+        count                   INTEGER NOT NULL,
+        talker                  TEXT    NOT NULL,
+        listener                TEXT    NOT NULL,
+        src_ip                  TEXT,
+        dst_ip                  TEXT,
+        src_l4_port             INTEGER,
+        dst_l4_port             INTEGER,
+        l4_protocol             TEXT,
+        max_latency_us          INTEGER,
+        redundant               INTEGER NOT NULL DEFAULT 0,
+        paths                   TEXT,
+        src_mac                 TEXT,
+        dst_mac                 TEXT,
+        vlan_id                 INTEGER,
+        earliest_send_offset_ns INTEGER,
+        latest_send_offset_ns   INTEGER,
         PRIMARY KEY (session_id, stream_seq)
     );
 
@@ -365,6 +370,36 @@ pub async fn ensure_flow_streams_rename(
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
+    Ok(())
+}
+
+/// flow_streams 补加 5 列（2026-07-13，流面板重设计 U3）：`src_mac`/`dst_mac`/`vlan_id`/
+/// `earliest_send_offset_ns`/`latest_send_offset_ns`。新库由 `FLOW_DOMAIN_SCHEMA_SQL` 一次性建出；
+/// 老库须逐列用 `pragma_table_info` 守卫，列已存在则跳过（幂等）。
+/// **须在 `ensure_flow_streams_rename` 之后调用**（表名已扶正为 `flow_streams`）。
+pub async fn ensure_flow_streams_mac_vlan_cols(
+    pool: &sqlx::Pool<sqlx::Sqlite>,
+) -> Result<(), sqlx::Error> {
+    for (col, ty) in [
+        ("src_mac", "TEXT"),
+        ("dst_mac", "TEXT"),
+        ("vlan_id", "INTEGER"),
+        ("earliest_send_offset_ns", "INTEGER"),
+        ("latest_send_offset_ns", "INTEGER"),
+    ] {
+        let has: i64 = sqlx::query_scalar(&format!(
+            "SELECT COUNT(*) FROM pragma_table_info('flow_streams') WHERE name = '{col}'"
+        ))
+        .fetch_one(pool)
+        .await?;
+        if has == 0 {
+            sqlx::query(&format!(
+                "ALTER TABLE flow_streams ADD COLUMN {col} {ty}"
+            ))
+            .execute(pool)
+            .await?;
+        }
+    }
     Ok(())
 }
 

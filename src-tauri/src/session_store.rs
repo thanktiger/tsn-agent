@@ -268,6 +268,11 @@ pub async fn connect_app_database(app: &tauri::AppHandle) -> Result<Pool<Sqlite>
         .await
         .map_err(db_error)?;
 
+    // flow_streams 补加 5 列（2026-07-13，流面板重设计 U3）：须在 rename 之后（表已扶正）。
+    crate::db::ensure_flow_streams_mac_vlan_cols(&pool)
+        .await
+        .map_err(db_error)?;
+
     // 工程模板表（2026-07-09，落地页）：建表 + 一次性播种出厂 prompt 模板（sentinel 守卫防复活）。
     crate::db::ensure_project_templates_table(&pool)
         .await

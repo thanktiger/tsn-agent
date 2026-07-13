@@ -128,6 +128,91 @@ pub async fn get_flow_plan(
     get_flow_plan_inner(pool, &request.session_id).await
 }
 
+/// 单流行（15 列）：流面板重设计 U3。命名 `ListFlowStreamRow`（非 `FlowStreamRow`）以规避
+/// `topology_undo` 私有同名结构体冲突。`redundant` 存 INTEGER，`!= 0` 映成 bool。
+/// 新五列（src_mac/dst_mac/vlan_id/earliest_send_offset_ns/latest_send_offset_ns）老行为 null。
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ListFlowStreamRow {
+    pub stream_seq: i64,
+    pub class: String,
+    pub pcp: i64,
+    pub period_us: i64,
+    pub frame_bytes: i64,
+    pub count: i64,
+    pub talker: String,
+    pub listener: String,
+    pub max_latency_us: Option<i64>,
+    pub redundant: bool,
+    pub src_mac: Option<String>,
+    pub dst_mac: Option<String>,
+    pub vlan_id: Option<i64>,
+    pub earliest_send_offset_ns: Option<i64>,
+    pub latest_send_offset_ns: Option<i64>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListFlowStreamsRequest {
+    pub session_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ListFlowStreamsResult {
+    pub streams: Vec<ListFlowStreamRow>,
+}
+
+/// 只读查询内核：取指定会话的所有流集行，按 `stream_seq` 升序。
+pub async fn list_flow_streams_inner(
+    pool: &sqlx::Pool<sqlx::Sqlite>,
+    session_id: &str,
+) -> Result<ListFlowStreamsResult, String> {
+    let rows = sqlx::query(
+        "SELECT stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener, \
+                max_latency_us, redundant, src_mac, dst_mac, vlan_id, \
+                earliest_send_offset_ns, latest_send_offset_ns \
+         FROM flow_streams WHERE session_id = ? ORDER BY stream_seq",
+    )
+    .bind(session_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("读 flow_streams 失败：{e}"))?;
+
+    let streams = rows
+        .iter()
+        .map(|r| ListFlowStreamRow {
+            stream_seq: r.get("stream_seq"),
+            class: r.get("class"),
+            pcp: r.get("pcp"),
+            period_us: r.get("period_us"),
+            frame_bytes: r.get("frame_bytes"),
+            count: r.get("count"),
+            talker: r.get("talker"),
+            listener: r.get("listener"),
+            max_latency_us: r.get("max_latency_us"),
+            redundant: r.get::<i64, _>("redundant") != 0,
+            src_mac: r.get("src_mac"),
+            dst_mac: r.get("dst_mac"),
+            vlan_id: r.get("vlan_id"),
+            earliest_send_offset_ns: r.get("earliest_send_offset_ns"),
+            latest_send_offset_ns: r.get("latest_send_offset_ns"),
+        })
+        .collect();
+
+    Ok(ListFlowStreamsResult { streams })
+}
+
+#[tauri::command]
+pub async fn list_flow_streams(
+    app: tauri::AppHandle,
+    store: tauri::State<'_, crate::session_store::SessionStore>,
+    request: ListFlowStreamsRequest,
+) -> Result<ListFlowStreamsResult, String> {
+    let pool = store.pool(&app).await?;
+    list_flow_streams_inner(pool, &request.session_id).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -326,5 +411,140 @@ mod tests {
         assert_eq!(e["initiallyOpen"], true);
         assert_eq!(e["offsetNs"], 29_470);
         assert_eq!(e["durationsNs"][0], 4_560);
+    }
+
+    // ── list_flow_streams 测试 ──────────────────────────────────────────────
+
+    /// U3①：空流集 → streams=[]。
+    #[test]
+    fn list_flow_streams_empty_session() {
+        tauri::async_runtime::block_on(async {
+            let pool = fresh_pool().await;
+            seed_linear(&pool).await;
+            let result = list_flow_streams_inner(&pool, "s1").await.unwrap();
+            assert!(result.streams.is_empty());
+        });
+    }
+
+    /// U3②：单条 ST 流（新 5 列为 NULL）→ 返回正确的 15 字段行，新字段为 null。
+    #[test]
+    fn list_flow_streams_single_st_stream_new_cols_null() {
+        tauri::async_runtime::block_on(async {
+            let pool = fresh_pool().await;
+            seed_linear(&pool).await;
+            add_stream(&pool, 0, "ST", 7).await;
+            let result = list_flow_streams_inner(&pool, "s1").await.unwrap();
+            assert_eq!(result.streams.len(), 1);
+            let s = &result.streams[0];
+            assert_eq!(s.stream_seq, 0);
+            assert_eq!(s.class, "ST");
+            assert_eq!(s.pcp, 7);
+            assert_eq!(s.period_us, 500);
+            assert_eq!(s.frame_bytes, 512);
+            assert_eq!(s.count, 10000);
+            assert_eq!(s.talker, "1");
+            assert_eq!(s.listener, "2");
+            assert!(s.max_latency_us.is_none());
+            assert!(!s.redundant);
+            // 新 5 列未写入 → null。
+            assert!(s.src_mac.is_none());
+            assert!(s.dst_mac.is_none());
+            assert!(s.vlan_id.is_none());
+            assert!(s.earliest_send_offset_ns.is_none());
+            assert!(s.latest_send_offset_ns.is_none());
+        });
+    }
+
+    /// U3③：ST + RC + BE 三流 → 三行按 stream_seq 升序返回。
+    #[test]
+    fn list_flow_streams_st_rc_be_ordered_by_seq() {
+        tauri::async_runtime::block_on(async {
+            let pool = fresh_pool().await;
+            seed_linear(&pool).await;
+            add_stream(&pool, 0, "ST", 7).await;
+            // RC 流：redundant=1。
+            sqlx::query(
+                "INSERT INTO flow_streams (session_id, stream_seq, class, pcp, period_us, \
+                 frame_bytes, count, talker, listener, redundant) \
+                 VALUES ('s1', 1, 'RC', 6, 500, 512, 10000, '1', '2', 1)",
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+            add_stream(&pool, 2, "BE", 0).await;
+            let result = list_flow_streams_inner(&pool, "s1").await.unwrap();
+            assert_eq!(result.streams.len(), 3);
+            assert_eq!(result.streams[0].class, "ST");
+            assert_eq!(result.streams[1].class, "RC");
+            assert_eq!(result.streams[2].class, "BE");
+        });
+    }
+
+    /// U3④：RC 流 redundant=1 → redundant: true 映射正确。
+    #[test]
+    fn list_flow_streams_redundant_true_for_rc() {
+        tauri::async_runtime::block_on(async {
+            let pool = fresh_pool().await;
+            seed_linear(&pool).await;
+            sqlx::query(
+                "INSERT INTO flow_streams (session_id, stream_seq, class, pcp, period_us, \
+                 frame_bytes, count, talker, listener, redundant) \
+                 VALUES ('s1', 0, 'RC', 6, 500, 512, 10000, '1', '2', 1)",
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+            let result = list_flow_streams_inner(&pool, "s1").await.unwrap();
+            assert_eq!(result.streams.len(), 1);
+            assert!(result.streams[0].redundant);
+        });
+    }
+
+    /// U3⑤：错误的 session_id → streams=[]。
+    #[test]
+    fn list_flow_streams_wrong_session_id_returns_empty() {
+        tauri::async_runtime::block_on(async {
+            let pool = fresh_pool().await;
+            seed_linear(&pool).await;
+            add_stream(&pool, 0, "ST", 7).await;
+            let result = list_flow_streams_inner(&pool, "wrong-session").await.unwrap();
+            assert!(result.streams.is_empty());
+        });
+    }
+
+    /// U3⑥：serde camelCase 契约（前端 DTO 镜像依赖字段名）。
+    #[test]
+    fn list_flow_stream_row_serializes_camel_case() {
+        let row = ListFlowStreamRow {
+            stream_seq: 0,
+            class: "ST".into(),
+            pcp: 7,
+            period_us: 500,
+            frame_bytes: 512,
+            count: 10000,
+            talker: "1".into(),
+            listener: "2".into(),
+            max_latency_us: Some(1000),
+            redundant: false,
+            src_mac: None,
+            dst_mac: None,
+            vlan_id: None,
+            earliest_send_offset_ns: None,
+            latest_send_offset_ns: None,
+        };
+        let v = serde_json::to_value(&row).unwrap();
+        assert_eq!(v["streamSeq"], 0);
+        assert_eq!(v["class"], "ST");
+        assert_eq!(v["pcp"], 7);
+        assert_eq!(v["periodUs"], 500);
+        assert_eq!(v["frameBytes"], 512);
+        assert_eq!(v["count"], 10000);
+        assert_eq!(v["maxLatencyUs"], 1000);
+        assert_eq!(v["redundant"], false);
+        assert!(v["srcMac"].is_null());
+        assert!(v["dstMac"].is_null());
+        assert!(v["vlanId"].is_null());
+        assert!(v["earliestSendOffsetNs"].is_null());
+        assert!(v["latestSendOffsetNs"].is_null());
     }
 }
