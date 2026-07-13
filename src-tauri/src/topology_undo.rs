@@ -123,6 +123,11 @@ struct FlowStreamRow {
     max_latency_us: Option<i64>,
     redundant: i64,
     paths: Option<String>,
+    src_mac: Option<String>,
+    dst_mac: Option<String>,
+    vlan_id: Option<i64>,
+    earliest_send_offset_ns: Option<i64>,
+    latest_send_offset_ns: Option<i64>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -300,7 +305,8 @@ async fn snapshot_flow_blob(
     let stream_rows = sqlx::query(
         r#"SELECT session_id, stream_seq, class, pcp, period_us, frame_bytes, count,
                   talker, listener, src_ip, dst_ip, src_l4_port, dst_l4_port, l4_protocol,
-                  max_latency_us, redundant, paths
+                  max_latency_us, redundant, paths,
+                  src_mac, dst_mac, vlan_id, earliest_send_offset_ns, latest_send_offset_ns
            FROM flow_streams WHERE session_id = ? ORDER BY stream_seq"#,
     )
     .bind(session_id)
@@ -336,6 +342,11 @@ async fn snapshot_flow_blob(
                 max_latency_us: r.get("max_latency_us"),
                 redundant: r.get("redundant"),
                 paths: r.get("paths"),
+                src_mac: r.get("src_mac"),
+                dst_mac: r.get("dst_mac"),
+                vlan_id: r.get("vlan_id"),
+                earliest_send_offset_ns: r.get("earliest_send_offset_ns"),
+                latest_send_offset_ns: r.get("latest_send_offset_ns"),
             })
             .collect(),
         plans: plan_rows
@@ -531,8 +542,9 @@ async fn restore_flow(
             r#"INSERT INTO flow_streams
                (session_id, stream_seq, class, pcp, period_us, frame_bytes, count,
                 talker, listener, src_ip, dst_ip, src_l4_port, dst_l4_port, l4_protocol,
-                max_latency_us, redundant, paths)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
+                max_latency_us, redundant, paths,
+                src_mac, dst_mac, vlan_id, earliest_send_offset_ns, latest_send_offset_ns)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
         )
         .bind(&s.session_id)
         .bind(s.stream_seq)
@@ -551,6 +563,11 @@ async fn restore_flow(
         .bind(s.max_latency_us)
         .bind(s.redundant)
         .bind(&s.paths)
+        .bind(&s.src_mac)
+        .bind(&s.dst_mac)
+        .bind(s.vlan_id)
+        .bind(s.earliest_send_offset_ns)
+        .bind(s.latest_send_offset_ns)
         .execute(&mut *tx)
         .await?;
     }
