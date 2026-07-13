@@ -5,6 +5,8 @@ import { describe, expect, it, vi } from "vitest";
 import { FlowPanel, type FlowPanelProps } from "./flow-panel";
 import type {
   FlowPlanDetail,
+  ListFlowStreamRow,
+  ListFlowStreamsResult,
   PlanResult,
   PlanUiState,
   StreamVerdict,
@@ -162,6 +164,32 @@ function planDetailWithGcl(): FlowPlanDetail {
   });
 }
 
+/** U4 流集夹具：默认一条 ST 流。 */
+function makeFlowStream(overrides: Partial<ListFlowStreamRow> = {}): ListFlowStreamRow {
+  return {
+    streamSeq: 0,
+    class: "ST",
+    pcp: 6,
+    periodUs: 1000,
+    frameBytes: 128,
+    count: 1,
+    talker: "es1",
+    listener: "es2",
+    maxLatencyUs: null,
+    redundant: false,
+    srcMac: null,
+    dstMac: null,
+    vlanId: null,
+    earliestSendOffsetNs: null,
+    latestSendOffsetNs: null,
+    ...overrides,
+  };
+}
+
+function streamsResult(streams: ListFlowStreamRow[] = []): ListFlowStreamsResult {
+  return { streams };
+}
+
 function baseProps(overrides: Partial<FlowPanelProps> = {}): FlowPanelProps {
   return {
     inFlowStage: true,
@@ -178,6 +206,7 @@ function baseProps(overrides: Partial<FlowPanelProps> = {}): FlowPanelProps {
     planTas: vi.fn(async () => planOk()),
     verifyTas: vi.fn(async () => verifyResult()),
     getFlowPlan: vi.fn(async () => planDetail()),
+    listFlowStreams: vi.fn(async () => streamsResult()),
     ...overrides,
   };
 }
@@ -692,5 +721,64 @@ describe("FlowPanel", () => {
     // s2 未被污染：无 s1 综合结果，CTA 仍在。
     expect(screen.queryByText(/已综合 4 个门控条目/)).toBeNull();
     expect(await screen.findByRole("button", { name: "规划门控表" })).toBeTruthy();
+  });
+
+  // ——— U4 流量列表 ———
+
+  it("U4：flow-list 子 tab 有流时渲染行列表（F0/F1 可见）", async () => {
+    const streams = [
+      makeFlowStream({ streamSeq: 0, class: "ST", talker: "es1", listener: "es2" }),
+      makeFlowStream({ streamSeq: 1, class: "RC", talker: "es2", listener: "es3" }),
+    ];
+    const listFlowStreams = vi.fn(async () => streamsResult(streams));
+    render(<FlowPanel {...baseProps({ activeFlowSubTab: "flow-list", listFlowStreams })} />);
+    expect(await screen.findByText("F0")).toBeTruthy();
+    expect(screen.getByText("F1")).toBeTruthy();
+  });
+
+  it("U4：flow-list 空且 !isLoading → PanelCta 可见（!inFlowStage → disabled）", async () => {
+    const listFlowStreams = vi.fn(async () => streamsResult([]));
+    render(
+      <FlowPanel
+        {...baseProps({
+          activeFlowSubTab: "flow-list",
+          inFlowStage: false,
+          listFlowStreams,
+        })}
+      />,
+    );
+    const cta = await screen.findByRole("button", { name: "录入流量" });
+    expect(cta.hasAttribute("disabled")).toBe(true);
+  });
+
+  it("U4：flow-list loading 中不出 PanelCta", () => {
+    // listFlowStreams 永不 resolve → streamsLoading 恒 true。
+    const listFlowStreams = vi.fn(() => new Promise<ListFlowStreamsResult>(() => {}));
+    render(<FlowPanel {...baseProps({ activeFlowSubTab: "flow-list", listFlowStreams })} />);
+    expect(screen.queryByRole("button", { name: "录入流量" })).toBeNull();
+  });
+
+  it("U4：DB 变更 → listFlowStreams 也重拉", async () => {
+    const listFlowStreams = vi.fn(async () => streamsResult([]));
+    render(<FlowPanel {...baseProps({ activeFlowSubTab: "flow-list", listFlowStreams })} />);
+    await waitFor(() => expect(listFlowStreams).toHaveBeenCalledTimes(1));
+    await act(async () => {
+      dbListenerOnChange.current?.();
+    });
+    await waitFor(() => expect(listFlowStreams).toHaveBeenCalledTimes(2));
+  });
+
+  it("U4：点击行 → onSelectFlowSeq 收到 streamSeq", async () => {
+    const onSelectFlowSeq = vi.fn();
+    const stream = makeFlowStream({ streamSeq: 3 });
+    const listFlowStreams = vi.fn(async () => streamsResult([stream]));
+    render(
+      <FlowPanel
+        {...baseProps({ activeFlowSubTab: "flow-list", listFlowStreams, onSelectFlowSeq })}
+      />,
+    );
+    await screen.findByText("F3");
+    fireEvent.click(screen.getByRole("option"));
+    expect(onSelectFlowSeq).toHaveBeenCalledWith(3);
   });
 });

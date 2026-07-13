@@ -11,9 +11,12 @@ import {
   gclOpenIntervals,
   gptpDiagLine,
   invokeGetFlowPlan,
+  invokeListFlowStreams,
   invokePlanTas,
   invokeVerifyTas,
   isZ3Guaranteed,
+  type ListFlowStreamRow,
+  type ListFlowStreamsResult,
   nsToUs,
   type PlanResult,
   type PlanUiState,
@@ -28,6 +31,7 @@ import {
   type VerifyUiState,
   verifyAllPass,
 } from "./flow-sim";
+import { FlowStreamList } from "./flow-stream-list";
 import { type FlowSubTab, FlowSubTabs } from "./flow-subtabs";
 import { PanelCta } from "./panel-cta";
 
@@ -51,6 +55,8 @@ export interface FlowPanelProps {
   verifyTas?: (sessionId: string) => Promise<VerifyTasResult>;
   /** 门控明细读通道（U2/KTD1，测试注入替身）。 */
   getFlowPlan?: (sessionId: string) => Promise<FlowPlanDetail>;
+  /** 流集查询读通道（U4，测试注入替身）。 */
+  listFlowStreams?: (sessionId: string) => Promise<ListFlowStreamsResult>;
 }
 
 export function FlowPanel({
@@ -62,9 +68,12 @@ export function FlowPanel({
   onVerifyStateChange,
   activeFlowSubTab,
   onSelectFlowSubTab,
+  selectedFlowSeq,
+  onSelectFlowSeq,
   planTas = invokePlanTas,
   verifyTas = invokeVerifyTas,
   getFlowPlan = invokeGetFlowPlan,
+  listFlowStreams = invokeListFlowStreams,
 }: FlowPanelProps) {
   // ref 即时拦并发（disabled 态下一拍才生效，防双击派发第二次）。
   const planInflight = useRef(false);
@@ -100,8 +109,42 @@ export function FlowPanel({
     if (planState.status === "done") void refreshPlanQuery();
   }, [planState, refreshPlanQuery]);
 
+  // U4：流集查询态（挂载即拉，DB 变更重拉；requestSeq 丢弃过期响应）。
+  const [streams, setStreams] = useState<ListFlowStreamRow[]>([]);
+  const [streamsLoading, setStreamsLoading] = useState(true);
+  const streamsReqRef = useRef(0);
+  const refreshStreams = useCallback(async () => {
+    const seq = ++streamsReqRef.current;
+    setStreamsLoading(true);
+    try {
+      const result = await listFlowStreams(sessionId);
+      if (streamsReqRef.current === seq) {
+        setStreams(result.streams);
+        setStreamsLoading(false);
+      }
+    } catch {
+      if (streamsReqRef.current === seq) {
+        setStreams([]);
+        setStreamsLoading(false);
+      }
+    }
+  }, [listFlowStreams, sessionId]);
+
+  // 挂载 / 切会话：先清旧数据回 loading，再取。
+  useEffect(() => {
+    setStreams([]);
+    setStreamsLoading(true);
+    void refreshStreams();
+  }, [refreshStreams]);
+
   // flow domain 写库（agent 录流 / 规划落库）→ 重拉（照 timesync 消费先例，非 Tauri 环境 no-op）。
-  useSessionDbListener({ sessionId, onChange: () => void refreshPlanQuery() });
+  useSessionDbListener({
+    sessionId,
+    onChange: () => {
+      void refreshPlanQuery();
+      void refreshStreams();
+    },
+  });
 
   const planning = planState.status === "running";
   const verifying = verifyState.status === "running";
@@ -183,7 +226,14 @@ export function FlowPanel({
           aria-labelledby="flow-subtab-flow-list"
           className="flow-subpanel"
         >
-          <div className="empty-panel mono">流量列表</div>
+          <FlowStreamList
+            streams={streams}
+            selectedFlowSeq={selectedFlowSeq}
+            onSelectFlowSeq={onSelectFlowSeq}
+            onOpenDetail={() => {}}
+            inFlowStage={inFlowStage}
+            isLoading={streamsLoading}
+          />
         </div>
       )}
 
