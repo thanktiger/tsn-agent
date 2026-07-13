@@ -23,6 +23,7 @@ import { ChatPane } from "./components/chat-pane";
 import { LandingPage } from "./components/landing/LandingPage";
 import {
   type ConfigTabId,
+  type FlowSubTab,
   type HardwareUiState,
   type PlanUiState,
   type SimUiState,
@@ -91,6 +92,10 @@ export function App() {
   const [activeConfigTab, setActiveConfigTab] = useState<ConfigTabId>("node-props");
   // 时间同步子 tab（软件仿真/硬件部署，平级）。App 级以便 reveal 强制落 soft-sim；随会话重置。
   const [activeTimesyncSubTab, setActiveTimesyncSubTab] = useState<TimesyncSubTab>("soft-sim");
+  // 流量规划子 tab（流量列表/门控规划/软仿模拟/硬件部署，平级）。App 级；随会话重置。
+  const [activeFlowSubTab, setActiveFlowSubTab] = useState<FlowSubTab>("flow-list");
+  // 选中流量序号（flow-list 子 tab 用，null 表示未选）；随会话重置。
+  const [selectedFlowSeq, setSelectedFlowSeq] = useState<number | null>(null);
   const [selectedNodeId, setSelectedNodeId] = useState<string | undefined>();
   // U11：软仿运行态持于 App 级（非 tab 组件内）——切 tab 不取消命令、切回按 simStatus 恢复。
   const [simState, setSimState] = useState<SimUiState>({ status: "idle" });
@@ -151,10 +156,13 @@ export function App() {
 
   // U10（doc-review 决定）：会话切换时三态归零——收起、回 node-props、清选中，防 PR#23 id 污染。
   // U11：软仿运行态也随会话切换重置（不跨会话保留结果）。U4：badge 也清。
+  // 流量子 tab 与选中序号也随会话重置。
   useEffect(() => {
     setConfigPanelExpanded(false);
     setActiveConfigTab("node-props");
     setActiveTimesyncSubTab("soft-sim");
+    setActiveFlowSubTab("flow-list");
+    setSelectedFlowSeq(null);
     setSelectedNodeId(undefined);
     setSimState({ status: "idle" });
     setHardwareState({ status: "idle" });
@@ -706,6 +714,10 @@ export function App() {
               activeTimesyncSubTab={activeTimesyncSubTab}
               onSelectTimesyncSubTab={setActiveTimesyncSubTab}
               timesyncTabHasBadge={timesyncTabHasBadge}
+              activeFlowSubTab={activeFlowSubTab}
+              onSelectFlowSubTab={setActiveFlowSubTab}
+              selectedFlowSeq={selectedFlowSeq}
+              onSelectFlowSeq={setSelectedFlowSeq}
               onToggleConfigPanel={() => setConfigPanelExpanded((value) => !value)}
               onSelectConfigTab={(tab) => {
                 setActiveConfigTab(tab);

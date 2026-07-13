@@ -24,6 +24,7 @@ import {
 import { DetailRow, Stat } from "../shared";
 import { FlowPanel } from "./flow-panel";
 import type { PlanUiState, VerifyUiState } from "./flow-sim";
+import type { FlowSubTab } from "./flow-subtabs";
 import type { HardwareUiState } from "./hardware-deploy";
 import { TimeSyncPanel, type TimesyncSubTab } from "./time-sync-panel";
 import type { SimUiState } from "./timesync-sim";
@@ -45,6 +46,7 @@ import {
 import { TsnFloatingEdge } from "./tsn-floating-edge";
 
 export type { PlanUiState, VerifyUiState } from "./flow-sim";
+export type { FlowSubTab } from "./flow-subtabs";
 export type { HardwareUiState } from "./hardware-deploy";
 export type { TimesyncSubTab } from "./time-sync-panel";
 export type { SimUiState } from "./timesync-sim";
@@ -188,6 +190,12 @@ export interface WorkspacePaneProps {
   onSelectTimesyncSubTab: (tab: TimesyncSubTab) => void;
   /** U4：set_gm 揭示在「面板已开但用户在别 tab」时给时间同步 tab 挂的脉冲 badge。 */
   timesyncTabHasBadge: boolean;
+  /** 流量规划子 tab 选择（App 级，随会话重置）。 */
+  activeFlowSubTab: FlowSubTab;
+  onSelectFlowSubTab: (tab: FlowSubTab) => void;
+  /** 选中流量序号（flow-list 子 tab 用，null 表示未选；随会话重置）。 */
+  selectedFlowSeq: number | null;
+  onSelectFlowSeq: (seq: number | null) => void;
   /** U10：底部 handle 条切换弹出框显隐。 */
   onToggleConfigPanel: () => void;
   onSelectConfigTab: (tab: ConfigTabId) => void;
@@ -224,6 +232,10 @@ export function WorkspacePane({
   activeTimesyncSubTab,
   onSelectTimesyncSubTab,
   timesyncTabHasBadge,
+  activeFlowSubTab,
+  onSelectFlowSubTab,
+  selectedFlowSeq,
+  onSelectFlowSeq,
   onToggleConfigPanel,
   onSelectConfigTab,
   onNodeSelect,
@@ -904,6 +916,10 @@ export function WorkspacePane({
                 onPlanStateChange={onFlowPlanStateChange}
                 verifyState={flowVerifyState}
                 onVerifyStateChange={onFlowVerifyStateChange}
+                activeFlowSubTab={activeFlowSubTab}
+                onSelectFlowSubTab={onSelectFlowSubTab}
+                selectedFlowSeq={selectedFlowSeq}
+                onSelectFlowSeq={onSelectFlowSeq}
               />
             )}
           </div>
