@@ -122,6 +122,7 @@ pub fn run() {
             inet_sim_command::get_sim_defaults,
             flow_plan_command::plan_tas,
             flow_query_command::get_flow_plan,
+            flow_query_command::update_flow_stream,
             flow_verify_command::verify_tas,
             hardware_api_config::get_hardware_api_config,
             hardware_api_config::set_hardware_api_config,

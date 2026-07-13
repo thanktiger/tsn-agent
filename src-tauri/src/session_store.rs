@@ -268,6 +268,12 @@ pub async fn connect_app_database(app: &tauri::AppHandle) -> Result<Pool<Sqlite>
         .await
         .map_err(db_error)?;
 
+    // flow_streams 5 列扩展（2026-07-13，流面板重设计 S4）：src_mac/dst_mac/vlan_id/
+    // earliest_send_offset_ns/latest_send_offset_ns；新库 FLOW_DOMAIN_SCHEMA_SQL 已含，老库 ALTER TABLE。
+    crate::db::ensure_flow_streams_extended_columns(&pool)
+        .await
+        .map_err(db_error)?;
+
     // 工程模板表（2026-07-09，落地页）：建表 + 一次性播种出厂 prompt 模板（sentinel 守卫防复活）。
     crate::db::ensure_project_templates_table(&pool)
         .await
