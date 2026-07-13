@@ -312,6 +312,25 @@ export async function invokePlanTas(sessionId: string): Promise<PlanResult> {
   return await invoke<PlanResult>("plan_tas", { request: { sessionId } });
 }
 
+/** 单流路由条目（U5，对齐 flow_query_command::FlowRouteEntry）。
+ * `linkIds` = A 平面（或单平面）链路 id 列表，格式 `"link-{seq}"`（对齐 linkRowId）；
+ * `planeBLinkIds` 仅 RC 双平面 B 路径，ST/BE 及单平面为 null。 */
+export interface FlowRouteEntry {
+  streamSeq: number;
+  linkIds: string[];
+  planeBLinkIds: string[] | null;
+}
+
+/** 路由图查询结果（U5，对齐 flow_query_command::GetFlowRouteMapResult）。 */
+export interface GetFlowRouteMapResult {
+  routes: FlowRouteEntry[];
+}
+
+/** 路由图读通道 = get_flow_route_map Tauri command（测试可注入替身）。 */
+export async function invokeGetFlowRouteMap(sessionId: string): Promise<GetFlowRouteMapResult> {
+  return await invoke<GetFlowRouteMapResult>("get_flow_route_map", { request: { sessionId } });
+}
+
 /** 默认验证写通道 = verify_tas Tauri command（测试可注入替身）。 */
 export async function invokeVerifyTas(sessionId: string): Promise<VerifyTasResult> {
   return await invoke<VerifyTasResult>("verify_tas", { request: { sessionId } });

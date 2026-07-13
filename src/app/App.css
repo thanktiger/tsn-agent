@@ -1958,6 +1958,12 @@ textarea:focus-visible {
   opacity: 0.28;
 }
 
+/* U6：flow 流选中高亮——dimmed 类淡化非选中边，配合 flow-highlighted 聚焦当前流路径。 */
+.topology-canvas .react-flow__edge.flow-dimmed {
+  opacity: 0.2;
+  transition: opacity 0.15s;
+}
+
 .topology-canvas .react-flow__node.selected .tsn-node,
 .topology-canvas .react-flow__node:focus .tsn-node {
   border-color: var(--accent);
