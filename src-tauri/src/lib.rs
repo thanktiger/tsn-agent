@@ -123,6 +123,7 @@ pub fn run() {
             flow_plan_command::plan_tas,
             flow_query_command::get_flow_plan,
             flow_query_command::list_flow_streams,
+            flow_query_command::get_flow_route_map,
             flow_verify_command::verify_tas,
             hardware_api_config::get_hardware_api_config,
             hardware_api_config::set_hardware_api_config,

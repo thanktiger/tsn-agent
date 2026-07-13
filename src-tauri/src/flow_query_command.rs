@@ -213,6 +213,114 @@ pub async fn list_flow_streams(
     list_flow_streams_inner(pool, &request.session_id).await
 }
 
+/// 单流路由条目（U5，流面板路由可视化）。`link_ids` 为 A 平面（或单平面）链路 id 列表，
+/// 格式 `"link-{seq}"`（对齐前端 `linkRowId`）；`plane_b_link_ids` 仅 RC 流的 B 平面路径，
+/// ST/BE 及单平面场景为 `None`。路由失败的流不计入结果（无 entry，无 panic）。
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct FlowRouteEntry {
+    pub stream_seq: i64,
+    pub link_ids: Vec<String>,
+    pub plane_b_link_ids: Option<Vec<String>>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetFlowRouteMapRequest {
+    pub session_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct GetFlowRouteMapResult {
+    pub routes: Vec<FlowRouteEntry>,
+}
+
+/// 只读内核：为 session 内所有流推导路由，双平面感知。
+/// - RC：`derive_redundant_routes` → A/B 两路；
+/// - ST/BE + 双平面：`derive_route(plane=Some("A"))`；
+/// - ST/BE + 单平面：`derive_route(plane=None)`；
+/// - 路由失败跳过（不返回 entry，不 panic）。
+pub async fn get_flow_route_map_inner(
+    pool: &sqlx::Pool<sqlx::Sqlite>,
+    session_id: &str,
+) -> Result<GetFlowRouteMapResult, String> {
+    let (nodes, links) = crate::flow_verify::load_route_topology(pool, session_id)
+        .await
+        .map_err(|e| format!("读拓扑失败：{e}"))?;
+
+    // 镜像 flow_plan_command.rs 双平面检测模式。
+    let dual_plane = links.iter().any(|l| crate::flow_route::link_plane(l).is_some());
+
+    let stream_rows = sqlx::query(
+        "SELECT stream_seq, class, talker, listener \
+         FROM flow_streams WHERE session_id = ? ORDER BY stream_seq",
+    )
+    .bind(session_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("读 flow_streams 失败：{e}"))?;
+
+    let mut routes: Vec<FlowRouteEntry> = Vec::new();
+    for r in &stream_rows {
+        let stream_seq: i64 = r.get("stream_seq");
+        let class: String = r.get("class");
+        let talker: String = r.get("talker");
+        let listener: String = r.get("listener");
+
+        if class == "RC" {
+            // RC 双平面：A/B 两路径，不相交断言已在录入闸通过。
+            match crate::flow_route::derive_redundant_routes(
+                &talker, &listener, &nodes, &links,
+            ) {
+                Ok((a, b)) => {
+                    let link_ids = a.link_seqs.iter().map(|s| format!("link-{s}")).collect();
+                    let plane_b_link_ids =
+                        Some(b.link_seqs.iter().map(|s| format!("link-{s}")).collect());
+                    routes.push(FlowRouteEntry {
+                        stream_seq,
+                        link_ids,
+                        plane_b_link_ids,
+                    });
+                }
+                Err(_) => {} // 路由失败 → 跳过，不 panic。
+            }
+        } else {
+            // ST/BE：双平面锁 A 平面，单平面全链路（与 flow_plan_command.rs 同逻辑）。
+            let plane = if dual_plane { Some("A") } else { None };
+            let req = crate::flow_route::RouteRequest {
+                talker: &talker,
+                listener: &listener,
+                plane,
+            };
+            match crate::flow_route::derive_route(&req, &nodes, &links) {
+                Ok(route) => {
+                    let link_ids =
+                        route.link_seqs.iter().map(|s| format!("link-{s}")).collect();
+                    routes.push(FlowRouteEntry {
+                        stream_seq,
+                        link_ids,
+                        plane_b_link_ids: None,
+                    });
+                }
+                Err(_) => {} // 路由失败 → 跳过，不 panic。
+            }
+        }
+    }
+
+    Ok(GetFlowRouteMapResult { routes })
+}
+
+#[tauri::command]
+pub async fn get_flow_route_map(
+    app: tauri::AppHandle,
+    store: tauri::State<'_, crate::session_store::SessionStore>,
+    request: GetFlowRouteMapRequest,
+) -> Result<GetFlowRouteMapResult, String> {
+    let pool = store.pool(&app).await?;
+    get_flow_route_map_inner(pool, &request.session_id).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -546,5 +654,192 @@ mod tests {
         assert!(v["vlanId"].is_null());
         assert!(v["earliestSendOffsetNs"].is_null());
         assert!(v["latestSendOffsetNs"].is_null());
+    }
+
+    // ── get_flow_route_map 测试 ────────────────────────────────────────────
+
+    /// 添加节点（mid=任意，no name）。
+    async fn add_node_r(pool: &sqlx::Pool<sqlx::Sqlite>, mid: &str) {
+        sqlx::query(
+            "INSERT INTO topology_nodes (session_id, mid, name, x, y, node_type, port_count, queue_count, insert_order) \
+             VALUES ('s1', ?, NULL, 0, 0, 'switch', 8, 8, 0)",
+        )
+        .bind(mid)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// 添加链路（plane=None 单平面，Some(p) 双平面）。
+    async fn add_link_r(
+        pool: &sqlx::Pool<sqlx::Sqlite>,
+        seq: i64,
+        src: &str,
+        sp: i64,
+        dst: &str,
+        dp: i64,
+        plane: Option<&str>,
+    ) {
+        let styles = match plane {
+            Some(p) => format!(r#"{{"plane":"{p}"}}"#),
+            None => "{}".to_string(),
+        };
+        sqlx::query(
+            "INSERT INTO topology_links (session_id, link_seq, name, src_node, dst_node, src_port, dst_port, speed, styles_json) \
+             VALUES ('s1', ?, NULL, ?, ?, ?, ?, 1000, ?)",
+        )
+        .bind(seq)
+        .bind(src)
+        .bind(dst)
+        .bind(sp)
+        .bind(dp)
+        .bind(styles)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// 添加流（仅必填列：talker/listener 可自定义）。
+    async fn add_stream_r(
+        pool: &sqlx::Pool<sqlx::Sqlite>,
+        seq: i64,
+        class: &str,
+        pcp: i64,
+        talker: &str,
+        listener: &str,
+    ) {
+        sqlx::query(
+            "INSERT INTO flow_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener) \
+             VALUES ('s1', ?, ?, ?, 500, 512, 10000, ?, ?)",
+        )
+        .bind(seq)
+        .bind(class)
+        .bind(pcp)
+        .bind(talker)
+        .bind(listener)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// 双平面 fixture：节点 0/1/2/3；A 平面 0-2-1（seq 0/1），B 平面 0-3-1（seq 2/3）。
+    async fn seed_dual_plane_r(pool: &sqlx::Pool<sqlx::Sqlite>) {
+        for mid in ["0", "1", "2", "3"] {
+            add_node_r(pool, mid).await;
+        }
+        add_link_r(pool, 0, "0", 0, "2", 0, Some("A")).await;
+        add_link_r(pool, 1, "2", 1, "1", 0, Some("A")).await;
+        add_link_r(pool, 2, "0", 1, "3", 0, Some("B")).await;
+        add_link_r(pool, 3, "3", 1, "1", 1, Some("B")).await;
+    }
+
+    /// U5①：空流集 → routes=[]。
+    #[test]
+    fn route_map_empty_streams() {
+        tauri::async_runtime::block_on(async {
+            let pool = fresh_pool().await;
+            seed_linear(&pool).await;
+            let r = get_flow_route_map_inner(&pool, "s1").await.unwrap();
+            assert!(r.routes.is_empty());
+        });
+    }
+
+    /// U5②：单平面拓扑 + ST 流 → link_ids 非空（路径 seq 0/1），plane_b_link_ids=None，
+    /// link-{seq} 格式正确。
+    #[test]
+    fn route_map_single_plane_st_stream() {
+        tauri::async_runtime::block_on(async {
+            let pool = fresh_pool().await;
+            seed_linear(&pool).await; // 节点 1→0→2，链路 seq 0/1
+            add_stream_r(&pool, 0, "ST", 7, "1", "2").await;
+            let r = get_flow_route_map_inner(&pool, "s1").await.unwrap();
+            assert_eq!(r.routes.len(), 1);
+            let entry = &r.routes[0];
+            assert_eq!(entry.stream_seq, 0);
+            assert!(!entry.link_ids.is_empty(), "ST 路径应非空");
+            assert!(entry.plane_b_link_ids.is_none());
+            // 链路 id 格式为 "link-{seq}"。
+            for id in &entry.link_ids {
+                assert!(id.starts_with("link-"), "格式应为 link-{{seq}}：{id}");
+            }
+        });
+    }
+
+    /// U5③：双平面拓扑 + ST 流 → plane_b_link_ids=None，link_ids 取 A 平面路径（seq 0/1）。
+    #[test]
+    fn route_map_dual_plane_st_locks_plane_a() {
+        tauri::async_runtime::block_on(async {
+            let pool = fresh_pool().await;
+            seed_dual_plane_r(&pool).await;
+            add_stream_r(&pool, 0, "ST", 7, "0", "1").await;
+            let r = get_flow_route_map_inner(&pool, "s1").await.unwrap();
+            assert_eq!(r.routes.len(), 1);
+            let entry = &r.routes[0];
+            assert!(entry.plane_b_link_ids.is_none(), "ST 无 B 平面路径");
+            // A 平面路径 link_seqs=[0, 1]。
+            assert_eq!(entry.link_ids, vec!["link-0", "link-1"]);
+        });
+    }
+
+    /// U5④：双平面拓扑 + RC 流 → link_ids（A 平面 seq 0/1）和 plane_b_link_ids（B 平面 seq 2/3）均非空。
+    #[test]
+    fn route_map_dual_plane_rc_has_both_planes() {
+        tauri::async_runtime::block_on(async {
+            let pool = fresh_pool().await;
+            seed_dual_plane_r(&pool).await;
+            sqlx::query(
+                "INSERT INTO flow_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener, redundant) \
+                 VALUES ('s1', 0, 'RC', 6, 500, 512, 10000, '0', '1', 1)",
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+            let r = get_flow_route_map_inner(&pool, "s1").await.unwrap();
+            assert_eq!(r.routes.len(), 1);
+            let entry = &r.routes[0];
+            assert_eq!(entry.link_ids, vec!["link-0", "link-1"]); // A 平面
+            let b = entry.plane_b_link_ids.as_ref().expect("RC 应有 B 平面路径");
+            assert_eq!(b, &vec!["link-2", "link-3"]); // B 平面
+        });
+    }
+
+    /// U5⑤：listener 不可达 → 该流无 entry（路由失败跳过，不 panic）。
+    #[test]
+    fn route_map_unreachable_listener_skipped() {
+        tauri::async_runtime::block_on(async {
+            let pool = fresh_pool().await;
+            seed_linear(&pool).await;
+            // 节点 9 孤岛，1→9 不可达。
+            add_node_r(&pool, "9").await;
+            add_stream_r(&pool, 0, "ST", 7, "1", "9").await;
+            let r = get_flow_route_map_inner(&pool, "s1").await.unwrap();
+            assert!(r.routes.is_empty(), "不可达流不应有 entry：{:?}", r.routes);
+        });
+    }
+
+    /// U5⑥：serde camelCase 契约。
+    #[test]
+    fn flow_route_entry_serializes_camel_case() {
+        let entry = FlowRouteEntry {
+            stream_seq: 3,
+            link_ids: vec!["link-0".to_string()],
+            plane_b_link_ids: Some(vec!["link-2".to_string()]),
+        };
+        let v = serde_json::to_value(&entry).unwrap();
+        assert_eq!(v["streamSeq"], 3);
+        assert_eq!(v["linkIds"][0], "link-0");
+        assert_eq!(v["planeBLinkIds"][0], "link-2");
+    }
+
+    /// U5⑦：plane_b_link_ids=None 序列化为 null（前端 null 判断）。
+    #[test]
+    fn flow_route_entry_plane_b_null_when_none() {
+        let entry = FlowRouteEntry {
+            stream_seq: 0,
+            link_ids: vec!["link-0".to_string()],
+            plane_b_link_ids: None,
+        };
+        let v = serde_json::to_value(&entry).unwrap();
+        assert!(v["planeBLinkIds"].is_null());
     }
 }
