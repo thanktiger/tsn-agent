@@ -521,12 +521,18 @@ export function initializeInputSchema(): z.ZodRawShape {
     .strict();
 
   return {
-    templateId: z.enum(["hop-linear", "dual-plane-redundant"]),
+    templateId: z.enum(["hop-linear", "star", "dual-plane-redundant"]),
     params: z
       .union([
         z
           .object({
             switchCount: z.number().int().min(1).max(12).optional(),
+            dataRateMbps: z.number().int().optional(),
+          })
+          .strict(),
+        z
+          .object({
+            endSystemCount: z.number().int().min(2).max(8).optional(),
             dataRateMbps: z.number().int().optional(),
           })
           .strict(),
