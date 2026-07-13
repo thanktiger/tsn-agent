@@ -28,6 +28,7 @@ import {
   type VerifyUiState,
   verifyAllPass,
 } from "./flow-sim";
+import { type FlowSubTab, FlowSubTabs } from "./flow-subtabs";
 import { PanelCta } from "./panel-cta";
 
 export interface FlowPanelProps {
@@ -39,6 +40,12 @@ export interface FlowPanelProps {
   onPlanStateChange: (state: PlanUiState) => void;
   verifyState: VerifyUiState;
   onVerifyStateChange: (state: VerifyUiState) => void;
+  /** 流量规划面板当前子 tab（App 级，随会话重置）。 */
+  activeFlowSubTab: FlowSubTab;
+  onSelectFlowSubTab: (tab: FlowSubTab) => void;
+  /** 选中流量序号（flow-list 子 tab 用，null 表示未选；随会话重置）。 */
+  selectedFlowSeq: number | null;
+  onSelectFlowSeq: (seq: number | null) => void;
   /** 写通道（测试注入替身）。 */
   planTas?: (sessionId: string) => Promise<PlanResult>;
   verifyTas?: (sessionId: string) => Promise<VerifyTasResult>;
@@ -53,6 +60,8 @@ export function FlowPanel({
   onPlanStateChange,
   verifyState,
   onVerifyStateChange,
+  activeFlowSubTab,
+  onSelectFlowSubTab,
   planTas = invokePlanTas,
   verifyTas = invokeVerifyTas,
   getFlowPlan = invokeGetFlowPlan,
@@ -164,59 +173,113 @@ export function FlowPanel({
       role="tabpanel"
       aria-label="流量规划"
     >
-      {/* 命令栏（对齐 timesync-commandbar）：左侧 R21 诚实边界常驻标注，右侧操作按钮。
-          渐进式（KTD3）：未规划态规划按钮在 body CTA，有结果后收进右上角。 */}
-      <div className="timesync-commandbar flow-commandbar">
-        <p className="flow-honesty-note">仿真实测 · 非 T10 硬件判决</p>
-        <div className="timesync-commandbar__actions" role="group" aria-label="流量规划操作">
-          {!fresh && !idleLoading && (
-            <button
-              type="button"
-              className="btn primary"
+      <FlowSubTabs activeSubTab={activeFlowSubTab} onSelectSubTab={onSelectFlowSubTab} />
+
+      {activeFlowSubTab === "flow-list" && (
+        <div
+          key={sessionId}
+          id="flow-subpanel-flow-list"
+          role="tabpanel"
+          aria-labelledby="flow-subtab-flow-list"
+          className="flow-subpanel"
+        >
+          <div className="empty-panel mono">流量列表</div>
+        </div>
+      )}
+
+      {activeFlowSubTab === "gate-plan" && (
+        <div
+          key={sessionId}
+          id="flow-subpanel-gate-plan"
+          role="tabpanel"
+          aria-labelledby="flow-subtab-gate-plan"
+          className="flow-subpanel"
+        >
+          {/* 命令栏：右侧规划按钮。渐进式（KTD3）：未规划态规划按钮在 body CTA，有结果后收进右上角。 */}
+          <div className="timesync-commandbar flow-commandbar">
+            <div className="timesync-commandbar__actions" role="group" aria-label="门控规划操作">
+              {!fresh && !idleLoading && (
+                <button
+                  type="button"
+                  className="btn primary"
+                  onClick={() => void handlePlan()}
+                  disabled={planDisabled}
+                >
+                  {planning ? "综合中…（分钟级）" : "重新规划"}
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* R22：分钟级综合进行中反馈。 */}
+          {planning && <p className="flow-progress mono">正在跑 Z3 门控综合，分钟级，请稍候…</p>}
+
+          {idleLoading ? null : fresh ? (
+            <PanelCta
+              label="规划门控表"
+              hint="用 INET Z3 配置器综合 802.1Qbv 门控表（GCL），结果落库并在此可视化。"
               onClick={() => void handlePlan()}
               disabled={planDisabled}
-            >
-              {planning ? "综合中…（分钟级）" : "重新规划"}
-            </button>
+              title={!inFlowStage ? "请先进入流量规划阶段" : undefined}
+            />
+          ) : (
+            <PlanResultArea planState={planState} planQuery={planQuery} />
           )}
-          <button
-            type="button"
-            className="btn"
-            onClick={() => void handleVerify()}
-            disabled={verifyDisabled}
-            title={!havePlan ? "请先规划出门控表" : undefined}
-          >
-            {verifying ? "软仿中…（分钟级）" : "软仿验证"}
-          </button>
+
+          {/*
+            R4：RC 流的 redundant/paths 字段「仅 RC 才显」是**录入表单**规则；本面板是规划/软仿
+            结果面板，本期不建录入表单（流经会话 agent 录入）。表单条件渲染代码留后续面板 PR，
+            显隐规则已在 plan/U9 固化为规格。
+          */}
         </div>
-      </div>
-
-      {/* R22：分钟级综合/软仿进行中反馈（U7：含 RC 流时为三轮，逐轮分钟级）。 */}
-      {planning && <p className="flow-progress mono">正在跑 Z3 门控综合，分钟级，请稍候…</p>}
-      {verifying && (
-        <p className="flow-progress mono">
-          正在跑 pin 软仿实测（含 RC 流时为健康+断A+断B 三轮，逐轮分钟级），请稍候…
-        </p>
       )}
 
-      {idleLoading ? null : fresh ? (
-        <PanelCta
-          label="规划门控表"
-          hint="用 INET Z3 配置器综合 802.1Qbv 门控表（GCL），结果落库并在此可视化。"
-          onClick={() => void handlePlan()}
-          disabled={planDisabled}
-          title={!inFlowStage ? "请先进入流量规划阶段" : undefined}
-        />
-      ) : (
-        <PlanResultArea planState={planState} planQuery={planQuery} />
-      )}
-      <VerifyResultArea verifyState={verifyState} />
+      {activeFlowSubTab === "soft-sim" && (
+        <div
+          key={sessionId}
+          id="flow-subpanel-soft-sim"
+          role="tabpanel"
+          aria-labelledby="flow-subtab-soft-sim"
+          className="flow-subpanel"
+        >
+          {/* 命令栏（对齐 timesync-commandbar）：左侧 R21 诚实边界常驻标注，右侧软仿按钮。 */}
+          <div className="timesync-commandbar flow-commandbar">
+            <p className="flow-honesty-note">仿真实测 · 非 T10 硬件判决</p>
+            <div className="timesync-commandbar__actions" role="group" aria-label="软仿操作">
+              <button
+                type="button"
+                className="btn"
+                onClick={() => void handleVerify()}
+                disabled={verifyDisabled}
+                title={!havePlan ? "请先规划出门控表" : undefined}
+              >
+                {verifying ? "软仿中…（分钟级）" : "软仿验证"}
+              </button>
+            </div>
+          </div>
 
-      {/*
-        R4：RC 流的 redundant/paths 字段「仅 RC 才显」是**录入表单**规则；本面板是规划/软仿
-        结果面板，本期不建录入表单（流经会话 agent 录入）。表单条件渲染代码留后续面板 PR，
-        显隐规则已在 plan/U9 固化为规格。
-      */}
+          {/* R22：分钟级软仿进行中反馈（U7：含 RC 流时为三轮，逐轮分钟级）。 */}
+          {verifying && (
+            <p className="flow-progress mono">
+              正在跑 pin 软仿实测（含 RC 流时为健康+断A+断B 三轮，逐轮分钟级），请稍候…
+            </p>
+          )}
+
+          <VerifyResultArea verifyState={verifyState} />
+        </div>
+      )}
+
+      {activeFlowSubTab === "hw-deploy" && (
+        <div
+          key={sessionId}
+          id="flow-subpanel-hw-deploy"
+          role="tabpanel"
+          aria-labelledby="flow-subtab-hw-deploy"
+          className="flow-subpanel"
+        >
+          <div className="empty-panel mono">硬件部署即将推出</div>
+        </div>
+      )}
     </section>
   );
 }
