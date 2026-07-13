@@ -825,6 +825,24 @@ describe("initializeInputSchema dual-plane narrowing (U2)", () => {
   });
 });
 
+describe("initializeInputSchema star template", () => {
+  const schema = z.object(initializeInputSchema());
+
+  it("accepts templateId=star with endSystemCount params", () => {
+    const result = schema.safeParse({
+      templateId: "star",
+      params: { endSystemCount: 4, dataRateMbps: 1000 },
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects endSystemCount outside [2, 8]", () => {
+    expect(schema.safeParse({ templateId: "star", params: { endSystemCount: 9 } }).success).toBe(
+      false,
+    );
+  });
+});
+
 describe("timesync MCP tool registry", () => {
   beforeEach(() => {
     fetchSidecarMock.mockReset();
