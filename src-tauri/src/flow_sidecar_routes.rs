@@ -438,6 +438,26 @@ pub async fn inspect(
     ok_summary(json!({ "streams": streams, "plans": plans }))
 }
 
+// ---------- update_stream ----------
+
+pub async fn update_stream(
+    State(state): State<Arc<RouteState>>,
+    Json(req): Json<crate::flow_query_command::UpdateFlowStreamRequest>,
+) -> Response {
+    if let Err(resp) = require_session(&state.pool, &req.session_id).await {
+        return resp;
+    }
+
+    match crate::flow_query_command::update_flow_stream_inner(&state.pool, &req).await {
+        Ok(()) => push_and_summary(
+            &state,
+            &req.session_id,
+            json!({ "streamSeq": req.stream_seq }),
+        ),
+        Err(e) => structured_error(StatusCode::UNPROCESSABLE_ENTITY, "UPDATE_FAILED", &e, true),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

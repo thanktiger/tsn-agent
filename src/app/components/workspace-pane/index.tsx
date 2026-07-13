@@ -275,12 +275,16 @@ export function WorkspacePane({
 
   // U6：flow 路由图——选中流高亮画布边（flow tab 激活时拉取，DB 变更驱动重拉）。
   const [flowRouteMap, setFlowRouteMap] = useState<Map<number, FlowRouteEntry>>(new Map());
+  const routeMapReqRef = useRef(0);
 
   const doFetchFlowRouteMap = useCallback(() => {
     if (activeConfigTab !== "flow") return;
+    const seq = ++routeMapReqRef.current;
     void invokeGetFlowRouteMap(sessionId)
       .then((result) => {
-        setFlowRouteMap(new Map(result.routes.map((r) => [r.streamSeq, r])));
+        if (routeMapReqRef.current === seq) {
+          setFlowRouteMap(new Map(result.routes.map((r) => [r.streamSeq, r])));
+        }
       })
       .catch(() => {
         // 非致命：保留现有 map，等下次触发
@@ -1020,7 +1024,7 @@ function isTopologyAnimationActive(simState: SimUiState, hardwareState: Hardware
 
 /** U6：按选中流量序号装饰画布边——命中边加 flow-highlighted，其余边加 flow-dimmed。
  * selectedFlowSeq 为 null 或 flowRouteMap 无对应条目时原样返回（无装饰）。 */
-function decorateFlowHighlightEdges(
+export function decorateFlowHighlightEdges(
   edges: Edge[],
   selectedFlowSeq: number | null,
   flowRouteMap: Map<number, FlowRouteEntry>,

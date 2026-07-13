@@ -63,11 +63,13 @@ export function FlowDetailModal({ stream, sessionId, onClose, onSaved }: FlowDet
   const [isSaving, setIsSaving] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  // stream 变更时重置表单状态。
+  // stream 变更时重置表单状态；stream 清空时擦除旧表单（避免弹窗再开时闪旧值）。
   useEffect(() => {
     if (stream) {
       setForm(initialFormFromStream(stream));
       setErrorMessage(null);
+    } else {
+      setForm(null);
     }
   }, [stream]);
 
@@ -126,6 +128,7 @@ export function FlowDetailModal({ stream, sessionId, onClose, onSaved }: FlowDet
         className="flow-detail-modal-backdrop"
         aria-label="关闭流量详情"
         onClick={onClose}
+        disabled={isSaving}
       />
       <section
         className="flow-detail-modal"

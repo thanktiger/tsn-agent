@@ -4475,3 +4475,190 @@ textarea:focus-visible {
 .topology-save-template-input:focus {
   outline: none;
 }
+
+/* flow 面板子标签页 */
+.flow-subtabs {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  background: #eef1f5;
+  border-radius: 8px;
+}
+.flow-subtab {
+  appearance: none;
+  border: none;
+  background: transparent;
+  padding: 5px 16px;
+  border-radius: 6px;
+  font-size: 13px;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition:
+    background 0.12s ease,
+    color 0.12s ease;
+}
+.flow-subtab:hover {
+  color: var(--text);
+}
+.flow-subtab.active {
+  background: #ffffff;
+  color: var(--accent);
+  font-weight: 600;
+  box-shadow: 0 1px 2px rgba(31, 41, 55, 0.12);
+}
+.flow-subtab:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* flow 流列表 */
+.flow-stream-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px;
+  overflow-y: auto;
+}
+.flow-stream-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition:
+    background 0.1s ease,
+    border-color 0.1s ease;
+}
+.flow-stream-row:hover {
+  background: var(--bg-secondary);
+}
+.flow-stream-row.selected {
+  background: #edf3ff;
+  border-color: var(--accent);
+}
+.flow-stream-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 20px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 700;
+  color: #fff;
+  flex-shrink: 0;
+}
+.flow-stream-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+.flow-stream-seq {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.flow-stream-route {
+  font-size: 13px;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.flow-stream-meta {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.flow-stream-detail-btn {
+  flex-shrink: 0;
+}
+
+/* flow 详情弹窗 */
+.flow-detail-modal-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.flow-detail-modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.35);
+  border: none;
+  cursor: pointer;
+}
+.flow-detail-modal-backdrop:disabled {
+  cursor: default;
+}
+.flow-detail-modal {
+  position: relative;
+  z-index: 1;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 24px;
+  width: 380px;
+  max-width: 95vw;
+  max-height: 80vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.18);
+}
+.flow-detail-modal h3 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.flow-detail-readonly {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 12px;
+  font-size: 13px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 4px;
+}
+.flow-detail-label {
+  color: var(--text-muted);
+}
+.flow-detail-modal label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+.flow-detail-modal input[type="number"],
+.flow-detail-modal input[type="text"] {
+  height: 32px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-size: 13px;
+}
+.flow-detail-modal input:disabled {
+  opacity: 0.6;
+}
+.flow-detail-modal-error {
+  color: #c0392b;
+  font-size: 12px;
+  margin: 0;
+}
+.flow-detail-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 4px;
+}
