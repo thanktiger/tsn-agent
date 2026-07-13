@@ -327,6 +327,27 @@ export interface ListFlowStreamsResult {
   streams: ListFlowStreamRow[];
 }
 
+/** 流更新请求（对齐 flow_query_command::UpdateFlowStreamRequest）。
+ * class/pcp 为只读字段（PCP 由 class 派生），故不在请求中。 */
+export interface UpdateFlowStreamRequest {
+  sessionId: string;
+  streamSeq: number;
+  periodUs: number;
+  frameBytes: number;
+  count: number;
+  maxLatencyUs: number | null;
+  srcMac: string | null;
+  dstMac: string | null;
+  vlanId: number | null;
+  earliestSendOffsetNs: number | null;
+  latestSendOffsetNs: number | null;
+}
+
+/** 流更新写通道 = update_flow_stream Tauri command（测试可注入替身）。 */
+export async function invokeUpdateFlowStream(request: UpdateFlowStreamRequest): Promise<void> {
+  return await invoke<void>("update_flow_stream", { request });
+}
+
 /** 默认门控明细读通道 = get_flow_plan Tauri command（测试可注入替身）。 */
 export async function invokeGetFlowPlan(sessionId: string): Promise<FlowPlanDetail> {
   return await invoke<FlowPlanDetail>("get_flow_plan", { request: { sessionId } });

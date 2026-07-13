@@ -321,6 +321,130 @@ pub async fn get_flow_route_map(
     get_flow_route_map_inner(pool, &request.session_id).await
 }
 
+// ── update_flow_stream（U7）──────────────────────────────────────────────────
+
+/// 流更新请求：session_id + stream_seq（不可变身份键）+ 可变字段（无 class/pcp，
+/// 由 DB 读出后合进 StreamInput，保持 class↔pcp 固定映射不变）。
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateFlowStreamRequest {
+    pub session_id: String,
+    pub stream_seq: i64,
+    pub period_us: i64,
+    pub frame_bytes: i64,
+    pub count: i64,
+    pub max_latency_us: Option<i64>,
+    pub src_mac: Option<String>,
+    pub dst_mac: Option<String>,
+    pub vlan_id: Option<i64>,
+    pub earliest_send_offset_ns: Option<i64>,
+    pub latest_send_offset_ns: Option<i64>,
+}
+
+/// 写前验证 + 快照 + UPDATE 内核（可注入 pool 供单测）。
+pub async fn update_flow_stream_inner(
+    pool: &sqlx::Pool<sqlx::Sqlite>,
+    req: &UpdateFlowStreamRequest,
+) -> Result<(), String> {
+    // 1. 读不可变字段（class/pcp 决定 verify_flow 路径，talker/listener 决定节点存在性检查）。
+    let row = sqlx::query(
+        "SELECT class, pcp, talker, listener, src_ip, dst_ip, src_l4_port, dst_l4_port, \
+         l4_protocol, redundant, paths FROM flow_streams WHERE session_id = ? AND stream_seq = ?",
+    )
+    .bind(&req.session_id)
+    .bind(req.stream_seq)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| format!("读 flow_streams 失败：{e}"))?
+    .ok_or_else(|| format!("stream_seq={} 不存在", req.stream_seq))?;
+
+    // 2. 合入请求可变字段构造 StreamInput。
+    let stream_input = crate::flow_verify::StreamInput {
+        class: row.get("class"),
+        pcp: row.get("pcp"),
+        period_us: req.period_us,
+        frame_bytes: req.frame_bytes,
+        count: req.count,
+        talker: row.get("talker"),
+        listener: row.get("listener"),
+        src_ip: row.get("src_ip"),
+        dst_ip: row.get("dst_ip"),
+        src_l4_port: row.get("src_l4_port"),
+        dst_l4_port: row.get("dst_l4_port"),
+        l4_protocol: row.get("l4_protocol"),
+        max_latency_us: req.max_latency_us,
+        redundant: row.get("redundant"),
+        paths: row.get("paths"),
+    };
+
+    // 3. 结构校验（class/pcp 不变，重跑以防节点已删或周期越界）。
+    let errors = crate::flow_verify::verify_flow(pool, &req.session_id, &stream_input)
+        .await
+        .map_err(|e| format!("校验失败：{e}"))?;
+    if !errors.is_empty() {
+        let msgs: Vec<String> = errors.iter().map(|e| e.message_zh.clone()).collect();
+        return Err(format!("流量校验不通过：{}", msgs.join("；")));
+    }
+
+    // 4. 开事务。
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| format!("开事务失败：{e}"))?;
+
+    // 5. 写前快照（flow domain，撤销留位）。
+    crate::topology_undo::snapshot_pre_image(
+        &mut tx,
+        &req.session_id,
+        crate::topology_undo::FLOW_DOMAIN,
+    )
+    .await
+    .map_err(|e| format!("快照失败：{e}"))?;
+
+    // 6. 全列 UPDATE（含可空列）。
+    let result = sqlx::query(
+        "UPDATE flow_streams SET period_us=?, frame_bytes=?, count=?, max_latency_us=?, \
+         src_mac=?, dst_mac=?, vlan_id=?, earliest_send_offset_ns=?, latest_send_offset_ns=? \
+         WHERE session_id=? AND stream_seq=?",
+    )
+    .bind(req.period_us)
+    .bind(req.frame_bytes)
+    .bind(req.count)
+    .bind(req.max_latency_us)
+    .bind(&req.src_mac)
+    .bind(&req.dst_mac)
+    .bind(req.vlan_id)
+    .bind(req.earliest_send_offset_ns)
+    .bind(req.latest_send_offset_ns)
+    .bind(&req.session_id)
+    .bind(req.stream_seq)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| format!("更新 flow_streams 失败：{e}"))?;
+
+    // 7. 并发竞态守卫（SELECT 后到 UPDATE 前被删）。
+    if result.rows_affected() == 0 {
+        return Err(format!("stream_seq={} 不存在", req.stream_seq));
+    }
+
+    // 8. 提交。
+    tx.commit()
+        .await
+        .map_err(|e| format!("提交失败：{e}"))?;
+
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn update_flow_stream(
+    app: tauri::AppHandle,
+    store: tauri::State<'_, crate::session_store::SessionStore>,
+    request: UpdateFlowStreamRequest,
+) -> Result<(), String> {
+    let pool = store.pool(&app).await?;
+    update_flow_stream_inner(pool, &request).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -841,5 +965,171 @@ mod tests {
         };
         let v = serde_json::to_value(&entry).unwrap();
         assert!(v["planeBLinkIds"].is_null());
+    }
+
+    // ── update_flow_stream 测试 ──────────────────────────────────────────────
+
+    fn make_update_req() -> UpdateFlowStreamRequest {
+        UpdateFlowStreamRequest {
+            session_id: "s1".to_string(),
+            stream_seq: 0,
+            period_us: 500,
+            frame_bytes: 512,
+            count: 10000,
+            max_latency_us: None,
+            src_mac: None,
+            dst_mac: None,
+            vlan_id: None,
+            earliest_send_offset_ns: None,
+            latest_send_offset_ns: None,
+        }
+    }
+
+    /// U7①：合法更新 → 全可变列写入 DB。
+    #[test]
+    fn update_flow_stream_updates_fields() {
+        tauri::async_runtime::block_on(async {
+            let pool = fresh_pool().await;
+            seed_linear(&pool).await;
+            add_stream(&pool, 0, "ST", 7).await;
+            let req = UpdateFlowStreamRequest {
+                period_us: 250,
+                frame_bytes: 256,
+                count: 5000,
+                max_latency_us: Some(800),
+                src_mac: Some("00:11:22:33:44:55".to_string()),
+                dst_mac: Some("aa:bb:cc:dd:ee:ff".to_string()),
+                vlan_id: Some(10),
+                earliest_send_offset_ns: Some(1000),
+                latest_send_offset_ns: Some(2000),
+                ..make_update_req()
+            };
+            update_flow_stream_inner(&pool, &req).await.unwrap();
+            let row = sqlx::query(
+                "SELECT period_us, frame_bytes, count, max_latency_us, src_mac, dst_mac, \
+                 vlan_id, earliest_send_offset_ns, latest_send_offset_ns \
+                 FROM flow_streams WHERE session_id='s1' AND stream_seq=0",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(row.get::<i64, _>("period_us"), 250);
+            assert_eq!(row.get::<i64, _>("frame_bytes"), 256);
+            assert_eq!(row.get::<i64, _>("count"), 5000);
+            assert_eq!(row.get::<Option<i64>, _>("max_latency_us"), Some(800));
+            assert_eq!(
+                row.get::<Option<String>, _>("src_mac").as_deref(),
+                Some("00:11:22:33:44:55")
+            );
+            assert_eq!(
+                row.get::<Option<String>, _>("dst_mac").as_deref(),
+                Some("aa:bb:cc:dd:ee:ff")
+            );
+            assert_eq!(row.get::<Option<i64>, _>("vlan_id"), Some(10));
+            assert_eq!(
+                row.get::<Option<i64>, _>("earliest_send_offset_ns"),
+                Some(1000)
+            );
+            assert_eq!(
+                row.get::<Option<i64>, _>("latest_send_offset_ns"),
+                Some(2000)
+            );
+        });
+    }
+
+    /// U7②：period_us=0 → verify_flow 返回 INVALID_PERIOD → Err，DB 不写。
+    #[test]
+    fn update_flow_stream_invalid_period_rejected() {
+        tauri::async_runtime::block_on(async {
+            let pool = fresh_pool().await;
+            seed_linear(&pool).await;
+            add_stream(&pool, 0, "ST", 7).await;
+            let req = UpdateFlowStreamRequest {
+                period_us: 0,
+                ..make_update_req()
+            };
+            let err = update_flow_stream_inner(&pool, &req).await.unwrap_err();
+            assert!(err.contains("校验不通过"), "应含校验不通过：{err}");
+            let period: i64 = sqlx::query_scalar(
+                "SELECT period_us FROM flow_streams WHERE session_id='s1' AND stream_seq=0",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(period, 500, "DB 不应被改动");
+        });
+    }
+
+    /// U7③：stream_seq 不存在 → SELECT 提前返回 Err。
+    #[test]
+    fn update_flow_stream_stream_not_found() {
+        tauri::async_runtime::block_on(async {
+            let pool = fresh_pool().await;
+            seed_linear(&pool).await;
+            let req = UpdateFlowStreamRequest {
+                stream_seq: 99,
+                ..make_update_req()
+            };
+            let err = update_flow_stream_inner(&pool, &req).await.unwrap_err();
+            assert!(
+                err.contains("不存在") || err.contains("99"),
+                "应报不存在：{err}"
+            );
+        });
+    }
+
+    /// U7④：可空列 max_latency_us/src_mac 均 None → DB 写 NULL（覆盖原有非空值）。
+    #[test]
+    fn update_flow_stream_null_optional_cols() {
+        tauri::async_runtime::block_on(async {
+            let pool = fresh_pool().await;
+            seed_linear(&pool).await;
+            sqlx::query(
+                "INSERT INTO flow_streams (session_id, stream_seq, class, pcp, period_us, \
+                 frame_bytes, count, talker, listener, max_latency_us, src_mac) \
+                 VALUES ('s1', 0, 'ST', 7, 500, 512, 10000, '1', '2', 1000, 'aa:bb:cc:dd:ee:ff')",
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+            let req = make_update_req();
+            update_flow_stream_inner(&pool, &req).await.unwrap();
+            let row = sqlx::query(
+                "SELECT max_latency_us, src_mac FROM flow_streams \
+                 WHERE session_id='s1' AND stream_seq=0",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert!(
+                row.get::<Option<i64>, _>("max_latency_us").is_none(),
+                "max_latency_us 应为 NULL"
+            );
+            assert!(
+                row.get::<Option<String>, _>("src_mac").is_none(),
+                "src_mac 应为 NULL"
+            );
+        });
+    }
+
+    /// U7⑤：成功更新后 topology_undo_snapshots 有 domain='flow' 快照（snapshot_pre_image 已调）。
+    #[test]
+    fn update_flow_stream_snapshot_created() {
+        tauri::async_runtime::block_on(async {
+            let pool = fresh_pool().await;
+            seed_linear(&pool).await;
+            add_stream(&pool, 0, "ST", 7).await;
+            update_flow_stream_inner(&pool, &make_update_req())
+                .await
+                .unwrap();
+            let count: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM topology_undo_snapshots \
+                 WHERE session_id='s1' AND domain='flow'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(count, 1, "应有 flow domain 快照");
+        });
     }
 }
