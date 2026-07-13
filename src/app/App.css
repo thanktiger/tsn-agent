@@ -2804,6 +2804,111 @@ textarea:focus-visible {
   list-style: none;
 }
 
+/* U8：流量详情弹窗（FlowDetailModal）——对齐 timesync-tree-modal 层叠结构。 */
+.flow-detail-modal-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.flow-detail-modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  border: none;
+  cursor: default;
+  padding: 0;
+}
+
+.flow-detail-modal {
+  position: relative;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 24px;
+  min-width: 400px;
+  max-width: 560px;
+  max-height: 80vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.18);
+}
+
+.flow-detail-modal h3 {
+  margin: 0 0 8px;
+  font-size: 15px;
+}
+
+.flow-detail-modal label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+}
+
+.flow-detail-modal input {
+  padding: 4px 8px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+.flow-detail-readonly {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 12px;
+  font-size: 12px;
+  align-items: center;
+  margin-bottom: 4px;
+}
+
+.flow-detail-label {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.flow-detail-modal-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 8px;
+}
+
+.flow-detail-modal-error {
+  color: #b91c1c;
+  font-size: 12px;
+  margin: 0;
+}
+
+/* U8：重规划提示 banner（流量参数变更后提示重新规划门控表）。 */
+.flow-replan-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 12px;
+  background: #f5a623;
+  color: #000;
+  font-size: 12px;
+  border-radius: 4px;
+  margin-bottom: 6px;
+}
+
+.flow-replan-banner button {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+  padding: 0 2px;
+}
+
 .config-tabs {
   display: flex;
   align-items: center;

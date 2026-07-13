@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useSessionDbListener } from "../../hooks/use-session-db-listener";
 import { CHART_COLORS } from "./chart-palette";
+import { FlowDetailModal } from "./flow-detail-modal";
 import {
   buildGateTimelineRows,
   type FlowPlanDetail,
@@ -82,6 +83,10 @@ export function FlowPanel({
   const sessionIdRef = useRef(sessionId);
   sessionIdRef.current = sessionId;
 
+  // U8：详情弹窗 + 重规划提示 banner（切会话重置）。
+  const [openModalStream, setOpenModalStream] = useState<ListFlowStreamRow | null>(null);
+  const [bannerVisible, setBannerVisible] = useState(false);
+
   // U2/KTD1：门控明细查询态——面板挂载即拉，展示态由数据推导（切会话回来凭数据恢复）。
   const [planQuery, setPlanQuery] = useState<FlowPlanQueryState>({ status: "loading" });
   // 单一取数口径：三触发源（挂载·切会话 / 规划完成 / flow domain DB 变更）共用；requestSeq 丢弃
@@ -130,10 +135,12 @@ export function FlowPanel({
     }
   }, [listFlowStreams, sessionId]);
 
-  // 挂载 / 切会话：先清旧数据回 loading，再取。
+  // 挂载 / 切会话：先清旧数据回 loading，再取；同时重置 U8 弹窗和 banner。
   useEffect(() => {
     setStreams([]);
     setStreamsLoading(true);
+    setOpenModalStream(null);
+    setBannerVisible(false);
     void refreshStreams();
   }, [refreshStreams]);
 
@@ -218,6 +225,16 @@ export function FlowPanel({
     >
       <FlowSubTabs activeSubTab={activeFlowSubTab} onSelectSubTab={onSelectFlowSubTab} />
 
+      {/* U8：重规划提示 banner（参数变更后在 flow-list 子 tab 顶部显示）。 */}
+      {activeFlowSubTab === "flow-list" && bannerVisible && (
+        <div className="flow-replan-banner">
+          <span>流量参数已变更，建议重新规划门控表</span>
+          <button type="button" onClick={() => setBannerVisible(false)} aria-label="关闭">
+            ×
+          </button>
+        </div>
+      )}
+
       {activeFlowSubTab === "flow-list" && (
         <div
           key={sessionId}
@@ -230,7 +247,7 @@ export function FlowPanel({
             streams={streams}
             selectedFlowSeq={selectedFlowSeq}
             onSelectFlowSeq={onSelectFlowSeq}
-            onOpenDetail={() => {}}
+            onOpenDetail={(s) => setOpenModalStream(s)}
             inFlowStage={inFlowStage}
             isLoading={streamsLoading}
           />
@@ -330,6 +347,18 @@ export function FlowPanel({
           <div className="empty-panel mono">硬件部署即将推出</div>
         </div>
       )}
+
+      {/* U8：流量详情弹窗（portal 级，渲染在所有子 tab 内容之外）。 */}
+      <FlowDetailModal
+        stream={openModalStream}
+        sessionId={sessionId}
+        onClose={() => setOpenModalStream(null)}
+        onSaved={(didChangePlanningFields) => {
+          if (didChangePlanningFields) setBannerVisible(true);
+          // 保存后重拉流集（反映更新后的数据）。
+          void invokeListFlowStreams(sessionId).then((r) => setStreams(r.streams));
+        }}
+      />
     </section>
   );
 }
