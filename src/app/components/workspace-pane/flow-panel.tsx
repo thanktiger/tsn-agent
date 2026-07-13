@@ -356,7 +356,7 @@ export function FlowPanel({
         onSaved={(didChangePlanningFields) => {
           if (didChangePlanningFields) setBannerVisible(true);
           // 保存后重拉流集（反映更新后的数据）。
-          void invokeListFlowStreams(sessionId).then((r) => setStreams(r.streams));
+          void refreshStreams();
         }}
       />
     </section>

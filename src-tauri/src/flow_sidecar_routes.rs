@@ -356,7 +356,8 @@ pub async fn inspect(
 
     let stream_rows = match sqlx::query(
         r#"SELECT stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener,
-                  max_latency_us, redundant, paths
+                  max_latency_us, redundant, paths,
+                  src_mac, dst_mac, vlan_id, earliest_send_offset_ns, latest_send_offset_ns
            FROM flow_streams WHERE session_id = ? ORDER BY stream_seq"#,
     )
     .bind(&req.session_id)
@@ -388,6 +389,11 @@ pub async fn inspect(
                 "maxLatencyUs": r.get::<Option<i64>, _>("max_latency_us"),
                 "redundant": r.get::<i64, _>("redundant"),
                 "paths": r.get::<Option<String>, _>("paths"),
+                "srcMac": r.get::<Option<String>, _>("src_mac"),
+                "dstMac": r.get::<Option<String>, _>("dst_mac"),
+                "vlanId": r.get::<Option<i64>, _>("vlan_id"),
+                "earliestSendOffsetNs": r.get::<Option<i64>, _>("earliest_send_offset_ns"),
+                "latestSendOffsetNs": r.get::<Option<i64>, _>("latest_send_offset_ns"),
             })
         })
         .collect();

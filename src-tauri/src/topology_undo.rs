@@ -123,10 +123,15 @@ struct FlowStreamRow {
     max_latency_us: Option<i64>,
     redundant: i64,
     paths: Option<String>,
+    #[serde(default)]
     src_mac: Option<String>,
+    #[serde(default)]
     dst_mac: Option<String>,
+    #[serde(default)]
     vlan_id: Option<i64>,
+    #[serde(default)]
     earliest_send_offset_ns: Option<i64>,
+    #[serde(default)]
     latest_send_offset_ns: Option<i64>,
 }
 
