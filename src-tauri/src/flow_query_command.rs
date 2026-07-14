@@ -250,7 +250,9 @@ pub async fn get_flow_route_map_inner(
         .map_err(|e| format!("读拓扑失败：{e}"))?;
 
     // 镜像 flow_plan_command.rs 双平面检测模式。
-    let dual_plane = links.iter().any(|l| crate::flow_route::link_plane(l).is_some());
+    let dual_plane = links
+        .iter()
+        .any(|l| crate::flow_route::link_plane(l).is_some());
 
     let stream_rows = sqlx::query(
         "SELECT stream_seq, class, talker, listener \
@@ -269,21 +271,18 @@ pub async fn get_flow_route_map_inner(
         let listener: String = r.get("listener");
 
         if class == "RC" {
-            // RC 双平面：A/B 两路径，不相交断言已在录入闸通过。
-            match crate::flow_route::derive_redundant_routes(
-                &talker, &listener, &nodes, &links,
-            ) {
-                Ok((a, b)) => {
-                    let link_ids = a.link_seqs.iter().map(|s| format!("link-{s}")).collect();
-                    let plane_b_link_ids =
-                        Some(b.link_seqs.iter().map(|s| format!("link-{s}")).collect());
-                    routes.push(FlowRouteEntry {
-                        stream_seq,
-                        link_ids,
-                        plane_b_link_ids,
-                    });
-                }
-                Err(_) => {} // 路由失败 → 跳过，不 panic。
+            // RC 双平面：A/B 两路径，不相交断言已在录入闸通过。路由失败 → 跳过，不 panic。
+            if let Ok((a, b)) =
+                crate::flow_route::derive_redundant_routes(&talker, &listener, &nodes, &links)
+            {
+                let link_ids = a.link_seqs.iter().map(|s| format!("link-{s}")).collect();
+                let plane_b_link_ids =
+                    Some(b.link_seqs.iter().map(|s| format!("link-{s}")).collect());
+                routes.push(FlowRouteEntry {
+                    stream_seq,
+                    link_ids,
+                    plane_b_link_ids,
+                });
             }
         } else {
             // ST/BE：双平面锁 A 平面，单平面全链路（与 flow_plan_command.rs 同逻辑）。
@@ -293,17 +292,18 @@ pub async fn get_flow_route_map_inner(
                 listener: &listener,
                 plane,
             };
-            match crate::flow_route::derive_route(&req, &nodes, &links) {
-                Ok(route) => {
-                    let link_ids =
-                        route.link_seqs.iter().map(|s| format!("link-{s}")).collect();
-                    routes.push(FlowRouteEntry {
-                        stream_seq,
-                        link_ids,
-                        plane_b_link_ids: None,
-                    });
-                }
-                Err(_) => {} // 路由失败 → 跳过，不 panic。
+            // 路由失败 → 跳过，不 panic。
+            if let Ok(route) = crate::flow_route::derive_route(&req, &nodes, &links) {
+                let link_ids = route
+                    .link_seqs
+                    .iter()
+                    .map(|s| format!("link-{s}"))
+                    .collect();
+                routes.push(FlowRouteEntry {
+                    stream_seq,
+                    link_ids,
+                    plane_b_link_ids: None,
+                });
             }
         }
     }
@@ -387,10 +387,7 @@ pub async fn update_flow_stream_inner(
     }
 
     // 4. 开事务。
-    let mut tx = pool
-        .begin()
-        .await
-        .map_err(|e| format!("开事务失败：{e}"))?;
+    let mut tx = pool.begin().await.map_err(|e| format!("开事务失败：{e}"))?;
 
     // 5. 写前快照（flow domain，撤销留位）。
     crate::topology_undo::snapshot_pre_image(
@@ -428,9 +425,7 @@ pub async fn update_flow_stream_inner(
     }
 
     // 8. 提交。
-    tx.commit()
-        .await
-        .map_err(|e| format!("提交失败：{e}"))?;
+    tx.commit().await.map_err(|e| format!("提交失败：{e}"))?;
 
     Ok(())
 }
@@ -739,7 +734,9 @@ mod tests {
             let pool = fresh_pool().await;
             seed_linear(&pool).await;
             add_stream(&pool, 0, "ST", 7).await;
-            let result = list_flow_streams_inner(&pool, "wrong-session").await.unwrap();
+            let result = list_flow_streams_inner(&pool, "wrong-session")
+                .await
+                .unwrap();
             assert!(result.streams.is_empty());
         });
     }

@@ -375,6 +375,7 @@ pub async fn ensure_flow_streams_rename(
 
 /// flow_streams 扩展列迁移（2026-07-13，U1）：老库补 5 个设备级流标识列（五元组扩展
 /// + 门控时间偏移预留槽）；新库由 FLOW_DOMAIN_SCHEMA_SQL 的 CREATE 直接带列，此处 no-op。
+///
 /// 每列各自用 pragma_table_info 守卫，顺序无关、幂等，任意列缺失只补该列。
 pub async fn ensure_flow_streams_extended_columns(
     pool: &sqlx::Pool<sqlx::Sqlite>,
