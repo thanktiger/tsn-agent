@@ -787,12 +787,13 @@ export function createFlowToolRegistry(): FlowMcpToolDefinition[] {
     {
       name: "flow.inspect",
       allowedToolName: "mcp__tsn_topology__flow_inspect",
-      title: "Inspect recorded streams + gate plans",
+      title: "Inspect recorded streams + gate windows",
       description:
         "Return the session's recorded streams[] { streamSeq, class, pcp, periodUs, frameBytes, count, " +
-        "talker, listener, maxLatencyUs, redundant, paths } and any synthesized gate plans[] " +
-        "{ streamSeq, node, ethN, gateIndex, initiallyOpen, offsetNs, durationsNs, solver }. No parameters. " +
-        "Call this to see what's recorded / planned before adding or removing streams.",
+        "talker, listener, maxLatencyUs, redundant, paths }, synthesized gate windows gclWindows[] " +
+        "{ node, ethN, entryIdx, startNs, durationNs, gateStates (0-255 bitmap, bit g = gate g open), " +
+        "flowRefs (JSON string or null) } and gclMeta { status, cycleNs, algorithm, stale } (null when " +
+        "not planned). No parameters. Call this to see what's recorded / planned before adding or removing streams.",
       inputSchema: {},
       handler: async (args) => callSidecarTool("/db/flow/inspect", args, {}),
     },
@@ -801,7 +802,8 @@ export function createFlowToolRegistry(): FlowMcpToolDefinition[] {
       allowedToolName: "mcp__tsn_topology__flow_remove_stream",
       title: "Remove a traffic stream",
       description:
-        "Remove the stream with the given streamSeq (from flow.inspect) and its synthesized gate plan. " +
+        "Remove the stream with the given streamSeq (from flow.inspect). Removing a stream invalidates " +
+        "the session's synthesized gate plan: all gate tables are cleared and re-planning is required. " +
         "No-op (removed=0) when the seq doesn't exist. Only touches flow tables.",
       inputSchema: {
         streamSeq: z

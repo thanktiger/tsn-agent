@@ -268,6 +268,17 @@ async fn perform_import_inner(
     // 首列 session_id 改写为 target；其余列经字段级校验后动态 bind。
     // 行数已由 main 事务前的 COUNT 预检约束。
     for (table, cols) in crate::db::SESSION_SCOPED_TABLES {
+        // KTD10 旧导出兼容：源库缺表（老版本导出无门控新表等）按零行跳过，
+        // 降级为空规划态导入，不再硬报错让全部历史导出文件不可导入。
+        let table_exists: Option<String> =
+            sqlx::query_scalar("SELECT name FROM sqlite_master WHERE type='table' AND name = ?")
+                .bind(table)
+                .fetch_optional(src_pool)
+                .await
+                .map_err(|e| format!("源库表探测 {table} 失败：{e}"))?;
+        if table_exists.is_none() {
+            continue;
+        }
         let select_sql = format!(
             "SELECT {} FROM {} WHERE session_id = ?",
             cols.join(", "),
@@ -993,6 +1004,40 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(resp.rows_inserted.topology_nodes, MAX_NODES as u64);
+        });
+    }
+
+    /// Covers KTD10：旧导出文件（无门控新表）按零行跳过导入成功——不硬报错，
+    /// 降级为空规划态。
+    #[test]
+    fn import_skips_missing_new_tables_as_zero_rows() {
+        tauri::async_runtime::block_on(async {
+            let (dir, main_pool) = seed_main_pool().await;
+            let src_pool = source_pool(dir.path()).await;
+            // 模拟旧版本导出：把门控新表从源库删掉。
+            for table in ["gcl_windows", "gcl_plan_meta", "gcl_raw_archive"] {
+                sqlx::query(&format!("DROP TABLE {table}"))
+                    .execute(&src_pool)
+                    .await
+                    .unwrap();
+            }
+            sqlx::query("INSERT INTO sessions (id, title, created_at, updated_at, payload) VALUES ('orig', 't', 'now', 'now', '{}')")
+                .execute(&src_pool).await.unwrap();
+            sqlx::query("INSERT INTO topology_nodes (session_id, mid, x, y, insert_order) VALUES ('orig', '0', 0.0, 0.0, 0), ('orig', '1', 1.0, 1.0, 1)")
+                .execute(&src_pool).await.unwrap();
+            src_pool.close().await;
+
+            let src_path = dir.path().join("src.db");
+            let resp = perform_import(&main_pool, &src_path, Some("legacy"))
+                .await
+                .expect("缺新表的旧导出文件应按零行跳过导入成功");
+            assert_eq!(resp.rows_inserted.topology_nodes, 2);
+            let wins: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM gcl_windows WHERE session_id='legacy'")
+                    .fetch_one(&main_pool)
+                    .await
+                    .unwrap();
+            assert_eq!(wins, 0, "缺表按零行处理（空规划态）");
         });
     }
 

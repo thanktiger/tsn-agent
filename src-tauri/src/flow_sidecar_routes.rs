@@ -1,8 +1,9 @@
 //! 流量规划写库 sidecar route（`/db/flow/*`）。镜像 `timesync_sidecar_routes`：
 //! 复用同一 `RouteState` / Bearer / session middleware。
 //! - `add_stream`：`verify_flow` 校验闸 → 单一 `insert_stream` 落 `flow_streams`。
-//! - `inspect`：读 streams + flow_plans 给 agent（talker/listener→mid 解析用）。
-//! - `remove_stream`：删某 `stream_seq`。
+//! - `inspect`：读 streams + 门控新表（gcl_windows/gcl_plan_meta）给 agent
+//!   （talker/listener→mid 解析用；SKILL.md 文案同步归 U7）。
+//! - `remove_stream`：删某 `stream_seq`，并清门控表（删流=规划失效，KTD6）。
 //!
 //! 写 handler 范式：`require_session` → begin tx → `snapshot_pre_image(FLOW_DOMAIN)`
 //! （为后续单步撤销留 pre-image，撤销触发本期 defer）→ insert/delete → commit →
@@ -364,7 +365,6 @@ pub async fn remove_stream(
         );
     }
 
-    // 一并清该流已综合的 GCL（flow_plans 归 flow domain，pre-image 已快照可撤）。
     let removed =
         match sqlx::query("DELETE FROM flow_streams WHERE session_id = ? AND stream_seq = ?")
             .bind(&req.session_id)
@@ -382,18 +382,27 @@ pub async fn remove_stream(
                 );
             }
         };
-    if let Err(e) = sqlx::query("DELETE FROM flow_plans WHERE session_id = ? AND stream_seq = ?")
-        .bind(&req.session_id)
-        .bind(req.stream_seq)
-        .execute(&mut *tx)
-        .await
-    {
-        return structured_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "DELETE_FAILED",
-            &e.to_string(),
-            true,
-        );
+    // KTD6 删流语义：删流 = 规划失效，清空该 session 的门控三新表 + flow_plans 残留，
+    // 需重新规划（旧实现按 stream_seq 删 flow_plans——stream_seq 恒 0 删不到，既有漏洞）。
+    // 表都归 flow domain，pre-image 已快照可撤（raw_archive 不入快照，KTD1）。
+    for table in [
+        "gcl_windows",
+        "gcl_plan_meta",
+        "gcl_raw_archive",
+        "flow_plans",
+    ] {
+        if let Err(e) = sqlx::query(&format!("DELETE FROM {table} WHERE session_id = ?"))
+            .bind(&req.session_id)
+            .execute(&mut *tx)
+            .await
+        {
+            return structured_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DELETE_FAILED",
+                &e.to_string(),
+                true,
+            );
+        }
     }
 
     if let Err(e) = tx.commit().await {
@@ -480,11 +489,14 @@ pub async fn inspect(
         })
         .collect();
 
-    let plan_rows = match sqlx::query(
-        r#"SELECT stream_seq, node, eth_n, gate_index, initially_open, offset_ns, durations_ns, solver
-           FROM flow_plans WHERE session_id = ? ORDER BY stream_seq, node, eth_n, gate_index"#,
+    // 门控读面切新表体系（U3）：逐窗行（gcl_windows）+ 规划元数据（gcl_plan_meta）。
+    let window_rows = match sqlx::query(
+        r#"SELECT node, eth_n, entry_idx, start_ns, duration_ns, gate_states, flow_refs
+           FROM gcl_windows WHERE session_id = ? AND provider = ?
+           ORDER BY node, eth_n, entry_idx"#,
     )
     .bind(&req.session_id)
+    .bind(crate::flow_plan_command::GCL_PROVIDER)
     .fetch_all(&state.pool)
     .await
     {
@@ -498,26 +510,51 @@ pub async fn inspect(
             );
         }
     };
-    let plans: Vec<Value> = plan_rows
+    let gcl_windows: Vec<Value> = window_rows
         .iter()
         .map(|r| {
             json!({
-                "streamSeq": r.get::<i64, _>("stream_seq"),
                 "node": r.get::<String, _>("node"),
                 "ethN": r.get::<i64, _>("eth_n"),
-                "gateIndex": r.get::<i64, _>("gate_index"),
-                "initiallyOpen": r.get::<i64, _>("initially_open") != 0,
-                "offsetNs": r.get::<i64, _>("offset_ns"),
-                // durations_ns 本读面回原始 JSON 字符串（agent inspect 只读透传，不解析）；另一读面
-                // flow_query_command::get_flow_plan_inner 解析成 Vec<u64>（时序图/占空比要算）——
-                // 两面类型分叉，消费端不同，勿强行统一。
-                "durationsNs": r.get::<String, _>("durations_ns"),
-                "solver": r.get::<String, _>("solver"),
+                "entryIdx": r.get::<i64, _>("entry_idx"),
+                "startNs": r.get::<i64, _>("start_ns"),
+                "durationNs": r.get::<i64, _>("duration_ns"),
+                // 0-255 位图（bit g = gate g 开）。
+                "gateStates": r.get::<i64, _>("gate_states"),
+                // flow_refs 回原始 JSON 字符串（agent inspect 只读透传，不解析）；无关联 = null。
+                "flowRefs": r.get::<Option<String>, _>("flow_refs"),
             })
         })
         .collect();
+    let meta_row = match sqlx::query(
+        r#"SELECT status, cycle_ns, algorithm, stale FROM gcl_plan_meta
+           WHERE session_id = ? AND provider = ?"#,
+    )
+    .bind(&req.session_id)
+    .bind(crate::flow_plan_command::GCL_PROVIDER)
+    .fetch_optional(&state.pool)
+    .await
+    {
+        Ok(row) => row,
+        Err(e) => {
+            return structured_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                &e.to_string(),
+                true,
+            );
+        }
+    };
+    let gcl_meta = meta_row.map_or(Value::Null, |r| {
+        json!({
+            "status": r.get::<String, _>("status"),
+            "cycleNs": r.get::<i64, _>("cycle_ns"),
+            "algorithm": r.get::<String, _>("algorithm"),
+            "stale": r.get::<i64, _>("stale") != 0,
+        })
+    });
 
-    ok_summary(json!({ "streams": streams, "plans": plans }))
+    ok_summary(json!({ "streams": streams, "gclWindows": gcl_windows, "gclMeta": gcl_meta }))
 }
 
 // ---------- update_stream ----------
@@ -889,7 +926,8 @@ mod tests {
         });
     }
 
-    /// 两次 add_stream → stream_seq 递增 0,1；inspect 回读两条 + 空 plans。
+    /// 两次 add_stream → stream_seq 递增 0,1；inspect 回读两条 + 空 gclWindows +
+    /// gclMeta null（无规划）。
     #[test]
     fn add_two_streams_then_inspect() {
         tauri::async_runtime::block_on(async {
@@ -921,13 +959,60 @@ mod tests {
             .await;
             assert_eq!(status, StatusCode::OK);
             assert_eq!(parsed["summary"]["streams"].as_array().unwrap().len(), 2);
-            assert_eq!(parsed["summary"]["plans"].as_array().unwrap().len(), 0);
+            assert_eq!(parsed["summary"]["gclWindows"].as_array().unwrap().len(), 0);
+            assert!(parsed["summary"]["gclMeta"].is_null(), "{parsed}");
         });
     }
 
-    /// remove_stream 删该流；再 inspect 为空。
+    /// inspect 门控读面：seed gcl_windows/gcl_plan_meta → gclWindows 行 camelCase 全列 +
+    /// gclMeta（status/cycleNs/algorithm/stale）。
     #[test]
-    fn remove_stream_deletes_row() {
+    fn inspect_returns_gcl_windows_and_meta() {
+        tauri::async_runtime::block_on(async {
+            let (pool, buf) = test_state().await;
+            add_node(&pool, "0").await;
+            add_node(&pool, "1").await;
+            let (router, token) = build_test_router_with_pool(pool.clone(), buf.clone()).await;
+            post(
+                router.clone(),
+                &token,
+                "/db/flow/add_stream",
+                valid_st_body(),
+            )
+            .await;
+            sqlx::query("INSERT INTO gcl_windows (session_id, provider, node, eth_n, entry_idx, start_ns, duration_ns, gate_states, flow_refs) VALUES ('s1', 'inet-z3', '0', 1, 0, 0, 300000, 128, '[{\"seq\":0,\"source\":\"derived\"}]')")
+                .execute(&pool).await.unwrap();
+            sqlx::query("INSERT INTO gcl_plan_meta (session_id, provider, status, cycle_ns, algorithm, stale, created_at) VALUES ('s1', 'inet-z3', 'ok', 1000000, 'Z3', 0, 'now')")
+                .execute(&pool).await.unwrap();
+
+            let (status, parsed) = post(
+                router,
+                &token,
+                "/db/flow/inspect",
+                json!({ "sessionId": "s1" }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            let w = &parsed["summary"]["gclWindows"][0];
+            assert_eq!(w["node"], "0");
+            assert_eq!(w["ethN"], 1);
+            assert_eq!(w["entryIdx"], 0);
+            assert_eq!(w["startNs"], 0);
+            assert_eq!(w["durationNs"], 300000);
+            assert_eq!(w["gateStates"], 128);
+            assert_eq!(w["flowRefs"], "[{\"seq\":0,\"source\":\"derived\"}]");
+            let m = &parsed["summary"]["gclMeta"];
+            assert_eq!(m["status"], "ok");
+            assert_eq!(m["cycleNs"], 1000000);
+            assert_eq!(m["algorithm"], "Z3");
+            assert_eq!(m["stale"], false);
+        });
+    }
+
+    /// remove_stream 删该流；再 inspect 为空。KTD6：删流 = 规划失效——门控三新表
+    /// （gcl_windows/gcl_plan_meta/gcl_raw_archive）该 session 全清。
+    #[test]
+    fn remove_stream_deletes_row_and_clears_gcl_tables() {
         tauri::async_runtime::block_on(async {
             let (pool, buf) = test_state().await;
             add_node(&pool, "0").await;
@@ -941,6 +1026,13 @@ mod tests {
                 valid_st_body(),
             )
             .await;
+            // 造已规划态：三新表各一行。
+            sqlx::query("INSERT INTO gcl_windows (session_id, provider, node, eth_n, entry_idx, start_ns, duration_ns, gate_states, flow_refs) VALUES ('s1', 'inet-z3', '0', 1, 0, 0, 300000, 128, NULL)")
+                .execute(&pool).await.unwrap();
+            sqlx::query("INSERT INTO gcl_plan_meta (session_id, provider, status, cycle_ns, algorithm, stale, created_at) VALUES ('s1', 'inet-z3', 'ok', 1000000, 'Z3', 0, 'now')")
+                .execute(&pool).await.unwrap();
+            sqlx::query("INSERT INTO gcl_raw_archive (session_id, provider, par_lines, created_at) VALUES ('s1', 'inet-z3', 'par x y z', 'now')")
+                .execute(&pool).await.unwrap();
             let (status, parsed) = post(
                 router,
                 &token,
@@ -958,6 +1050,15 @@ mod tests {
                     .await
                     .unwrap();
             assert_eq!(count, 0);
+            for table in ["gcl_windows", "gcl_plan_meta", "gcl_raw_archive"] {
+                let left: i64 = sqlx::query_scalar(&format!(
+                    "SELECT COUNT(*) FROM {table} WHERE session_id='s1'"
+                ))
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+                assert_eq!(left, 0, "删流后 {table} 应清空");
+            }
         });
     }
 }
