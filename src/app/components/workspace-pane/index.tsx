@@ -817,7 +817,8 @@ export function WorkspacePane({
               onNodeDragStop={handleNodeDragStop}
               onNodeClick={handleNodeClick}
             >
-              <Background />
+              {/* size 加大缓解非整数缩放下点阵抗锯齿粗细不均（亚像素相位逐点漂移，无法根治） */}
+              <Background size={1.5} />
               <Controls showInteractive={false} />
             </ReactFlow>
           ) : (
@@ -869,7 +870,7 @@ export function WorkspacePane({
                     proOptions={{ hideAttribution: true }}
                     fitView
                   >
-                    <Background />
+                    <Background size={1.5} />
                     <Controls showInteractive={false} />
                   </ReactFlow>
                 </div>
