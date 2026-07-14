@@ -4528,10 +4528,16 @@ textarea:focus-visible {
   color: #fff;
   flex-shrink: 0;
   margin-right: 6px;
+  vertical-align: middle;
 }
 .flow-stream-seq {
   font-size: 12px;
   color: var(--text-muted);
+}
+/* eng-table 默认 vertical-align: top（时间同步表多行内容用）；流表行高被
+   「详情」按钮撑高，文字单元格需垂直居中。 */
+.flow-stream-table td {
+  vertical-align: middle;
 }
 .flow-stream-table td:first-child {
   white-space: nowrap;
