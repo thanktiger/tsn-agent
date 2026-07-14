@@ -751,6 +751,13 @@ function addStreamInputSchema(): z.ZodRawShape {
       .min(1)
       .optional()
       .describe("端到端最大时延（us）；省略则规划期从 docx 窗口推导、再回退取周期"),
+    path: z
+      .array(z.string().min(1))
+      .min(2)
+      .optional()
+      .describe(
+        "显式路径（可选，仅 ST/BE）：节点引用序列——mid 或唯一显示名，含首尾 talker/listener；RC 不可用（双路径系统推导）",
+      ),
   };
 }
 
@@ -770,7 +777,10 @@ export function createFlowToolRegistry(): FlowMcpToolDefinition[] {
         "talker/listener must be existing node mids, same PCP must map to one class); on violation the " +
         "stream is rejected with the offending field and NOT persisted. talker/listener are node mids " +
         "(call topology.inspect to find them). maxLatencyUs is optional (planning falls back to the " +
-        "stream's own period as the latency bound when omitted). Returns the assigned streamSeq on success.",
+        "stream's own period as the latency bound when omitted). Optional path pins an explicit route " +
+        "for ST/BE streams: a node reference sequence (mid or unique display name) including talker and " +
+        "listener endpoints — use it to disambiguate equal-length multipath topologies; not allowed for " +
+        "RC (its dual paths are system-derived). Returns the assigned streamSeq on success.",
       inputSchema: addStreamInputSchema(),
       handler: async (args) =>
         callSidecarTool("/db/flow/add_stream", args, {
@@ -782,6 +792,7 @@ export function createFlowToolRegistry(): FlowMcpToolDefinition[] {
           talker: pickString(args, "talker"),
           listener: pickString(args, "listener"),
           maxLatencyUs: pickValue(args, "maxLatencyUs"),
+          path: pickValue(args, "path"),
         }),
     },
     {

@@ -125,6 +125,7 @@ pub fn run() {
             flow_query_command::get_gcl_detail,
             flow_query_command::list_flow_streams,
             flow_query_command::get_flow_route_map,
+            flow_query_command::get_flow_path_candidates,
             flow_query_command::update_flow_stream,
             flow_verify_command::verify_tas,
             hardware_api_config::get_hardware_api_config,

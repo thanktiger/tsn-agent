@@ -70,6 +70,8 @@ pub(crate) struct DbStream {
     pub(crate) talker: String,
     pub(crate) listener: String,
     pub(crate) max_latency_us: Option<i64>,
+    /// 显示名（NULL 回退 `{class}流{seq}` 默认名）；路径推导失败报错点名用（R16）。
+    pub(crate) name: Option<String>,
     /// KTD6 凭证列（U2 录入时落）：仅展示，装配一律重推导（verify 侧重跑不相交断言）。
     #[allow(dead_code)]
     pub(crate) redundant: i64,
@@ -83,7 +85,7 @@ pub(crate) async fn load_streams(
     session_id: &str,
 ) -> Result<Vec<DbStream>, String> {
     let rows = sqlx::query(
-        "SELECT stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener, max_latency_us, redundant, paths \
+        "SELECT stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener, max_latency_us, redundant, paths, name \
          FROM flow_streams WHERE session_id = ? ORDER BY stream_seq",
     )
     .bind(session_id)
@@ -104,6 +106,7 @@ pub(crate) async fn load_streams(
             max_latency_us: r.get("max_latency_us"),
             redundant: r.get("redundant"),
             paths: r.get("paths"),
+            name: r.get("name"),
         })
         .collect())
 }
@@ -543,6 +546,21 @@ async fn write_gcl_tables(
     Ok(())
 }
 
+/// KTD14 stale 写手：置 `gcl_plan_meta.stale=1`（无行 no-op）。写手清单 = 加流 / 改规划
+/// 字段或路径 / 拓扑结构变更（initialize 与增删链路）；删流清整张 meta 表故无需置位。
+/// **复位仅发生在规划成功事务内**（`write_gcl_tables` 重写 meta 行 stale=0）。
+pub(crate) async fn mark_gcl_stale<'e, E>(executor: E, session_id: &str) -> Result<(), String>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
+    sqlx::query("UPDATE gcl_plan_meta SET stale = 1 WHERE session_id = ?")
+        .bind(session_id)
+        .execute(executor)
+        .await
+        .map_err(|e| format!("置 gcl_plan_meta.stale 失败：{e}"))?;
+    Ok(())
+}
+
 /// 可测内核：注入 `InetSimPlanClient`，编排 流集 → 路径 → synth bundle → 跑配置器 → 解析 → 落库。
 pub async fn plan_tas_inner<P: InetSimPlanClient>(
     pool: &sqlx::Pool<sqlx::Sqlite>,
@@ -622,10 +640,14 @@ pub async fn plan_tas_inner<P: InetSimPlanClient>(
                     .map(|e| e.message_zh.clone())
                     .collect::<Vec<_>>()
                     .join("；");
+                // R16：报错点名流（F{seq}·{name}）+ 指定路径引导（错误码不动）。
+                let name = s.name.clone().unwrap_or_else(|| {
+                    crate::flow_query_command::default_stream_name(&s.class, s.stream_seq)
+                });
                 return Ok(PlanResult::simple(
                     "route_error",
-                    "流路径推导失败（不可达或路径歧义），请检查拓扑/消歧。",
-                    Some(format!("流 {}：{msg}", s.stream_seq)),
+                    "流路径推导失败（不可达或路径歧义），请在流详情中指定路径或调整拓扑。",
+                    Some(format!("流 F{}·{name}：{msg}", s.stream_seq)),
                 ));
             }
         };
@@ -1272,6 +1294,9 @@ par TsnAgentFlowTasNetwork.sw1.eth[1].macLayer.queue.transmissionGate[1] duratio
             // flow_plans 残留（旧管线）——写路径须清（停写 ≠ 留残留）。
             sqlx::query("INSERT INTO flow_plans (session_id, stream_seq, node, eth_n, gate_index, initially_open, offset_ns, durations_ns, solver) VALUES ('s1', 0, '0', 1, 7, 1, 0, '[1]', 'Z3')")
                 .execute(&pool).await.unwrap();
+            // KTD14：预置 stale=1 的旧 meta——规划成功须复位为 0（覆盖式重写）。
+            sqlx::query("INSERT INTO gcl_plan_meta (session_id, provider, status, cycle_ns, algorithm, stale, created_at) VALUES ('s1', 'inet-z3', 'ok', 1000000, 'Z3', 1, 'now')")
+                .execute(&pool).await.unwrap();
             // mock 服务回 sw1 gate 的 .sca（node ned sw1 → mid 0）。
             let sca = "par N.sw1.eth[1].macLayer.queue.transmissionGate[0] initiallyOpen true\npar N.sw1.eth[1].macLayer.queue.transmissionGate[0] offset 0s\npar N.sw1.eth[1].macLayer.queue.transmissionGate[0] durations \"[300us, 700us]\"\n";
             let client = MockPlanClient {
@@ -1329,6 +1354,53 @@ par TsnAgentFlowTasNetwork.sw1.eth[1].macLayer.queue.transmissionGate[1] duratio
             .await
             .unwrap();
             assert_eq!(par, sca);
+        });
+    }
+
+    /// R16：等长多路径（歧义）→ route_error，message 点名流 F{seq}·{name} 并引导
+    /// 「请在流详情中指定路径」（错误码不动）。
+    #[test]
+    fn plan_tas_route_error_names_stream_and_guides_to_path_pick() {
+        tauri::async_runtime::block_on(async {
+            let pool = fresh_pool().await;
+            // 菱形：1—0—2 与 1—3—2 两条等长路径（无 plane 键 → AMBIGUOUS_ROUTE）。
+            for (mid, ty, ord) in [
+                ("0", "switch", 0),
+                ("1", "endSystem", 1),
+                ("2", "endSystem", 2),
+                ("3", "switch", 3),
+            ] {
+                sqlx::query("INSERT INTO topology_nodes (session_id, mid, name, x, y, node_type, port_count, queue_count, insert_order) VALUES ('s1', ?, NULL, 0, 0, ?, 8, 8, ?)")
+                    .bind(mid).bind(ty).bind(ord).execute(&pool).await.unwrap();
+            }
+            for (seq, src, sp, dst, dp) in [
+                (0, "1", 0, "0", 0),
+                (1, "0", 1, "2", 0),
+                (2, "1", 1, "3", 0),
+                (3, "3", 1, "2", 1),
+            ] {
+                sqlx::query("INSERT INTO topology_links (session_id, link_seq, name, src_node, dst_node, src_port, dst_port, speed, styles_json) VALUES ('s1', ?, NULL, ?, ?, ?, ?, 1000, '{}')")
+                    .bind(seq).bind(src).bind(dst).bind(sp).bind(dp).execute(&pool).await.unwrap();
+            }
+            sqlx::query("INSERT INTO timesync_domain (session_id, gm_mid) VALUES ('s1', '1')")
+                .execute(&pool)
+                .await
+                .unwrap();
+            sqlx::query("INSERT INTO flow_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener, name) VALUES ('s1', 0, 'ST', 7, 500, 512, 10000, '1', '2', '视频流')")
+                .execute(&pool).await.unwrap();
+            let client = MockPlanClient {
+                result: Err("不该被调用".into()),
+            };
+            let r = plan_tas_inner(&pool, "s1", &client, "http://x")
+                .await
+                .unwrap();
+            assert_eq!(r.status, "route_error", "{r:?}");
+            assert!(
+                r.overall.contains("请在流详情中指定路径"),
+                "overall 应含指定路径引导：{r:?}"
+            );
+            let msg = r.message.as_deref().unwrap_or_default();
+            assert!(msg.contains("F0·视频流"), "message 应点名流：{msg}");
         });
     }
 

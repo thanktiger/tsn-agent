@@ -38,6 +38,7 @@ function makeStream(overrides: Partial<ListFlowStreamRow> = {}): ListFlowStreamR
     dstL4Port: null,
     l4Protocol: null,
     nodePath: [],
+    paths: null,
     ...overrides,
   };
 }

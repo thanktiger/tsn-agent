@@ -455,8 +455,6 @@ pub fn resolve_flow_path(
 
 /// 候选简单路径枚举（弹窗路径下拉用）：DFS 有界，按（跳数, link_seq 字典序）排序，
 /// 最多 `limit` 条；返回 (候选, 是否截断)。plane 语义与 derive_route 一致。
-/// U10b 的候选枚举 Tauri 命令接入后删除 allow。
-#[allow(dead_code)]
 pub fn enumerate_candidate_paths(
     req: &RouteRequest,
     links: &[VerifyLink],

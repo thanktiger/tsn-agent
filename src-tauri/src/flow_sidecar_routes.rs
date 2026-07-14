@@ -310,6 +310,11 @@ pub async fn add_stream(
         }
     };
 
+    // KTD14：加流 = 既有规划过期，同事务置 gcl_plan_meta.stale（无行 no-op）。
+    if let Err(e) = crate::flow_plan_command::mark_gcl_stale(&mut *tx, &session_id).await {
+        return structured_error(StatusCode::INTERNAL_SERVER_ERROR, "UPDATE_FAILED", &e, true);
+    }
+
     if let Err(e) = tx.commit().await {
         return structured_error(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -385,6 +390,7 @@ pub async fn remove_stream(
     // KTD6 删流语义：删流 = 规划失效，清空该 session 的门控三新表 + flow_plans 残留，
     // 需重新规划（旧实现按 stream_seq 删 flow_plans——stream_seq 恒 0 删不到，既有漏洞）。
     // 表都归 flow domain，pre-image 已快照可撤（raw_archive 不入快照，KTD1）。
+    // KTD14：meta 行随清空消失，无需另置 stale（无 meta = 未规划态，比过期态更强）。
     for table in [
         "gcl_windows",
         "gcl_plan_meta",
@@ -568,10 +574,13 @@ pub async fn update_stream(
     }
 
     match crate::flow_query_command::update_flow_stream_inner(&state.pool, &req).await {
-        Ok(()) => push_and_summary(
+        Ok(result) => push_and_summary(
             &state,
             &req.session_id,
-            json!({ "streamSeq": req.stream_seq }),
+            json!({
+                "streamSeq": req.stream_seq,
+                "planningFieldsChanged": result.planning_fields_changed,
+            }),
         ),
         Err(e) => structured_error(StatusCode::UNPROCESSABLE_ENTITY, "UPDATE_FAILED", &e, true),
     }
@@ -723,6 +732,31 @@ mod tests {
             assert_eq!(period, 500);
             assert_eq!(talker, "0");
             assert_eq!(listener, "1");
+        });
+    }
+
+    /// KTD14：已规划态（meta stale=0）加流 → 同事务置 stale=1（agent 通道也触发过期提示）。
+    #[test]
+    fn add_stream_marks_gcl_stale() {
+        tauri::async_runtime::block_on(async {
+            let (pool, buf) = test_state().await;
+            add_node(&pool, "0").await;
+            add_node(&pool, "1").await;
+            sqlx::query("INSERT INTO gcl_plan_meta (session_id, provider, status, cycle_ns, algorithm, stale, created_at) VALUES ('s1', 'inet-z3', 'ok', 1000000, 'Z3', 0, 'now')")
+                .execute(&pool).await.unwrap();
+            let (router, token) = build_test_router_with_pool(pool.clone(), buf.clone()).await;
+
+            let (status, parsed) =
+                post(router, &token, "/db/flow/add_stream", valid_st_body()).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(parsed["ok"], true, "{parsed:?}");
+
+            let stale: i64 =
+                sqlx::query_scalar("SELECT stale FROM gcl_plan_meta WHERE session_id='s1'")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(stale, 1, "加流须置 stale");
         });
     }
 

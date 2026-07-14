@@ -10,6 +10,8 @@ import {
   isZ3Guaranteed,
   nsToUs,
   type PlanResult,
+  parseExplicitPathLinkSeqs,
+  parseRedundantNodePaths,
   planAllowsVerify,
   planSucceeded,
   roundLabel,
@@ -405,6 +407,7 @@ function stStream(overrides: Partial<ListFlowStreamRow> = {}): ListFlowStreamRow
     dstL4Port: null,
     l4Protocol: null,
     nodePath: ["ES-1", "SW-0", "ES-2"],
+    paths: null,
     ...overrides,
   };
 }
@@ -628,5 +631,47 @@ describe("buildGclOverview（R15 八项指标）", () => {
       detail.meta.stale = true;
     }
     expect(buildGclOverview(detail).stale).toBe(true);
+  });
+});
+
+describe("parseExplicitPathLinkSeqs / parseRedundantNodePaths（R16 paths 解析）", () => {
+  it("origin=user 单条路由 → link_seqs；system/垃圾/null → null", () => {
+    const user = JSON.stringify({
+      version: 1,
+      origin: "user",
+      routes: [{ node_path: ["1", "0", "2"], link_seqs: [0, 1] }],
+    });
+    expect(parseExplicitPathLinkSeqs(user)).toEqual([0, 1]);
+    const system = JSON.stringify({
+      version: 1,
+      origin: "system",
+      routes: [{ node_path: ["1", "0", "2"], link_seqs: [0, 1] }],
+    });
+    expect(parseExplicitPathLinkSeqs(system)).toBeNull();
+    expect(parseExplicitPathLinkSeqs("not-json")).toBeNull();
+    expect(parseExplicitPathLinkSeqs(JSON.stringify({ origin: "user" }))).toBeNull();
+    expect(parseExplicitPathLinkSeqs(null)).toBeNull();
+  });
+
+  it("RC 双路由 → [A 节点序列, B 节点序列]；单条/形状不符 → null", () => {
+    const rc = JSON.stringify({
+      version: 1,
+      origin: "system",
+      routes: [
+        { node_path: ["0", "2", "1"], link_seqs: [0, 1] },
+        { node_path: ["0", "3", "1"], link_seqs: [2, 3] },
+      ],
+    });
+    expect(parseRedundantNodePaths(rc)).toEqual([
+      ["0", "2", "1"],
+      ["0", "3", "1"],
+    ]);
+    const single = JSON.stringify({
+      version: 1,
+      origin: "user",
+      routes: [{ node_path: ["0", "2", "1"], link_seqs: [0, 1] }],
+    });
+    expect(parseRedundantNodePaths(single)).toBeNull();
+    expect(parseRedundantNodePaths(null)).toBeNull();
   });
 });

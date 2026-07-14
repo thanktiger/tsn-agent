@@ -65,6 +65,8 @@ export interface FlowPanelProps {
   listFlowStreams?: (sessionId: string) => Promise<ListFlowStreamsResult>;
   /** 门控详情读通道（U5 透传 GclDetailModal + U9 概览八卡；测试注入替身）。 */
   getGclDetail?: (sessionId: string) => Promise<GclDetail>;
+  /** R16 路径预览联动（透传 FlowDetailModal → WorkspacePane 画布高亮）。 */
+  onPreviewPath?: (linkSeqs: number[] | null) => void;
 }
 
 /** U9：门控明细（新表）查询态——与 FlowPlanQueryState 同型，data=GclDetail。 */
@@ -89,6 +91,7 @@ export function FlowPanel({
   getFlowPlan = invokeGetFlowPlan,
   listFlowStreams = invokeListFlowStreams,
   getGclDetail = invokeGetGclDetail,
+  onPreviewPath,
 }: FlowPanelProps) {
   // ref 即时拦并发（disabled 态下一拍才生效，防双击派发第二次）。
   const planInflight = useRef(false);
@@ -409,6 +412,7 @@ export function FlowPanel({
       <FlowDetailModal
         stream={openModalStream}
         sessionId={sessionId}
+        onPreviewPath={onPreviewPath}
         onClose={() => setOpenModalStream(null)}
         onSaved={(didChangePlanningFields) => {
           if (didChangePlanningFields) setBannerVisible(true);

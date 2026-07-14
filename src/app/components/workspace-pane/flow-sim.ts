@@ -356,6 +356,8 @@ export interface ListFlowStreamRow {
   dstL4Port: number | null;
   l4Protocol: string | null;
   nodePath: string[];
+  /** paths 列原文（KTD12 统一 JSON 形状；null=系统推导）。 */
+  paths: string | null;
 }
 
 /** 流集查询结果（对齐 flow_query_command::ListFlowStreamsResult）。 */
@@ -364,7 +366,8 @@ export interface ListFlowStreamsResult {
 }
 
 /** 流更新请求（对齐 flow_query_command::UpdateFlowStreamRequest）。
- * class/pcp 为只读字段（PCP 由 class 派生），故不在请求中。 */
+ * class/pcp 为只读字段（PCP 由 class 派生），故不在请求中。
+ * R16 路径三态：`pathLinkSeqs` 设显式路径 / `clearPath` 改回系统自动 / 均缺省 = 不变。 */
 export interface UpdateFlowStreamRequest {
   sessionId: string;
   streamSeq: number;
@@ -384,11 +387,21 @@ export interface UpdateFlowStreamRequest {
   srcL4Port: number | null;
   dstL4Port: number | null;
   l4Protocol: string | null;
+  pathLinkSeqs?: number[];
+  clearPath?: boolean;
+}
+
+/** 流更新结果（对齐 flow_query_command::UpdateFlowStreamResult）：规划字段/路径是否
+ * 实际变更（KTD14 服务端判定，弹窗 onSaved 的 didChange 事实源）。 */
+export interface UpdateFlowStreamResult {
+  planningFieldsChanged: boolean;
 }
 
 /** 流更新写通道 = update_flow_stream Tauri command（测试可注入替身）。 */
-export async function invokeUpdateFlowStream(request: UpdateFlowStreamRequest): Promise<void> {
-  return await invoke<void>("update_flow_stream", { request });
+export async function invokeUpdateFlowStream(
+  request: UpdateFlowStreamRequest,
+): Promise<UpdateFlowStreamResult> {
+  return await invoke<UpdateFlowStreamResult>("update_flow_stream", { request });
 }
 
 /** 默认门控明细读通道 = get_flow_plan Tauri command（测试可注入替身）。 */
@@ -418,6 +431,76 @@ export interface GetFlowRouteMapResult {
 /** 路由图读通道 = get_flow_route_map Tauri command（测试可注入替身）。 */
 export async function invokeGetFlowRouteMap(sessionId: string): Promise<GetFlowRouteMapResult> {
   return await invoke<GetFlowRouteMapResult>("get_flow_route_map", { request: { sessionId } });
+}
+
+// ── R16 路径指定（U10b：候选枚举 + paths 解析）────────────────────────────────
+
+/** 单条候选路径（对齐 flow_query_command::FlowPathCandidate）。 */
+export interface FlowPathCandidate {
+  nodePath: string[];
+  nodePathNames: string[];
+  linkSeqs: number[];
+}
+
+/** 候选枚举结果（对齐 flow_query_command::GetFlowPathCandidatesResult）。
+ * truncated=true 表示上限（8）打满，还有未列出路径。 */
+export interface GetFlowPathCandidatesResult {
+  candidates: FlowPathCandidate[];
+  truncated: boolean;
+}
+
+/** 候选路径读通道 = get_flow_path_candidates Tauri command（测试可注入替身）。 */
+export async function invokeGetFlowPathCandidates(
+  sessionId: string,
+  talker: string,
+  listener: string,
+): Promise<GetFlowPathCandidatesResult> {
+  return await invoke<GetFlowPathCandidatesResult>("get_flow_path_candidates", {
+    request: { sessionId, talker, listener },
+  });
+}
+
+/** paths 列 JSON 的路由段（Rust FlowPaths 序列化为 snake_case：node_path/link_seqs）。 */
+interface FlowPathsRouteJson {
+  node_path?: unknown;
+  link_seqs?: unknown;
+}
+
+/** paths 列解析（容错：非法 JSON/形状 → null，视同未指定）。 */
+function parseFlowPathsJson(
+  paths: string | null,
+): { origin: string; routes: Array<{ nodePath: string[]; linkSeqs: number[] }> } | null {
+  if (!paths) return null;
+  try {
+    const v = JSON.parse(paths) as { origin?: unknown; routes?: unknown };
+    if (typeof v.origin !== "string" || !Array.isArray(v.routes)) return null;
+    const routes: Array<{ nodePath: string[]; linkSeqs: number[] }> = [];
+    for (const r of v.routes as FlowPathsRouteJson[]) {
+      if (!Array.isArray(r.node_path) || !Array.isArray(r.link_seqs)) return null;
+      routes.push({
+        nodePath: r.node_path.map((n) => String(n)),
+        linkSeqs: r.link_seqs.map((s) => Number(s)),
+      });
+    }
+    return routes.length > 0 ? { origin: v.origin, routes } : null;
+  } catch {
+    return null;
+  }
+}
+
+/** 显式指定路径（origin=user）的 link_seqs；未指定/系统凭证/解析失败 → null。 */
+export function parseExplicitPathLinkSeqs(paths: string | null): number[] | null {
+  const parsed = parseFlowPathsJson(paths);
+  if (parsed?.origin !== "user") return null;
+  return parsed.routes[0]?.linkSeqs ?? null;
+}
+
+/** RC 双冗余路径的节点 mid 序列（routes[0]=A、routes[1]=B）；形状不符 → null。
+ * 弹窗只读展示用（R16：FRER 双路径不可手选）。 */
+export function parseRedundantNodePaths(paths: string | null): [string[], string[]] | null {
+  const parsed = parseFlowPathsJson(paths);
+  if (!parsed || parsed.routes.length < 2) return null;
+  return [parsed.routes[0].nodePath, parsed.routes[1].nodePath];
 }
 
 /** 默认规划写通道 = plan_tas Tauri command（测试可注入替身）。 */

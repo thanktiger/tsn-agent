@@ -279,6 +279,12 @@ export function WorkspacePane({
   // U6：flow 路由图——选中流高亮画布边（flow tab 激活时拉取，DB 变更驱动重拉）。
   const [flowRouteMap, setFlowRouteMap] = useState<Map<number, FlowRouteEntry>>(new Map());
   const routeMapReqRef = useRef(0);
+  // R16：详情弹窗路径下拉的画布预览（非 null 时覆盖 selectedFlowSeq 高亮；随会话重置）。
+  const [previewLinkSeqs, setPreviewLinkSeqs] = useState<number[] | null>(null);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: 仅按 sessionId 归零，防跨会话残留预览。
+  useEffect(() => {
+    setPreviewLinkSeqs(null);
+  }, [sessionId]);
 
   const doFetchFlowRouteMap = useCallback(() => {
     if (activeConfigTab !== "flow") return;
@@ -298,6 +304,7 @@ export function WorkspacePane({
   useEffect(() => {
     if (activeConfigTab !== "flow") {
       setFlowRouteMap(new Map());
+      setPreviewLinkSeqs(null);
       return;
     }
     doFetchFlowRouteMap();
@@ -335,8 +342,14 @@ export function WorkspacePane({
         enableTopologyAnimation,
       );
     }
-    // U6：flow 流高亮（selectedFlowSeq 非 null 且 activeConfigTab === "flow" 时装饰）。
-    decoratedEdges = decorateFlowHighlightEdges(decoratedEdges, selectedFlowSeq, flowRouteMap);
+    // U6：flow 流高亮（selectedFlowSeq 非 null 且 activeConfigTab === "flow" 时装饰）；
+    // R16：详情弹窗路径预览非 null 时覆盖选中流高亮。
+    decoratedEdges = applyFlowEdgeDecoration(
+      decoratedEdges,
+      selectedFlowSeq,
+      flowRouteMap,
+      previewLinkSeqs,
+    );
     return { ...flow, nodes: decoratedNodes, edges: decoratedEdges };
   }, [
     topologySnapshot,
@@ -345,6 +358,7 @@ export function WorkspacePane({
     enableTopologyAnimation,
     selectedFlowSeq,
     flowRouteMap,
+    previewLinkSeqs,
   ]);
 
   const timesyncTreeDialogFlow = useMemo(() => {
@@ -979,6 +993,7 @@ export function WorkspacePane({
                 onSelectFlowSubTab={onSelectFlowSubTab}
                 selectedFlowSeq={selectedFlowSeq}
                 onSelectFlowSeq={onSelectFlowSeq}
+                onPreviewPath={setPreviewLinkSeqs}
               />
             )}
           </div>
@@ -1027,6 +1042,32 @@ function isTopologyAnimationActive(simState: SimUiState, hardwareState: Hardware
     hardwareState.status === "confirming" ||
     hardwareState.status === "observing"
   );
+}
+
+/** R16 预览高亮的合成流序号（不与真实 streamSeq ≥0 碰撞）。 */
+export const PREVIEW_FLOW_SEQ = -1;
+
+/** flow 边装饰优先级（R16）：详情弹窗路径预览（previewLinkSeqs 非 null）临时构造
+ * FlowRouteEntry 覆盖 selectedFlowSeq 高亮；预览为 null 时走 U6 选中流高亮。 */
+export function applyFlowEdgeDecoration(
+  edges: Edge[],
+  selectedFlowSeq: number | null,
+  flowRouteMap: Map<number, FlowRouteEntry>,
+  previewLinkSeqs: number[] | null,
+): Edge[] {
+  if (previewLinkSeqs !== null) {
+    const entry: FlowRouteEntry = {
+      streamSeq: PREVIEW_FLOW_SEQ,
+      linkIds: previewLinkSeqs.map((seq) => `link-${seq}`),
+      planeBLinkIds: null,
+    };
+    return decorateFlowHighlightEdges(
+      edges,
+      PREVIEW_FLOW_SEQ,
+      new Map([[PREVIEW_FLOW_SEQ, entry]]),
+    );
+  }
+  return decorateFlowHighlightEdges(edges, selectedFlowSeq, flowRouteMap);
 }
 
 /** U6：按选中流量序号装饰画布边——命中边加 flow-highlighted，其余边加 flow-dimmed。

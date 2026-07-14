@@ -365,6 +365,13 @@ async fn persist_initialized_topology(
         .map_err(|e| format!("topology_links insert failed: {e}"))?;
     }
 
+    // KTD14 拓扑写手：initialize 全量重建会重发 link_seq，既有门控规划随之过期
+    // ——同事务置 gcl_plan_meta.stale（无行 no-op）。指定路径不级联清（KTD11 惰性
+    // PATH_STALE 防线），只置过期标记。
+    crate::flow_plan_command::mark_gcl_stale(&mut *conn, session_id)
+        .await
+        .map_err(|e| format!("mark gcl stale failed: {e}"))?;
+
     tx.commit().await.map_err(|e| format!("commit failed: {e}"))
 }
 
@@ -738,6 +745,24 @@ pub async fn apply_operations(
         }
     }
 
+    // KTD14 拓扑写手：增删链路改变可行路径集 → 同事务置门控规划过期
+    // （dry-run 随 rollback 一并丢弃；node_delete 拒绝仍挂链路的节点，故只看 link op）。
+    let touches_links = req
+        .operations
+        .iter()
+        .any(|op| matches!(op, TopologyOp::LinkAdd(_) | TopologyOp::LinkDelete(_)));
+    if touches_links
+        && let Err(e) = crate::flow_plan_command::mark_gcl_stale(&mut *tx, &req.session_id).await
+    {
+        let _ = tx.rollback().await;
+        return structured_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DATABASE_ERROR",
+            &e,
+            true,
+        );
+    }
+
     if req.dry_run {
         if let Err(e) = tx.rollback().await {
             return structured_error(
@@ -938,6 +963,54 @@ mod tests {
                 names,
                 vec![Some("SW-1".to_string()), Some("ES-1".to_string())]
             );
+        });
+    }
+
+    /// KTD14 拓扑写手：initialize 全量重建（link_seq 重编号）→ 同事务置 gcl_plan_meta.stale。
+    #[test]
+    fn persist_initialized_topology_marks_gcl_stale() {
+        tauri::async_runtime::block_on(async {
+            let pool = SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect("sqlite::memory:")
+                .await
+                .unwrap();
+            sqlx::query(&crate::db::safety_net_schema_sql())
+                .execute(&pool)
+                .await
+                .unwrap();
+            sqlx::query("INSERT INTO sessions (id, title, created_at, updated_at, payload) VALUES ('s1', 't', 'now', 'now', '{}')")
+                .execute(&pool)
+                .await
+                .unwrap();
+            sqlx::query("INSERT INTO gcl_plan_meta (session_id, provider, status, cycle_ns, algorithm, stale, created_at) VALUES ('s1', 'inet-z3', 'ok', 1000000, 'Z3', 0, 'now')")
+                .execute(&pool)
+                .await
+                .unwrap();
+
+            let topology: crate::topology_intermediate::IntermediateTopology =
+                serde_json::from_value(serde_json::json!({
+                    "schemaVersion": "tsn-agent.topology.intermediate.v0",
+                    "metadata": { "templateId": "hop-linear", "layout": "line", "source": "template" },
+                    "nodes": [
+                        { "id": "SW-1", "numericId": 0, "name": "SW-1", "type": "switch",
+                          "ports": [], "position": { "x": 0.0, "y": 0.0 } }
+                    ],
+                    "links": [],
+                    "diagnostics": []
+                }))
+                .unwrap();
+
+            super::persist_initialized_topology(&pool, "s1", &topology)
+                .await
+                .unwrap();
+
+            let stale: i64 =
+                sqlx::query_scalar("SELECT stale FROM gcl_plan_meta WHERE session_id = 's1'")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(stale, 1, "initialize 重建须置门控规划过期");
         });
     }
 

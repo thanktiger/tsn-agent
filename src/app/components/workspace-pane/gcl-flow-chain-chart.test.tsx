@@ -179,6 +179,7 @@ function stStream(overrides: Partial<ListFlowStreamRow> = {}): ListFlowStreamRow
     dstL4Port: null,
     l4Protocol: null,
     nodePath: ["ES-1", "SW-0", "ES-2"],
+    paths: null,
     ...overrides,
   };
 }

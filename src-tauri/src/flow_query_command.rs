@@ -325,6 +325,9 @@ pub struct ListFlowStreamRow {
     pub dst_l4_port: Option<i64>,
     pub l4_protocol: Option<String>,
     pub node_path: Vec<String>,
+    /// paths 列原文（KTD12 统一 JSON 形状；NULL=系统推导）。弹窗解析 origin=user 的
+    /// link_seqs 匹配候选选中项；RC 只读展示双路径。
+    pub paths: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -450,6 +453,7 @@ pub async fn list_flow_streams_inner(
                 l4_protocol: r
                     .get::<Option<String>, _>("l4_protocol")
                     .or_else(|| Some(DEFAULT_L4_PROTOCOL.to_string())),
+                paths: r.get("paths"),
                 class,
                 talker,
                 listener,
@@ -584,6 +588,96 @@ pub async fn get_flow_route_map(
     get_flow_route_map_inner(pool, &request.session_id).await
 }
 
+// ── get_flow_path_candidates（U10b，弹窗路径下拉）─────────────────────────────
+
+/// 候选枚举上限（R16：上限打满时 truncated=true，弹窗提示「还有未列出路径」）。
+const FLOW_PATH_CANDIDATE_LIMIT: usize = 8;
+
+/// 单条候选路径：`node_path` mid 序列、`node_path_names` 同序显示名（缺名回退 mid）、
+/// `link_seqs` 回传 update_flow_stream 的 path_link_seqs。
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct FlowPathCandidate {
+    pub node_path: Vec<String>,
+    pub node_path_names: Vec<String>,
+    pub link_seqs: Vec<i64>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetFlowPathCandidatesRequest {
+    pub session_id: String,
+    pub talker: String,
+    pub listener: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct GetFlowPathCandidatesResult {
+    pub candidates: Vec<FlowPathCandidate>,
+    pub truncated: bool,
+}
+
+/// 只读内核：枚举 talker→listener 的候选简单路径（上限 8、按跳数/link_seq 有序）。
+/// plane 语义照 plan_tas：双平面锁 A、单平面全链路（ST/BE 口径；RC 不经此出口）。
+pub async fn get_flow_path_candidates_inner(
+    pool: &sqlx::Pool<sqlx::Sqlite>,
+    session_id: &str,
+    talker: &str,
+    listener: &str,
+) -> Result<GetFlowPathCandidatesResult, String> {
+    let (nodes, links) = crate::flow_verify::load_route_topology(pool, session_id)
+        .await
+        .map_err(|e| format!("读拓扑失败：{e}"))?;
+    let dual_plane = links
+        .iter()
+        .any(|l| crate::flow_route::link_plane(l).is_some());
+    let plane = if dual_plane { Some("A") } else { None };
+    let req = crate::flow_route::RouteRequest {
+        talker,
+        listener,
+        plane,
+    };
+    let (routes, truncated) =
+        crate::flow_route::enumerate_candidate_paths(&req, &links, FLOW_PATH_CANDIDATE_LIMIT);
+    let display_name = |mid: &str| -> String {
+        nodes
+            .iter()
+            .find(|n| n.mid == mid)
+            .and_then(|n| n.name.clone())
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| mid.to_string())
+    };
+    let candidates = routes
+        .into_iter()
+        .map(|r| FlowPathCandidate {
+            node_path_names: r.node_path.iter().map(|m| display_name(m)).collect(),
+            node_path: r.node_path,
+            link_seqs: r.link_seqs,
+        })
+        .collect();
+    Ok(GetFlowPathCandidatesResult {
+        candidates,
+        truncated,
+    })
+}
+
+#[tauri::command]
+pub async fn get_flow_path_candidates(
+    app: tauri::AppHandle,
+    store: tauri::State<'_, crate::session_store::SessionStore>,
+    request: GetFlowPathCandidatesRequest,
+) -> Result<GetFlowPathCandidatesResult, String> {
+    let pool = store.pool(&app).await?;
+    get_flow_path_candidates_inner(
+        pool,
+        &request.session_id,
+        &request.talker,
+        &request.listener,
+    )
+    .await
+}
+
 // ── update_flow_stream（U7）──────────────────────────────────────────────────
 
 /// 流更新请求：session_id + stream_seq（不可变身份键）+ 可变字段（无 class/pcp，
@@ -627,15 +721,25 @@ pub struct UpdateFlowStreamRequest {
     pub clear_path: bool,
 }
 
+/// 流更新结果：`planning_fields_changed` = 规划字段（period/frame/count/max_latency）或
+/// 路径有实际变更（KTD14 服务端判定，弹窗与 agent 通道同源；置 stale 与此同值）。
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateFlowStreamResult {
+    pub planning_fields_changed: bool,
+}
+
 /// 写前验证 + 快照 + UPDATE 内核（可注入 pool 供单测）。
 pub async fn update_flow_stream_inner(
     pool: &sqlx::Pool<sqlx::Sqlite>,
     req: &UpdateFlowStreamRequest,
-) -> Result<(), String> {
-    // 1. 读不可变字段（class/pcp 决定 verify_flow 路径，talker/listener 决定节点存在性检查）。
+) -> Result<UpdateFlowStreamResult, String> {
+    // 1. 读不可变字段（class/pcp 决定 verify_flow 路径，talker/listener 决定节点存在性检查）
+    // 与规划字段旧值（KTD14 服务端 diff）。
     let row = sqlx::query(
         "SELECT class, pcp, talker, listener, src_ip, dst_ip, src_l4_port, dst_l4_port, \
-         l4_protocol, redundant, paths FROM flow_streams WHERE session_id = ? AND stream_seq = ?",
+         l4_protocol, redundant, paths, period_us, frame_bytes, count, max_latency_us \
+         FROM flow_streams WHERE session_id = ? AND stream_seq = ?",
     )
     .bind(&req.session_id)
     .bind(req.stream_seq)
@@ -709,6 +813,14 @@ pub async fn update_flow_stream_inner(
         stream_input.paths = new_paths.clone();
     }
 
+    // 2c. KTD14 规划字段变更判定（服务端 diff，弹窗/agent 双通道同源）：
+    // period/frame/count/max_latency 任一与旧值不同，或有路径变更 → 置 stale。
+    let planning_fields_changed = req.period_us != row.get::<i64, _>("period_us")
+        || req.frame_bytes != row.get::<i64, _>("frame_bytes")
+        || req.count != row.get::<i64, _>("count")
+        || req.max_latency_us != row.get::<Option<i64>, _>("max_latency_us")
+        || path_change.is_some();
+
     // 3. 结构校验（class/pcp 不变，重跑以防节点已删或周期越界）。
     let errors = crate::flow_verify::verify_flow(pool, &req.session_id, &stream_input)
         .await
@@ -779,10 +891,17 @@ pub async fn update_flow_stream_inner(
             .map_err(|e| format!("更新路径失败：{e}"))?;
     }
 
+    // 7c. KTD14：规划字段变更 → 同事务置 gcl_plan_meta.stale（无行 no-op）。
+    if planning_fields_changed {
+        crate::flow_plan_command::mark_gcl_stale(&mut *tx, &req.session_id).await?;
+    }
+
     // 8. 提交。
     tx.commit().await.map_err(|e| format!("提交失败：{e}"))?;
 
-    Ok(())
+    Ok(UpdateFlowStreamResult {
+        planning_fields_changed,
+    })
 }
 
 #[tauri::command]
@@ -790,7 +909,7 @@ pub async fn update_flow_stream(
     app: tauri::AppHandle,
     store: tauri::State<'_, crate::session_store::SessionStore>,
     request: UpdateFlowStreamRequest,
-) -> Result<(), String> {
+) -> Result<UpdateFlowStreamResult, String> {
     let pool = store.pool(&app).await?;
     update_flow_stream_inner(pool, &request).await
 }
@@ -1339,6 +1458,7 @@ mod tests {
             dst_l4_port: None,
             l4_protocol: None,
             node_path: vec!["ES-1".into(), "SW-0".into(), "ES-2".into()],
+            paths: None,
         };
         let v = serde_json::to_value(&row).unwrap();
         assert_eq!(v["streamSeq"], 0);
@@ -1721,6 +1841,144 @@ mod tests {
             .await
             .unwrap();
             assert_eq!(count, 1, "应有 flow domain 快照");
+        });
+    }
+
+    async fn read_stale(pool: &sqlx::Pool<sqlx::Sqlite>) -> i64 {
+        sqlx::query_scalar("SELECT stale FROM gcl_plan_meta WHERE session_id='s1'")
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    /// KTD14①：非规划字段（名称/MAC）变更 → planning_fields_changed=false、stale 不置位。
+    #[test]
+    fn update_non_planning_field_does_not_mark_stale() {
+        tauri::async_runtime::block_on(async {
+            let pool = fresh_pool().await;
+            seed_linear(&pool).await;
+            add_stream(&pool, 0, "ST", 7).await;
+            add_gcl_meta(&pool, "ok", 0).await;
+            let req = UpdateFlowStreamRequest {
+                name: Some("改名".to_string()),
+                src_mac: Some("00:11:22:33:44:55".to_string()),
+                ..make_update_req() // 规划字段与 add_stream 落库值一致（500/512/10000/None）
+            };
+            let result = update_flow_stream_inner(&pool, &req).await.unwrap();
+            assert!(!result.planning_fields_changed);
+            assert_eq!(read_stale(&pool).await, 0, "非规划字段不置 stale");
+        });
+    }
+
+    /// KTD14②：改周期 → planning_fields_changed=true、stale=1（同事务持久化）。
+    #[test]
+    fn update_period_marks_stale() {
+        tauri::async_runtime::block_on(async {
+            let pool = fresh_pool().await;
+            seed_linear(&pool).await;
+            add_stream(&pool, 0, "ST", 7).await;
+            add_gcl_meta(&pool, "ok", 0).await;
+            let req = UpdateFlowStreamRequest {
+                period_us: 250,
+                ..make_update_req()
+            };
+            let result = update_flow_stream_inner(&pool, &req).await.unwrap();
+            assert!(result.planning_fields_changed);
+            assert_eq!(read_stale(&pool).await, 1, "改周期须置 stale");
+        });
+    }
+
+    /// KTD14③：路径变更（path_link_seqs）→ planning_fields_changed=true、stale=1；
+    /// 无 meta 行时置位是 no-op（不报错）。
+    #[test]
+    fn update_path_marks_stale_and_noop_without_meta() {
+        tauri::async_runtime::block_on(async {
+            let pool = fresh_pool().await;
+            seed_linear(&pool).await;
+            add_stream(&pool, 0, "ST", 7).await;
+            // 无 meta 行：路径变更照常成功（no-op 置位）。
+            let req = UpdateFlowStreamRequest {
+                path_link_seqs: Some(vec![0, 1]),
+                ..make_update_req()
+            };
+            let result = update_flow_stream_inner(&pool, &req).await.unwrap();
+            assert!(result.planning_fields_changed, "路径变更算规划字段变更");
+            // 有 meta 行：clear_path 同样置位。
+            add_gcl_meta(&pool, "ok", 0).await;
+            let req = UpdateFlowStreamRequest {
+                clear_path: true,
+                ..make_update_req()
+            };
+            let result = update_flow_stream_inner(&pool, &req).await.unwrap();
+            assert!(result.planning_fields_changed);
+            assert_eq!(read_stale(&pool).await, 1, "路径变更须置 stale");
+        });
+    }
+
+    // ── get_flow_path_candidates 测试（U10b）─────────────────────────────────
+
+    /// 菱形拓扑（1-0-2 / 1-3-2 等长两条）→ 两条候选、显示名映射（0 有名、3 缺名回退 mid）。
+    #[test]
+    fn path_candidates_diamond_two_routes_with_names() {
+        tauri::async_runtime::block_on(async {
+            let pool = fresh_pool().await;
+            for (mid, name) in [
+                ("0", Some("SW-A")),
+                ("1", Some("ES-1")),
+                ("2", Some("ES-2")),
+                ("3", None),
+            ] {
+                sqlx::query("INSERT INTO topology_nodes (session_id, mid, name, x, y, node_type, port_count, queue_count, insert_order) VALUES ('s1', ?, ?, 0, 0, 'switch', 8, 8, 0)")
+                    .bind(mid).bind(name).execute(&pool).await.unwrap();
+            }
+            for (seq, src, sp, dst, dp) in [
+                (0, "1", 0, "0", 0),
+                (1, "0", 1, "2", 0),
+                (2, "1", 1, "3", 0),
+                (3, "3", 1, "2", 1),
+            ] {
+                sqlx::query("INSERT INTO topology_links (session_id, link_seq, name, src_node, dst_node, src_port, dst_port, speed, styles_json) VALUES ('s1', ?, NULL, ?, ?, ?, ?, 1000, '{}')")
+                    .bind(seq).bind(src).bind(dst).bind(sp).bind(dp).execute(&pool).await.unwrap();
+            }
+            let r = get_flow_path_candidates_inner(&pool, "s1", "1", "2")
+                .await
+                .unwrap();
+            assert!(!r.truncated);
+            assert_eq!(r.candidates.len(), 2);
+            assert_eq!(r.candidates[0].node_path, vec!["1", "0", "2"]);
+            assert_eq!(
+                r.candidates[0].node_path_names,
+                vec!["ES-1", "SW-A", "ES-2"]
+            );
+            assert_eq!(r.candidates[0].link_seqs, vec![0, 1]);
+            assert_eq!(r.candidates[1].node_path, vec!["1", "3", "2"]);
+            assert_eq!(r.candidates[1].node_path_names, vec!["ES-1", "3", "ES-2"]);
+        });
+    }
+
+    /// 9 条并行两跳路径 > 上限 8 → 截断标志置位、返回 8 条。
+    #[test]
+    fn path_candidates_truncated_at_limit() {
+        tauri::async_runtime::block_on(async {
+            let pool = fresh_pool().await;
+            for mid in ["t", "l"] {
+                sqlx::query("INSERT INTO topology_nodes (session_id, mid, name, x, y, node_type, port_count, queue_count, insert_order) VALUES ('s1', ?, NULL, 0, 0, 'endSystem', 8, 8, 0)")
+                    .bind(mid).execute(&pool).await.unwrap();
+            }
+            for i in 0..9i64 {
+                let mid = format!("m{i}");
+                sqlx::query("INSERT INTO topology_nodes (session_id, mid, name, x, y, node_type, port_count, queue_count, insert_order) VALUES ('s1', ?, NULL, 0, 0, 'switch', 8, 8, 0)")
+                    .bind(&mid).execute(&pool).await.unwrap();
+                sqlx::query("INSERT INTO topology_links (session_id, link_seq, name, src_node, dst_node, src_port, dst_port, speed, styles_json) VALUES ('s1', ?, NULL, 't', ?, ?, 0, 1000, '{}')")
+                    .bind(i * 2).bind(&mid).bind(i).execute(&pool).await.unwrap();
+                sqlx::query("INSERT INTO topology_links (session_id, link_seq, name, src_node, dst_node, src_port, dst_port, speed, styles_json) VALUES ('s1', ?, NULL, ?, 'l', 1, ?, 1000, '{}')")
+                    .bind(i * 2 + 1).bind(&mid).bind(i).execute(&pool).await.unwrap();
+            }
+            let r = get_flow_path_candidates_inner(&pool, "s1", "t", "l")
+                .await
+                .unwrap();
+            assert!(r.truncated, "9 条候选超上限 8 应截断");
+            assert_eq!(r.candidates.len(), 8);
         });
     }
 }
