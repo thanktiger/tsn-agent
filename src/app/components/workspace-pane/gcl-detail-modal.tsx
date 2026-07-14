@@ -2,12 +2,15 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   buildGclDisplayModel,
   buildGclOverview,
+  degradedFlowSeqs,
   type FlowRefDto,
   type GclDetail,
   type GclFilters,
   type GclWindowRow,
   invokeGetGclDetail,
 } from "./flow-sim";
+import { GclFlowChainChart } from "./gcl-flow-chain-chart";
+import { GclGanttChart } from "./gcl-gantt-chart";
 
 export interface GclDetailModalProps {
   /** false = 不渲染（不出 DOM、不拉数据）。 */
@@ -313,7 +316,16 @@ export function GclDetailModal({
                   aria-labelledby="gcl-detail-tab-gantt"
                   data-testid="gcl-gantt-slot"
                   className="gcl-detail-slot"
-                />
+                >
+                  {/* U6：ECharts 甘特（model 已按弹窗筛选过滤）。 */}
+                  {model && detail && (
+                    <GclGanttChart
+                      model={model}
+                      cycleNs={detail.meta?.cycleNs ?? 0}
+                      degradedSeqs={degradedFlowSeqs(detail)}
+                    />
+                  )}
+                </div>
               )}
               {activeTab === "flow-chain" && (
                 <div
@@ -322,7 +334,16 @@ export function GclDetailModal({
                   aria-labelledby="gcl-detail-tab-flow-chain"
                   data-testid="gcl-chain-slot"
                   className="gcl-detail-slot"
-                />
+                >
+                  {/* U7：窗口链（R9：不受节点筛选影响，流选择在组件内；与顶部流量筛选共 state）。 */}
+                  {detail && (
+                    <GclFlowChainChart
+                      detail={detail}
+                      selectedFlowSeq={filters.flowSeq}
+                      onSelectFlow={(seq) => setFilters((f) => ({ ...f, flowSeq: seq }))}
+                    />
+                  )}
+                </div>
               )}
               {activeTab === "table" && (
                 <div

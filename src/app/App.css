@@ -2918,6 +2918,92 @@ textarea:focus-visible {
   padding: 0 2px;
 }
 
+/* U9/R15：门控概览八卡（gcl-overview-* 类族）——卡片 grid 复用面板卡片视觉语言
+   （sim-overall 绿/琥珀同色系），窄面板 auto-fit 自动换行。 */
+.gcl-overview {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.gcl-overview-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 8px;
+}
+
+.gcl-overview-card {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #ffffff;
+  text-align: left;
+  font: inherit;
+}
+
+/* 时延分析卡是可点击 button：清默认外观、保留卡片视觉。 */
+button.gcl-overview-card {
+  appearance: none;
+  cursor: pointer;
+}
+
+button.gcl-overview-card:disabled {
+  cursor: default;
+}
+
+.gcl-overview-card__label {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.gcl-overview-card__value {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.gcl-overview-card__sub {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+/* 调度状态绿卡（可调度，复用 sim-overall.converged 色系）。 */
+.gcl-overview-card--ok {
+  border-color: rgba(22, 163, 74, 0.3);
+  background: rgba(236, 253, 245, 0.95);
+}
+
+.gcl-overview-card--ok .gcl-overview-card__value {
+  color: #15803d;
+}
+
+/* 过期琥珀卡（KTD14 stale=需重新规划，复用 sim-overall.warn 色系）。 */
+.gcl-overview-card--stale {
+  border-color: rgba(217, 119, 6, 0.3);
+  background: rgba(255, 251, 235, 0.95);
+}
+
+.gcl-overview-card--stale .gcl-overview-card__value {
+  color: #b45309;
+}
+
+/* 时延分析高亮卡（浅琥珀底）。 */
+.gcl-overview-card--highlight {
+  border-color: rgba(217, 119, 6, 0.2);
+  background: rgba(255, 251, 235, 0.6);
+}
+
+.gcl-overview-latency-table {
+  margin-top: 2px;
+}
+
+.gcl-overview-margin-neg {
+  color: #b91c1c;
+}
+
 .config-tabs {
   display: flex;
   align-items: center;

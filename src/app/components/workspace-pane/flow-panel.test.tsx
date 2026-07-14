@@ -5,6 +5,8 @@ import { describe, expect, it, vi } from "vitest";
 import { FlowPanel, type FlowPanelProps } from "./flow-panel";
 import type {
   FlowPlanDetail,
+  GclDetail,
+  GclWindowRow,
   ListFlowStreamRow,
   ListFlowStreamsResult,
   PlanResult,
@@ -198,6 +200,87 @@ function streamsResult(streams: ListFlowStreamRow[] = []): ListFlowStreamsResult
   return { streams };
 }
 
+// ——— U9 门控明细（新表 get_gcl_detail）夹具 ———
+
+/** 空明细（未规划/老工程）。 */
+function gclDetailEmpty(): GclDetail {
+  return { windows: [], meta: null, streams: [] };
+}
+
+function gclWindow(overrides: Partial<GclWindowRow> = {}): GclWindowRow {
+  return {
+    node: "0",
+    nodeName: "es1",
+    ethN: 0,
+    entryIdx: 0,
+    startNs: 0,
+    durationNs: 1488,
+    gateStates: 0x80,
+    flowRefs: [{ seq: 0, source: "derived" }],
+    ...overrides,
+  };
+}
+
+/**
+ * U9 两流已规划夹具（es1→sw1→es2，cycle=1ms）：
+ * - F0：128B/1000μs，串行化 1488ns，es1 [0,1488]、sw1 [3488,4976]（shift=1488+2000）
+ *   → 端到端 4976ns；maxLatency 100μs → 裕度 95024ns。
+ * - F1：256B/500μs，串行化 2512ns，es1 [10000,12512]、sw1 [14512,17024]（shift=2512+2000）
+ *   → 端到端 7024ns（最大）；maxLatency 未填。
+ * - es1 另有 10000ns 全关窗 → 表项 5 / 打开窗 4 / 关窗占比 10000/(2×1e6)=0.5%。
+ * - 每端口开窗 4000ns → 最大占用 0.4%；链路带宽 1.488+5.024=6.512Mbps → 0.7%。
+ */
+function gclDetailPlanned(overrides: Partial<GclDetail> = {}): GclDetail {
+  return {
+    meta: { status: "ok", cycleNs: 1_000_000, algorithm: "Z3", stale: false },
+    windows: [
+      gclWindow(),
+      gclWindow({
+        entryIdx: 1,
+        startNs: 10_000,
+        durationNs: 2512,
+        flowRefs: [{ seq: 1, source: "derived" }],
+      }),
+      gclWindow({ node: "1", nodeName: "sw1", ethN: 1, startNs: 3488 }),
+      gclWindow({
+        node: "1",
+        nodeName: "sw1",
+        ethN: 1,
+        entryIdx: 1,
+        startNs: 14_512,
+        durationNs: 2512,
+        flowRefs: [{ seq: 1, source: "derived" }],
+      }),
+      gclWindow({
+        entryIdx: 2,
+        startNs: 990_000,
+        durationNs: 10_000,
+        gateStates: 0,
+        flowRefs: null,
+      }),
+    ],
+    streams: [
+      makeFlowStream({
+        streamSeq: 0,
+        name: "F0",
+        nodePath: ["es1", "sw1", "es2"],
+        frameBytes: 128,
+        periodUs: 1000,
+        maxLatencyUs: 100,
+      }),
+      makeFlowStream({
+        streamSeq: 1,
+        name: "F1",
+        nodePath: ["es1", "sw1", "es2"],
+        frameBytes: 256,
+        periodUs: 500,
+        maxLatencyUs: null,
+      }),
+    ],
+    ...overrides,
+  };
+}
+
 function baseProps(overrides: Partial<FlowPanelProps> = {}): FlowPanelProps {
   return {
     inFlowStage: true,
@@ -215,6 +298,7 @@ function baseProps(overrides: Partial<FlowPanelProps> = {}): FlowPanelProps {
     verifyTas: vi.fn(async () => verifyResult()),
     getFlowPlan: vi.fn(async () => planDetail()),
     listFlowStreams: vi.fn(async () => streamsResult()),
+    getGclDetail: vi.fn(async () => gclDetailEmpty()),
     ...overrides,
   };
 }
@@ -749,6 +833,127 @@ describe("FlowPanel", () => {
     fireEvent.click(btn);
     expect(await screen.findByRole("dialog", { name: "门控详情" })).toBeTruthy();
     await waitFor(() => expect(getGclDetail).toHaveBeenCalledWith("s1"));
+  });
+
+  // ——— U9 门控概览八卡（R15/AE7）———
+
+  /** 已规划态渲染基座：planQuery=planned（时序图口径）+ gclDetail 两流夹具。 */
+  function renderOverview(detail: GclDetail = gclDetailPlanned()) {
+    const getFlowPlan = vi.fn(async () => planDetailWithGcl());
+    const getGclDetail = vi.fn(async () => detail);
+    return render(<FlowPanel {...baseProps({ getFlowPlan, getGclDetail })} />);
+  }
+
+  /** 按标签定位概览卡（label 唯一）。 */
+  function cardOf(label: string): HTMLElement {
+    return screen.getByText(label).closest(".gcl-overview-card") as HTMLElement;
+  }
+
+  it("U9/AE7：已规划态渲染八卡，数值与 buildGclOverview 口径一致", async () => {
+    renderOverview();
+    expect(await screen.findByRole("button", { name: /门控概览/ })).toBeTruthy();
+    // ① 调度状态：绿卡「可调度」+ 副行「GCL 已生成」。
+    const statusCard = cardOf("调度状态");
+    expect(within(statusCard).getByText("可调度")).toBeTruthy();
+    expect(within(statusCard).getByText("GCL 已生成")).toBeTruthy();
+    expect(statusCard.className).toContain("gcl-overview-card--ok");
+    // ② 超周期。
+    expect(within(cardOf("超周期")).getByText("1000.00 μs")).toBeTruthy();
+    expect(within(cardOf("超周期")).getByText("规划周期")).toBeTruthy();
+    // ③ 业务流/门控端口 + 涉及队列。
+    const flowsCard = cardOf("业务流 / 门控端口");
+    expect(within(flowsCard).getByText("2 条 / 2")).toBeTruthy();
+    expect(within(flowsCard).getByText("涉及 q7 队列")).toBeTruthy();
+    // ④ GCL 表项/打开窗口。
+    const entriesCard = cardOf("GCL 表项");
+    expect(within(entriesCard).getByText("5")).toBeTruthy();
+    expect(within(entriesCard).getByText("打开窗口 4 个")).toBeTruthy();
+    // ⑤⑥⑦ 三个百分比卡。
+    expect(within(cardOf("最大门控窗口占用")).getByText("0.4%")).toBeTruthy();
+    const bwCard = cardOf("最大链路带宽占用");
+    expect(within(bwCard).getByText("0.7%")).toBeTruthy();
+    expect(within(bwCard).getByText("按流带宽/链路速率推导")).toBeTruthy();
+    expect(within(cardOf("关闭窗口占比")).getByText("0.5%")).toBeTruthy();
+    // ⑧ 时延分析高亮卡：最大端到端 = F1 的 7024ns。
+    const latCard = cardOf("时延分析");
+    expect(within(latCard).getByText("最大端到端 7.02 μs")).toBeTruthy();
+    expect(within(latCard).getByText("最大端到端时延·规划推导值")).toBeTruthy();
+    expect(latCard.className).toContain("gcl-overview-card--highlight");
+  });
+
+  it("U9：时延分析卡展开每流明细（时延/裕度；未设上限）", async () => {
+    renderOverview();
+    fireEvent.click(await screen.findByRole("button", { name: /时延分析/ }));
+    const table = screen.getByRole("table");
+    expect(within(table).getByText("F0")).toBeTruthy();
+    expect(within(table).getByText("4.98")).toBeTruthy(); // F0 端到端 4976ns。
+    expect(within(table).getByText("95.02 μs")).toBeTruthy(); // F0 裕度 100000−4976。
+    expect(within(table).getByText("F1")).toBeTruthy();
+    expect(within(table).getByText("7.02")).toBeTruthy();
+    expect(within(table).getByText("未设上限")).toBeTruthy(); // F1 maxLatency 未填。
+  });
+
+  it("U9：负裕度红字 +「口径不同」提示（推导超 maxLatency 如实呈现）", async () => {
+    const detail = gclDetailPlanned();
+    detail.streams[0] = { ...detail.streams[0], maxLatencyUs: 2 }; // 2000ns < 4976ns。
+    renderOverview(detail);
+    fireEvent.click(await screen.findByRole("button", { name: /时延分析/ }));
+    const neg = screen.getByText("-2.98 μs（口径不同）");
+    expect(neg.className).toContain("gcl-overview-margin-neg");
+  });
+
+  it("U9/KTD14：meta.stale=true → 琥珀卡「需重新规划」+ 副行「配置已变更」", async () => {
+    renderOverview(
+      gclDetailPlanned({
+        meta: { status: "ok", cycleNs: 1_000_000, algorithm: "Z3", stale: true },
+      }),
+    );
+    expect(await screen.findByText("需重新规划")).toBeTruthy();
+    const statusCard = cardOf("调度状态");
+    expect(within(statusCard).getByText("配置已变更")).toBeTruthy();
+    expect(statusCard.className).toContain("gcl-overview-card--stale");
+    expect(statusCard.className).not.toContain("gcl-overview-card--ok");
+  });
+
+  it("U9：类级降级流排除出最大值并提示「N 条流未计入」", async () => {
+    const detail = gclDetailPlanned();
+    detail.windows[1] = { ...detail.windows[1], flowRefs: [{ seq: 1, source: "class" }] };
+    renderOverview(detail);
+    expect(await screen.findByText(/（1 条流未计入）/)).toBeTruthy();
+    // F1 整链降级后最大端到端只剩 F0 的 4976ns。
+    expect(screen.getByText("最大端到端 4.98 μs")).toBeTruthy();
+  });
+
+  it("U9：未规划态不渲染概览卡片区（CTA 现状不变）", async () => {
+    render(<FlowPanel {...baseProps()} />); // getFlowPlan=未规划、getGclDetail=空。
+    expect(await screen.findByRole("button", { name: "规划门控表" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /门控概览/ })).toBeNull();
+    expect(screen.queryByText("调度状态")).toBeNull();
+  });
+
+  it("U9：折叠交互——默认展开，点击折叠再点展开", async () => {
+    renderOverview();
+    const toggle = await screen.findByRole("button", { name: /门控概览/ });
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    expect(screen.getByText("调度状态")).toBeTruthy();
+    fireEvent.click(toggle);
+    expect(screen.queryByText("调度状态")).toBeNull();
+    fireEvent.click(toggle);
+    expect(screen.getByText("调度状态")).toBeTruthy();
+  });
+
+  it("U9：无可归属链路 → 带宽卡显示「—」+ 副行「链路速率未知」", async () => {
+    const detail = gclDetailPlanned({
+      streams: [
+        makeFlowStream({ streamSeq: 0, name: "F0", nodePath: [], maxLatencyUs: null }),
+        makeFlowStream({ streamSeq: 1, name: "F1", nodePath: [], frameBytes: 256, periodUs: 500 }),
+      ],
+    });
+    renderOverview(detail);
+    await screen.findByRole("button", { name: /门控概览/ });
+    const bwCard = cardOf("最大链路带宽占用");
+    expect(within(bwCard).getByText("—")).toBeTruthy();
+    expect(within(bwCard).getByText("链路速率未知")).toBeTruthy();
   });
 
   // ——— U4 流量列表 ———

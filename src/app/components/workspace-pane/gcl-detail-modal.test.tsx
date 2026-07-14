@@ -1,6 +1,15 @@
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
+
+// 桩化两个 ECharts 图表页签（jsdom 无 canvas；图表自身在各自 test 文件里测）。
+vi.mock("./gcl-gantt-chart", () => ({
+  GclGanttChart: () => <div data-testid="gantt-chart-stub" />,
+}));
+vi.mock("./gcl-flow-chain-chart", () => ({
+  GclFlowChainChart: () => <div data-testid="chain-chart-stub" />,
+}));
+
 import type { GclDetail, GclWindowRow, ListFlowStreamRow } from "./flow-sim";
 import { GclDetailModal } from "./gcl-detail-modal";
 

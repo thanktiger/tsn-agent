@@ -5,14 +5,17 @@ import { CHART_COLORS } from "./chart-palette";
 import { FlowDetailModal } from "./flow-detail-modal";
 import {
   buildGateTimelineRows,
+  buildGclOverview,
   type FlowPlanDetail,
   type FlowPlanQueryState,
   flowPlanPresentation,
   type GclDetail,
+  type GclOverview,
   gclDutyCycle,
   gclOpenIntervals,
   gptpDiagLine,
   invokeGetFlowPlan,
+  invokeGetGclDetail,
   invokeListFlowStreams,
   invokePlanTas,
   invokeVerifyTas,
@@ -60,9 +63,15 @@ export interface FlowPanelProps {
   getFlowPlan?: (sessionId: string) => Promise<FlowPlanDetail>;
   /** 流集查询读通道（U4，测试注入替身）。 */
   listFlowStreams?: (sessionId: string) => Promise<ListFlowStreamsResult>;
-  /** 门控详情弹窗读通道（U5，测试注入替身，透传 GclDetailModal）。 */
+  /** 门控详情读通道（U5 透传 GclDetailModal + U9 概览八卡；测试注入替身）。 */
   getGclDetail?: (sessionId: string) => Promise<GclDetail>;
 }
+
+/** U9：门控明细（新表）查询态——与 FlowPlanQueryState 同型，data=GclDetail。 */
+type GclQueryState =
+  | { status: "loading" }
+  | { status: "unavailable" }
+  | { status: "loaded"; detail: GclDetail };
 
 export function FlowPanel({
   inFlowStage,
@@ -79,7 +88,7 @@ export function FlowPanel({
   verifyTas = invokeVerifyTas,
   getFlowPlan = invokeGetFlowPlan,
   listFlowStreams = invokeListFlowStreams,
-  getGclDetail,
+  getGclDetail = invokeGetGclDetail,
 }: FlowPanelProps) {
   // ref 即时拦并发（disabled 态下一拍才生效，防双击派发第二次）。
   const planInflight = useRef(false);
@@ -109,17 +118,39 @@ export function FlowPanel({
     }
   }, [getFlowPlan, sessionId]);
 
+  // U9：门控明细（get_gcl_detail 新表）查询态——概览八卡数据源；触发源与 planQuery 同三处
+  // （挂载·切会话 / 规划完成 / flow domain DB 变更），requestSeq 丢弃过期响应。
+  const [gclQuery, setGclQuery] = useState<GclQueryState>({ status: "loading" });
+  const gclQueryReqRef = useRef(0);
+  const refreshGclQuery = useCallback(async () => {
+    const seq = ++gclQueryReqRef.current;
+    try {
+      const detail = await getGclDetail(sessionId);
+      if (gclQueryReqRef.current === seq) setGclQuery({ status: "loaded", detail });
+    } catch {
+      if (gclQueryReqRef.current === seq) setGclQuery({ status: "unavailable" });
+    }
+  }, [getGclDetail, sessionId]);
+
   // 挂载 / 切会话：先回 loading（避免闪旧数据 + 抑制 CTA 闪现），再取。
   useEffect(() => {
     setPlanQuery({ status: "loading" });
     void refreshPlanQuery();
   }, [refreshPlanQuery]);
 
+  useEffect(() => {
+    setGclQuery({ status: "loading" });
+    void refreshGclQuery();
+  }, [refreshGclQuery]);
+
   // 规划完成（含 no_gating 清表 / solver_failed 旧表保留）后刷新明细；切 tab 卸载重挂后再变 done
   // 也刷新（不再在 handlePlan 里内联取数——重挂后内联块随旧闭包丢失）。
   useEffect(() => {
-    if (planState.status === "done") void refreshPlanQuery();
-  }, [planState, refreshPlanQuery]);
+    if (planState.status === "done") {
+      void refreshPlanQuery();
+      void refreshGclQuery();
+    }
+  }, [planState, refreshPlanQuery, refreshGclQuery]);
 
   // U4：流集查询态（挂载即拉，DB 变更重拉；requestSeq 丢弃过期响应）。
   const [streams, setStreams] = useState<ListFlowStreamRow[]>([]);
@@ -157,6 +188,7 @@ export function FlowPanel({
     sessionId,
     onChange: () => {
       void refreshPlanQuery();
+      void refreshGclQuery();
       void refreshStreams();
     },
   });
@@ -301,6 +333,11 @@ export function FlowPanel({
           {/* R22：分钟级综合进行中反馈。 */}
           {planning && <p className="flow-progress mono">正在跑 Z3 门控综合，分钟级，请稍候…</p>}
 
+          {/* U9/R15：门控概览八卡（仅已规划态渲染；数据源=get_gcl_detail，与详情弹窗同源 KTD8）。 */}
+          {queryPresentation === "planned" && gclQuery.status === "loaded" && (
+            <GclOverviewSection overview={buildGclOverview(gclQuery.detail)} />
+          )}
+
           {idleLoading ? null : fresh ? (
             <PanelCta
               label="规划门控表"
@@ -398,6 +435,179 @@ function SolverBadge({ solver, z3 }: { solver: string; z3: boolean }) {
     <span className={`flow-solver-badge ${z3 ? "sim-badge ok" : "besteffort"}`}>
       {z3 ? `${solver}·带可调度性保证` : `${solver}·兜底解无保证`}
     </span>
+  );
+}
+
+/** 百分比格式化（概览卡）：null → 「—」。 */
+function fmtPct(v: number | null): string {
+  return v === null ? "—" : `${v.toFixed(1)}%`;
+}
+
+/** 概览统计卡（U9/R15）：标签 + 主值 + 副行小字；modifier=--ok（绿）/--stale（琥珀）。 */
+function OverviewCard({
+  label,
+  value,
+  sub,
+  modifier = "",
+}: {
+  label: string;
+  value: string;
+  sub: string;
+  modifier?: string;
+}) {
+  return (
+    <div className={`gcl-overview-card${modifier}`}>
+      <span className="gcl-overview-card__label">{label}</span>
+      <span className="gcl-overview-card__value">{value}</span>
+      <span className="gcl-overview-card__sub">{sub}</span>
+    </div>
+  );
+}
+
+/**
+ * 门控概览八卡（U9/R15）：可折叠标题行（默认展开）+ 4×2 grid（窄面板 auto-fit 换行）。
+ * 时延分析卡（高亮）可点击展开每流明细表（流名/时延/裕度——负裕度红字挂「口径不同」，
+ * KTD9 推导模型≠求解器约束口径）。全部数值为规划推导值，非实测（R9 诚实边界）。
+ */
+function GclOverviewSection({ overview }: { overview: GclOverview }) {
+  const [expanded, setExpanded] = useState(true);
+  const [latencyOpen, setLatencyOpen] = useState(false);
+  const lat = overview.latency;
+
+  // ① 调度状态：stale 过期（KTD14）优先于 status 三态。
+  let statusValue: string;
+  let statusSub: string;
+  let statusMod = "";
+  if (overview.stale) {
+    statusValue = "需重新规划";
+    statusSub = "配置已变更";
+    statusMod = " gcl-overview-card--stale";
+  } else if (overview.scheduleStatus === "ok") {
+    statusValue = "可调度";
+    statusSub = "GCL 已生成";
+    statusMod = " gcl-overview-card--ok";
+  } else if (overview.scheduleStatus === "no_gating") {
+    statusValue = "无需门控";
+    statusSub = "流集无 ST 流";
+  } else {
+    statusValue = "未规划";
+    statusSub = "尚无规划结果";
+  }
+
+  const latencySub = `最大端到端时延·规划推导值${
+    lat.excludedCount > 0 ? `（${lat.excludedCount} 条流未计入）` : ""
+  }`;
+
+  return (
+    <div className="gcl-overview">
+      <button
+        type="button"
+        className="sim-override-toggle gcl-overview-toggle"
+        aria-expanded={expanded}
+        onClick={() => setExpanded((v) => !v)}
+      >
+        {expanded ? "▾" : "▸"} 门控概览
+      </button>
+      {expanded && (
+        <>
+          <div className="gcl-overview-grid">
+            <OverviewCard
+              label="调度状态"
+              value={statusValue}
+              sub={statusSub}
+              modifier={statusMod}
+            />
+            <OverviewCard
+              label="超周期"
+              value={overview.cycleNs !== null ? `${nsToUs(overview.cycleNs)} μs` : "—"}
+              sub="规划周期"
+            />
+            <OverviewCard
+              label="业务流 / 门控端口"
+              value={`${overview.streamCount} 条 / ${overview.gatedPortCount}`}
+              sub={
+                overview.gatedQueues.length > 0
+                  ? `涉及 ${overview.gatedQueues.map((q) => `q${q}`).join(",")} 队列`
+                  : "无门控队列"
+              }
+            />
+            <OverviewCard
+              label="GCL 表项"
+              value={`${overview.entryCount}`}
+              sub={`打开窗口 ${overview.openWindowCount} 个`}
+            />
+            <OverviewCard
+              label="最大门控窗口占用"
+              value={fmtPct(overview.maxPortOpenPct)}
+              sub="按端口打开窗口/超周期推导"
+            />
+            <OverviewCard
+              label="最大链路带宽占用"
+              value={fmtPct(overview.maxLinkUtilizationPct)}
+              sub={
+                overview.maxLinkUtilizationPct === null ? "链路速率未知" : "按流带宽/链路速率推导"
+              }
+            />
+            <OverviewCard
+              label="关闭窗口占比"
+              value={fmtPct(overview.closedPct)}
+              sub="全关窗口/所有端口周期"
+            />
+            {/* ⑧ 时延分析（高亮卡）：可点击展开每流明细。 */}
+            <button
+              type="button"
+              className="gcl-overview-card gcl-overview-card--highlight"
+              aria-expanded={latencyOpen}
+              onClick={() => setLatencyOpen((v) => !v)}
+              disabled={lat.rows.length === 0}
+              title={lat.rows.length > 0 ? "点击展开每流时延明细" : undefined}
+            >
+              <span className="gcl-overview-card__label">时延分析</span>
+              <span className="gcl-overview-card__value">
+                {lat.maxLatencyNs !== null ? `最大端到端 ${nsToUs(lat.maxLatencyNs)} μs` : "—"}
+              </span>
+              <span className="gcl-overview-card__sub">{latencySub}</span>
+            </button>
+          </div>
+          {latencyOpen && lat.rows.length > 0 && (
+            <table className="eng-table gcl-overview-latency-table">
+              <thead>
+                <tr>
+                  <th>流</th>
+                  <th>端到端时延(μs)</th>
+                  <th>裕度</th>
+                </tr>
+              </thead>
+              <tbody>
+                {lat.rows.map((r) => {
+                  const marginNs = r.maxLatencyNs !== null ? r.maxLatencyNs - r.latencyNs : null;
+                  return (
+                    <tr key={r.streamSeq}>
+                      <td>{r.name}</td>
+                      <td className="mono">{nsToUs(r.latencyNs)}</td>
+                      <td className="mono">
+                        {marginNs === null ? (
+                          "未设上限"
+                        ) : marginNs >= 0 ? (
+                          `${nsToUs(marginNs)} μs`
+                        ) : (
+                          <span
+                            className="gcl-overview-margin-neg"
+                            title="推导模型与求解器约束口径不同"
+                          >
+                            {nsToUs(marginNs)} μs（口径不同）
+                          </span>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          )}
+        </>
+      )}
+    </div>
   );
 }
 
