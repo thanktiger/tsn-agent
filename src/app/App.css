@@ -2340,6 +2340,9 @@ textarea:focus-visible {
   display: flex;
   align-items: center;
   gap: 8px;
+  /* 主操作按钮统一钉在命令栏右上角：左侧无子 tab/说明文案时（如门控规划），
+     space-between 单元素会靠左——margin-left:auto 保证恒右。 */
+  margin-left: auto;
 }
 
 /* 子 tab 分段开关（iOS segmented 风）。 */
