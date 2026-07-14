@@ -302,6 +302,33 @@ export function gptpDiagLine(d: GptpDiag): string {
   return `gPTP 收敛：${d.convergedNodes}/${d.totalNodes} 节点 ≤ 阈值（${d.thresholdSummary}），最差 ${d.worstOffsetNs.toFixed(0)} ns @${d.worstNode}`;
 }
 
+/** flow 揭示动作（agent 写流后引导用户到流量规划 tab，镜像 timesync computeReveal）。 */
+export type FlowRevealAction = "expand-flow-list" | "badge" | "none";
+
+/**
+ * agent 经 sidecar 写流（domain="flow" mutation）后的分级揭示纯决策：
+ * - 面板收起 → 展开并落流量列表子 tab；
+ * - 面板开但在别的 tab → 挂 badge；
+ * - 已在流量 tab → 不动。
+ * 防误触：调用方须用 mutation 时间戳过滤掉「会话挂载前」的历史记录（切会话时
+ * catch-up 会全量回放旧 mutation）；UI 详情弹窗保存走 Tauri command 不发 mutation，
+ * 天然不触发。
+ */
+export function computeFlowReveal(input: {
+  hasNewFlowMutation: boolean;
+  inFlowStage: boolean;
+  panelExpanded: boolean;
+  activeIsFlow: boolean;
+}): FlowRevealAction {
+  if (!input.hasNewFlowMutation || !input.inFlowStage) {
+    return "none";
+  }
+  if (!input.panelExpanded) {
+    return "expand-flow-list";
+  }
+  return input.activeIsFlow ? "none" : "badge";
+}
+
 /** 单流行，对齐 flow_query_command::ListFlowStreamRow。
  * 设备级标识列（MAC/IP/端口/协议/VLAN/偏移/抖动/名称）NULL 时后端回退推导默认值；
  * nodePath 为路由显示名序列（推导失败为空，前端回退 talker → listener）。 */

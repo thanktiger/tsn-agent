@@ -196,6 +196,8 @@ export interface WorkspacePaneProps {
   onSelectTimesyncSubTab: (tab: TimesyncSubTab) => void;
   /** U4：set_gm 揭示在「面板已开但用户在别 tab」时给时间同步 tab 挂的脉冲 badge。 */
   timesyncTabHasBadge: boolean;
+  /** flow 揭示：agent 写流后在「面板已开但用户在别 tab」时给流量规划 tab 挂的脉冲 badge。 */
+  flowTabHasBadge?: boolean;
   /** 流量规划子 tab 选择（App 级，随会话重置）。 */
   activeFlowSubTab: FlowSubTab;
   onSelectFlowSubTab: (tab: FlowSubTab) => void;
@@ -238,6 +240,7 @@ export function WorkspacePane({
   activeTimesyncSubTab,
   onSelectTimesyncSubTab,
   timesyncTabHasBadge,
+  flowTabHasBadge,
   activeFlowSubTab,
   onSelectFlowSubTab,
   selectedFlowSeq,
@@ -893,6 +896,9 @@ export function WorkspacePane({
               >
                 {tab.label}
                 {tab.id === "time-sync" && timesyncTabHasBadge && (
+                  <span className="config-tab-badge" role="img" aria-label="有新内容" />
+                )}
+                {tab.id === "flow" && flowTabHasBadge && (
                   <span className="config-tab-badge" role="img" aria-label="有新内容" />
                 )}
               </button>

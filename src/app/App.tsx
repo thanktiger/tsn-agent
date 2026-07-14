@@ -31,9 +31,11 @@ import {
   type VerifyUiState,
   WorkspacePane,
 } from "./components/workspace-pane";
+import { computeFlowReveal } from "./components/workspace-pane/flow-sim";
 import { computeReveal, type RevealBaseline } from "./components/workspace-pane/timesync-sim";
 import { type WorkspaceToolPanel, WorkspaceTools } from "./components/workspace-tools";
 import { useAgentRunController } from "./hooks/use-agent-run-controller";
+import { useSessionDbListener } from "./hooks/use-session-db-listener";
 import { useSessionRepository } from "./hooks/use-session-repository";
 import { useTimesyncSnapshot } from "./hooks/use-timesync-snapshot";
 import { useTopologySnapshot } from "./hooks/use-topology-snapshot";
@@ -142,6 +144,10 @@ export function App() {
   const cancelRequestedRef = useRef(false);
   // set_gm 揭示（U4）：时间同步 tab 上的「有新内容」脉冲 badge（面板已开但用户在别 tab 时用）。
   const [timesyncTabHasBadge, setTimesyncTabHasBadge] = useState(false);
+  // flow 揭示：agent 写流（domain="flow" mutation）后跳到流量规划 tab（镜像 timesync）。
+  const [flowTabHasBadge, setFlowTabHasBadge] = useState(false);
+  // 会话挂载时刻：过滤 catch-up 回放的历史 flow mutation（时间戳早于挂载 → 不揭示）。
+  const flowRevealMountAtRef = useRef(Date.now());
   // 镜像最新 expand/activeConfigTab，供 reveal effect 读而不把它们放进 deps（否则会误触发）。
   const configPanelExpandedRef = useRef(configPanelExpanded);
   configPanelExpandedRef.current = configPanelExpanded;
@@ -169,6 +175,8 @@ export function App() {
     setFlowPlanState({ status: "idle" });
     setFlowVerifyState({ status: "idle" });
     setTimesyncTabHasBadge(false);
+    setFlowTabHasBadge(false);
+    flowRevealMountAtRef.current = Date.now();
   }, [currentSession.id]);
 
   // U4：set_gm 后分级揭示。纯决策在 computeReveal（可单测）；这里只把 action 落成 state。
@@ -193,6 +201,31 @@ export function App() {
       setTimesyncTabHasBadge(false);
     }
   }, [currentSession.id, currentSession.workflow.currentStep, timesyncSnapshot]);
+
+  // flow 揭示：agent 经 sidecar 写流（add/update/remove）push domain="flow" mutation →
+  // 分级揭示流量规划 tab。UI 详情弹窗保存走 Tauri command 不发 mutation，不会误触发；
+  // 切会话时 catch-up 回放的历史记录被挂载时间戳门挡掉。
+  useSessionDbListener({
+    sessionId: currentSession.id,
+    onChange: (mutations) => {
+      const hasNewFlowMutation = mutations.some(
+        (m) => m.domain === "flow" && m.timestampMs >= flowRevealMountAtRef.current,
+      );
+      const action = computeFlowReveal({
+        hasNewFlowMutation,
+        inFlowStage: currentSession.workflow.currentStep === "flow-template",
+        panelExpanded: configPanelExpandedRef.current,
+        activeIsFlow: activeConfigTabRef.current === "flow",
+      });
+      if (action === "expand-flow-list") {
+        setConfigPanelExpanded(true);
+        setActiveConfigTab("flow");
+        setActiveFlowSubTab("flow-list");
+      } else if (action === "badge") {
+        setFlowTabHasBadge(true);
+      }
+    },
+  });
 
   const workflow = currentSession.workflow;
   const scenarioConfig = getScenarioConfig(workflow.scenarioConfigId);
@@ -714,6 +747,7 @@ export function App() {
               activeTimesyncSubTab={activeTimesyncSubTab}
               onSelectTimesyncSubTab={setActiveTimesyncSubTab}
               timesyncTabHasBadge={timesyncTabHasBadge}
+              flowTabHasBadge={flowTabHasBadge}
               activeFlowSubTab={activeFlowSubTab}
               onSelectFlowSubTab={setActiveFlowSubTab}
               selectedFlowSeq={selectedFlowSeq}
@@ -721,9 +755,11 @@ export function App() {
               onToggleConfigPanel={() => setConfigPanelExpanded((value) => !value)}
               onSelectConfigTab={(tab) => {
                 setActiveConfigTab(tab);
-                // 进时间同步 tab 即清 badge（用户已看到揭示）。
+                // 进对应 tab 即清 badge（用户已看到揭示）。
                 if (tab === "time-sync") {
                   setTimesyncTabHasBadge(false);
+                } else if (tab === "flow") {
+                  setFlowTabHasBadge(false);
                 }
               }}
               onNodeSelect={handleNodeSelect}

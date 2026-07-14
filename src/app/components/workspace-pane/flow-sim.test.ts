@@ -332,3 +332,34 @@ describe("门控明细展示辅助（U2⑤）", () => {
     expect(flowPlanPresentation(base)).toBe("unplanned");
   });
 });
+
+import { computeFlowReveal } from "./flow-sim";
+
+describe("computeFlowReveal（agent 写流后分级揭示）", () => {
+  const base = {
+    hasNewFlowMutation: true,
+    inFlowStage: true,
+    panelExpanded: false,
+    activeIsFlow: false,
+  };
+
+  it("面板收起 → 展开并落流量列表子 tab", () => {
+    expect(computeFlowReveal(base)).toBe("expand-flow-list");
+  });
+
+  it("面板已开但在别 tab → 挂 badge，不抢焦点", () => {
+    expect(computeFlowReveal({ ...base, panelExpanded: true })).toBe("badge");
+  });
+
+  it("面板已开且就在流量 tab → 不动", () => {
+    expect(computeFlowReveal({ ...base, panelExpanded: true, activeIsFlow: true })).toBe("none");
+  });
+
+  it("无新 flow mutation（历史回放已被时间戳门滤掉）→ 不揭示", () => {
+    expect(computeFlowReveal({ ...base, hasNewFlowMutation: false })).toBe("none");
+  });
+
+  it("非流量规划阶段 → 不揭示", () => {
+    expect(computeFlowReveal({ ...base, inFlowStage: false })).toBe("none");
+  });
+});
