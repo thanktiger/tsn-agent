@@ -211,7 +211,7 @@ pub async fn list_flow_streams_inner(
         "SELECT stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener, \
                 max_latency_us, redundant, src_mac, dst_mac, vlan_id, \
                 earliest_send_offset_ns, latest_send_offset_ns, \
-                name, jitter_ns, src_ip, dst_ip, src_l4_port, dst_l4_port, l4_protocol \
+                name, jitter_ns, src_ip, dst_ip, src_l4_port, dst_l4_port, l4_protocol, paths \
          FROM flow_streams WHERE session_id = ? ORDER BY stream_seq",
     )
     .bind(session_id)
@@ -255,9 +255,15 @@ pub async fn list_flow_streams_inner(
                     listener: &listener,
                     plane,
                 };
-                crate::flow_route::derive_route(&req, &nodes, &links)
-                    .map(|route| route.node_path)
-                    .unwrap_or_default()
+                // KTD11 统一出口：显式指定优先（失效则空路径，前端回退 talker → listener）。
+                crate::flow_route::resolve_flow_path(
+                    r.get::<Option<String>, _>("paths").as_deref(),
+                    &req,
+                    &nodes,
+                    &links,
+                )
+                .map(|route| route.node_path)
+                .unwrap_or_default()
             }
             .iter()
             .map(|mid| display_name(mid))
@@ -351,8 +357,7 @@ pub struct GetFlowRouteMapResult {
 
 /// 只读内核：为 session 内所有流推导路由，双平面感知。
 /// - RC：`derive_redundant_routes` → A/B 两路；
-/// - ST/BE + 双平面：`derive_route(plane=Some("A"))`；
-/// - ST/BE + 单平面：`derive_route(plane=None)`；
+/// - ST/BE：`resolve_flow_path`（显式指定优先；双平面锁 A、单平面全链路）；
 /// - 路由失败跳过（不返回 entry，不 panic）。
 pub async fn get_flow_route_map_inner(
     pool: &sqlx::Pool<sqlx::Sqlite>,
@@ -368,7 +373,7 @@ pub async fn get_flow_route_map_inner(
         .any(|l| crate::flow_route::link_plane(l).is_some());
 
     let stream_rows = sqlx::query(
-        "SELECT stream_seq, class, talker, listener \
+        "SELECT stream_seq, class, talker, listener, paths \
          FROM flow_streams WHERE session_id = ? ORDER BY stream_seq",
     )
     .bind(session_id)
@@ -405,8 +410,14 @@ pub async fn get_flow_route_map_inner(
                 listener: &listener,
                 plane,
             };
-            // 路由失败 → 跳过，不 panic。
-            if let Ok(route) = crate::flow_route::derive_route(&req, &nodes, &links) {
+            // KTD11 统一出口（显式指定优先）；路由失败/PATH_STALE → 跳过高亮，不 panic
+            // （详情弹窗与规划路径各自响亮报错，画布高亮只做尽力展示）。
+            if let Ok(route) = crate::flow_route::resolve_flow_path(
+                r.get::<Option<String>, _>("paths").as_deref(),
+                &req,
+                &nodes,
+                &links,
+            ) {
                 let link_ids = route
                     .link_seqs
                     .iter()
@@ -466,6 +477,15 @@ pub struct UpdateFlowStreamRequest {
     pub dst_l4_port: Option<i64>,
     #[serde(default)]
     pub l4_protocol: Option<String>,
+    /// R16 路径变更三态：`path_link_seqs`（弹窗候选回传，link_seq 序列）或
+    /// `path_node_refs`（agent 节点引用序列）二选一设置显式路径；`clear_path=true`
+    /// 改回系统自动（paths 置 NULL）；全缺省 = 路径不变。RC 流拒绝路径变更。
+    #[serde(default)]
+    pub path_link_seqs: Option<Vec<i64>>,
+    #[serde(default)]
+    pub path_node_refs: Option<Vec<String>>,
+    #[serde(default)]
+    pub clear_path: bool,
 }
 
 /// 写前验证 + 快照 + UPDATE 内核（可注入 pool 供单测）。
@@ -503,6 +523,52 @@ pub async fn update_flow_stream_inner(
         redundant: row.get("redundant"),
         paths: row.get("paths"),
     };
+
+    // 2b. R16 路径变更三态：set（link_seqs 或节点引用）/ clear / 不变。
+    // RC 拒绝（双路径系统推导）。set 时解析+校验并把新 paths 带进 verify_flow。
+    let class: String = row.get("class");
+    let path_change: Option<Option<String>> = if req.clear_path {
+        if req.path_link_seqs.is_some() || req.path_node_refs.is_some() {
+            return Err("clear_path 与指定路径参数不能同时使用。".to_string());
+        }
+        Some(None) // 改回系统自动
+    } else if req.path_link_seqs.is_some() || req.path_node_refs.is_some() {
+        if class == "RC" {
+            return Err("RC 流的双冗余路径由系统推导（保证不相交），不支持手动指定。".to_string());
+        }
+        let (nodes, links) = crate::flow_verify::load_route_topology(pool, &req.session_id)
+            .await
+            .map_err(|e| format!("读拓扑失败：{e}"))?;
+        let route = if let Some(seqs) = &req.path_link_seqs {
+            crate::flow_route::build_route_from_link_seqs(
+                seqs,
+                &stream_input.talker,
+                &stream_input.listener,
+                &links,
+            )
+        } else {
+            crate::flow_route::route_from_node_refs(
+                req.path_node_refs.as_deref().unwrap_or(&[]),
+                &stream_input.talker,
+                &stream_input.listener,
+                &nodes,
+                &links,
+            )
+        };
+        match route {
+            Ok(r) => Some(Some(crate::flow_route::explicit_paths_json(&r))),
+            Err(errors) => {
+                let msgs: Vec<String> = errors.iter().map(|e| e.message_zh.clone()).collect();
+                return Err(format!("路径校验不通过：{}", msgs.join("；")));
+            }
+        }
+    } else {
+        None // 路径不变
+    };
+    let mut stream_input = stream_input;
+    if let Some(new_paths) = &path_change {
+        stream_input.paths = new_paths.clone();
+    }
 
     // 3. 结构校验（class/pcp 不变，重跑以防节点已删或周期越界）。
     let errors = crate::flow_verify::verify_flow(pool, &req.session_id, &stream_input)
@@ -561,6 +627,17 @@ pub async fn update_flow_stream_inner(
     // 7. 并发竞态守卫（SELECT 后到 UPDATE 前被删）。
     if result.rows_affected() == 0 {
         return Err(format!("stream_seq={} 不存在", req.stream_seq));
+    }
+
+    // 7b. R16 路径变更单独写（需支持写 NULL 改回系统自动，不能进 COALESCE 主句）。
+    if let Some(new_paths) = &path_change {
+        sqlx::query("UPDATE flow_streams SET paths=? WHERE session_id=? AND stream_seq=?")
+            .bind(new_paths)
+            .bind(&req.session_id)
+            .bind(req.stream_seq)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| format!("更新路径失败：{e}"))?;
     }
 
     // 8. 提交。
@@ -1149,6 +1226,9 @@ mod tests {
             src_l4_port: None,
             dst_l4_port: None,
             l4_protocol: None,
+            path_link_seqs: None,
+            path_node_refs: None,
+            clear_path: false,
         }
     }
 

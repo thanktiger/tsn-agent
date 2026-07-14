@@ -151,14 +151,18 @@ pub struct AddStreamRequest {
     l4_protocol: Option<String>,
     #[serde(default)]
     max_latency_us: Option<i64>,
-    // 注意：请求侧的 redundant/paths 不设字段——serde 忽略未知键，这两列由系统推导
-    // （RC 落库前 derive_rc_paths 覆盖；ST/BE 恒 0/NULL），请求带什么都不透传。
+    /// R16：ST/BE 显式路径（节点引用序列，mid 或唯一 name，含首尾节点）。
+    /// RC 请求带此字段报错（FRER 双路径由系统推导保证不相交）。
+    /// redundant 仍不设请求字段（系统推导：RC 落库前 derive_rc_paths 覆盖）。
+    #[serde(default)]
+    path: Option<Vec<String>>,
 }
 
 impl AddStreamRequest {
-    fn into_input(self) -> (String, StreamInput) {
+    fn into_input(self) -> (String, Option<Vec<String>>, StreamInput) {
         (
             self.session_id,
+            self.path,
             StreamInput {
                 class: self.class,
                 pcp: self.pcp,
@@ -173,8 +177,8 @@ impl AddStreamRequest {
                 dst_l4_port: self.dst_l4_port,
                 l4_protocol: self.l4_protocol,
                 max_latency_us: self.max_latency_us,
-                // redundant/paths 不透传请求值：恒 0/NULL 起步——RC 由 add_stream 落库前
-                // derive_rc_paths 推导覆盖，ST/BE 就此落库（redundant=0、paths NULL）。
+                // redundant 不透传请求值（系统推导：RC 由落库前 derive_rc_paths 覆盖）。
+                // paths 由 handler 解析 path 节点引用后填（R16 显式指定），未指定 NULL。
                 redundant: 0,
                 paths: None,
             },
@@ -186,7 +190,50 @@ pub async fn add_stream(
     State(state): State<Arc<RouteState>>,
     Json(req): Json<AddStreamRequest>,
 ) -> Response {
-    let (session_id, mut input) = req.into_input();
+    let (session_id, path_refs, mut input) = req.into_input();
+
+    // R16：显式路径解析（节点引用 → link_seqs → paths JSON）。RC 不接受手选路径。
+    if let Some(refs) = path_refs {
+        if input.class == "RC" {
+            return structured_error(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "RC_PATH_NOT_SELECTABLE",
+                "RC 流的双冗余路径由系统推导（保证不相交），不支持手动指定。",
+                false,
+            );
+        }
+        let (nodes, links) =
+            match crate::flow_verify::load_route_topology(&state.pool, &session_id).await {
+                Ok(t) => t,
+                Err(e) => {
+                    return structured_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "DATABASE_ERROR",
+                        &e.to_string(),
+                        true,
+                    );
+                }
+            };
+        match crate::flow_route::route_from_node_refs(
+            &refs,
+            &input.talker,
+            &input.listener,
+            &nodes,
+            &links,
+        ) {
+            Ok(route) => input.paths = Some(crate::flow_route::explicit_paths_json(&route)),
+            Err(errors) => {
+                // 路由层错误 → 录入闸用户语言（与 verify_flow 同映射）。
+                let mapped: Vec<crate::flow_verify::VerifyError> = errors
+                    .into_iter()
+                    .map(|e| {
+                        crate::flow_verify::VerifyError::new(&e.code, e.message_zh, e.node_ref)
+                    })
+                    .collect();
+                return fail_with_flow_errors(&mapped);
+            }
+        }
+    }
     if let Err(resp) = require_session(&state.pool, &session_id).await {
         return resp;
     }
@@ -703,10 +750,13 @@ mod tests {
             assert_eq!((rows[1].1.as_str(), rows[1].2), ("RC", 1));
             let paths: serde_json::Value =
                 serde_json::from_str(rows[1].3.as_deref().unwrap()).unwrap();
-            assert_eq!(paths["a"]["node_path"], json!(["0", "2", "1"]));
-            assert_eq!(paths["a"]["link_seqs"], json!([0, 1]));
-            assert_eq!(paths["b"]["node_path"], json!(["0", "3", "1"]));
-            assert_eq!(paths["b"]["link_seqs"], json!([2, 3]));
+            // KTD12 统一形状：routes[0]=A 平面、routes[1]=B 平面，origin=system。
+            assert_eq!(paths["version"], json!(1));
+            assert_eq!(paths["origin"], json!("system"));
+            assert_eq!(paths["routes"][0]["node_path"], json!(["0", "2", "1"]));
+            assert_eq!(paths["routes"][0]["link_seqs"], json!([0, 1]));
+            assert_eq!(paths["routes"][1]["node_path"], json!(["0", "3", "1"]));
+            assert_eq!(paths["routes"][1]["link_seqs"], json!([2, 3]));
         });
     }
 
@@ -806,16 +856,16 @@ mod tests {
             let paths: serde_json::Value =
                 serde_json::from_str(paths_col.as_deref().expect("paths 列非 NULL")).unwrap();
 
-            let node_set = |key: &str| -> std::collections::HashSet<String> {
-                paths[key]["node_path"]
+            let node_set = |idx: usize| -> std::collections::HashSet<String> {
+                paths["routes"][idx]["node_path"]
                     .as_array()
                     .unwrap()
                     .iter()
                     .map(|v| v.as_str().unwrap().to_string())
                     .collect()
             };
-            let a_nodes = node_set("a");
-            let b_nodes = node_set("b");
+            let a_nodes = node_set(0);
+            let b_nodes = node_set(1);
             let shared: Vec<_> = a_nodes.intersection(&b_nodes).collect();
             let endpoints: std::collections::HashSet<String> =
                 ["0".to_string(), "1".to_string()].into();
@@ -824,8 +874,8 @@ mod tests {
                 "中间节点不得相交: {shared:?}"
             );
 
-            let link_set = |key: &str| -> std::collections::HashSet<i64> {
-                paths[key]["link_seqs"]
+            let link_set = |idx: usize| -> std::collections::HashSet<i64> {
+                paths["routes"][idx]["link_seqs"]
                     .as_array()
                     .unwrap()
                     .iter()
@@ -833,7 +883,7 @@ mod tests {
                     .collect()
             };
             assert!(
-                link_set("a").is_disjoint(&link_set("b")),
+                link_set(0).is_disjoint(&link_set(1)),
                 "链路不得相交: {paths}"
             );
         });

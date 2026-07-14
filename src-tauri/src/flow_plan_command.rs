@@ -17,7 +17,7 @@ use serde::Serialize;
 use sqlx::Row;
 use std::collections::BTreeMap;
 
-use crate::flow_route::{RouteRequest, derive_route, link_plane};
+use crate::flow_route::{RouteRequest, link_plane, resolve_flow_path};
 use crate::inet_sim_bundle::{
     FlowStreamSpec, FlowTasSchedule, GclEntry, SimOverrides, build_flow_tas_sim_bundle,
 };
@@ -68,8 +68,8 @@ pub(crate) struct DbStream {
     /// KTD6 凭证列（U2 录入时落）：仅展示，装配一律重推导（verify 侧重跑不相交断言）。
     #[allow(dead_code)]
     pub(crate) redundant: i64,
-    /// KTD6 凭证列：录入时预存的 A/B 路径快照 JSON。仅展示凭证，不作装配输入。
-    #[allow(dead_code)]
+    /// paths 列（KTD12 统一形状）：RC=系统凭证（装配仍重推导）；ST/BE origin=user=
+    /// 显式指定事实源，经 resolve_flow_path 进 pathFragments（R16）。
     pub(crate) paths: Option<String>,
 }
 
@@ -305,7 +305,10 @@ pub async fn plan_tas_inner<P: InetSimPlanClient>(
     let plane = if dual_plane { Some("A") } else { None };
     let mut specs: Vec<FlowStreamSpec> = Vec::new();
     for s in &st_streams {
-        let route = derive_route(
+        // KTD11 统一路径解析出口：显式指定（paths.origin=user）优先、失效 PATH_STALE 响亮；
+        // 未指定沿最短路推导。
+        let route = resolve_flow_path(
+            s.paths.as_deref(),
             &RouteRequest {
                 talker: &s.talker,
                 listener: &s.listener,
