@@ -24,6 +24,15 @@ import config
 
 _OUTPUT_TAIL_MAX = 2000
 
+# plan verb 的 .sca 提取模式（grep -E 语法）：「重放所需全部行类」契约（gcl-windows-format v1）。
+# ①门参数行 ②每流发送偏移（流关联回算锚点）③配置器时延建模参数（存在则带上）。
+# 单一源：_execute_plan 与单测共用，改行类只动这里。
+PLAN_SCA_GREP_PATTERN = (
+    r"transmissionGate\[[0-9]+\] (offset|durations|initiallyOpen)"
+    r"|initialProductionOffset"
+    r"|gateScheduleConfigurator.* (.*[dD]elay|.*[lL]atency)"
+)
+
 
 class Busy(Exception):
     """已有软仿在跑（单运行）。"""
@@ -198,10 +207,14 @@ def _execute_plan(job: Job) -> None:
         if exit_code != 0:
             _set_plan_result(job, exit_code, _tail(combined), None, None)
             return
-        # grep .sca 门参数行（offset/durations/initiallyOpen）。|| true 让 0 匹配不算失败。
+        # grep .sca「重放所需全部行类」（gcl-windows-format v1 契约）：
+        # ①门参数行（offset/durations/initiallyOpen）——GCL 本体；
+        # ②每流发送偏移 initialProductionOffset（app.source 模块参数）——流关联回算锚点；
+        # ③配置器时延建模参数（含 delay/latency 名的 gateScheduleConfigurator 参数，存在则带上）。
+        # || true 让 0 匹配不算失败。
         grep_inner = (
             f"cd {shlex.quote(run_dir)} && "
-            r"grep -hE 'transmissionGate\[[0-9]+\] (offset|durations|initiallyOpen)' results/*.sca || true"
+            f"grep -hE {shlex.quote(PLAN_SCA_GREP_PATTERN)} results/*.sca || true"
         )
         grep = _run_in_inet_env(grep_inner)
         sca = grep.stdout or ""
