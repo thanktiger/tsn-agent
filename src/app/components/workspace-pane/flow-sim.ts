@@ -302,8 +302,9 @@ export function gptpDiagLine(d: GptpDiag): string {
   return `gPTP 收敛：${d.convergedNodes}/${d.totalNodes} 节点 ≤ 阈值（${d.thresholdSummary}），最差 ${d.worstOffsetNs.toFixed(0)} ns @${d.worstNode}`;
 }
 
-/** 单流行（15 列），对齐 flow_query_command::ListFlowStreamRow。
- * 新五列（srcMac/dstMac/vlanId/earliestSendOffsetNs/latestSendOffsetNs）老行为 null。 */
+/** 单流行，对齐 flow_query_command::ListFlowStreamRow。
+ * 设备级标识列（MAC/IP/端口/协议/VLAN/偏移/抖动/名称）NULL 时后端回退推导默认值；
+ * nodePath 为路由显示名序列（推导失败为空，前端回退 talker → listener）。 */
 export interface ListFlowStreamRow {
   streamSeq: number;
   class: string;
@@ -320,6 +321,14 @@ export interface ListFlowStreamRow {
   vlanId: number | null;
   earliestSendOffsetNs: number | null;
   latestSendOffsetNs: number | null;
+  name: string | null;
+  jitterNs: number | null;
+  srcIp: string | null;
+  dstIp: string | null;
+  srcL4Port: number | null;
+  dstL4Port: number | null;
+  l4Protocol: string | null;
+  nodePath: string[];
 }
 
 /** 流集查询结果（对齐 flow_query_command::ListFlowStreamsResult）。 */
@@ -341,6 +350,13 @@ export interface UpdateFlowStreamRequest {
   vlanId: number | null;
   earliestSendOffsetNs: number | null;
   latestSendOffsetNs: number | null;
+  name: string | null;
+  jitterNs: number | null;
+  srcIp: string | null;
+  dstIp: string | null;
+  srcL4Port: number | null;
+  dstL4Port: number | null;
+  l4Protocol: string | null;
 }
 
 /** 流更新写通道 = update_flow_stream Tauri command（测试可注入替身）。 */

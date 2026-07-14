@@ -31,6 +31,14 @@ function makeStream(overrides: Partial<ListFlowStreamRow> = {}): ListFlowStreamR
     vlanId: null,
     earliestSendOffsetNs: null,
     latestSendOffsetNs: null,
+    name: null,
+    jitterNs: null,
+    srcIp: null,
+    dstIp: null,
+    srcL4Port: null,
+    dstL4Port: null,
+    l4Protocol: null,
+    nodePath: [],
     ...overrides,
   };
 }
@@ -68,7 +76,7 @@ describe("FlowDetailModal", () => {
         onSaved={onSaved}
       />,
     );
-    const periodInput = screen.getByLabelText(/周期/);
+    const periodInput = screen.getByLabelText(/帧发送间隔/);
     await user.clear(periodInput);
     await user.type(periodInput, "2000");
     await user.click(screen.getByRole("button", { name: "保存" }));
@@ -83,7 +91,7 @@ describe("FlowDetailModal", () => {
     render(
       <FlowDetailModal stream={makeStream()} sessionId="s1" onClose={vi.fn()} onSaved={onSaved} />,
     );
-    const macInput = screen.getByLabelText(/源 MAC/);
+    const macInput = screen.getByLabelText(/^源MAC/);
     await user.type(macInput, "00:11:22:33:44:55");
     await user.click(screen.getByRole("button", { name: "保存" }));
     await waitFor(() => expect(onSaved).toHaveBeenCalledWith(false));

@@ -246,6 +246,8 @@ pub const FLOW_DOMAIN_SCHEMA_SQL: &str = r#"
         vlan_id                 INTEGER,
         earliest_send_offset_ns INTEGER,
         latest_send_offset_ns   INTEGER,
+        name                    TEXT,
+        jitter_ns               INTEGER,
         PRIMARY KEY (session_id, stream_seq)
     );
 
@@ -386,6 +388,8 @@ pub async fn ensure_flow_streams_extended_columns(
         ("vlan_id", "INTEGER"),
         ("earliest_send_offset_ns", "INTEGER"),
         ("latest_send_offset_ns", "INTEGER"),
+        ("name", "TEXT"),
+        ("jitter_ns", "INTEGER"),
     ];
     for (col, col_type) in cols {
         let has_col: i64 = sqlx::query_scalar(&format!(

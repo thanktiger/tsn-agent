@@ -3,7 +3,8 @@ import type { ListFlowStreamRow } from "./flow-sim";
 import { PanelCta } from "./panel-cta";
 
 /**
- * 流量列表组件（U4）：class 徽章 + 行选中/切换 + 详情入口。
+ * 流量列表组件（U4 → 表格化重构，对齐参考规范图）：
+ * 列 = 流id（class 徽章 + F{seq}）/ 节点路径 / 流名称 / PCP / 周期 / 最大帧长 / 抖动 / 最大延迟 / 操作。
  * - ST=CHART_COLORS[0]（#0072B2），BE=CHART_COLORS[1]（#E69F00），RC=CHART_COLORS[2]（#009E73）。
  * - 行单击切换 selectedFlowSeq（已选再点→null）；「详情」按钮触发 onOpenDetail。
  * - isLoading=true 且无数据 → 不出 PanelCta；isLoading=false 且无数据 → 出 PanelCta。
@@ -32,6 +33,12 @@ function classBadgeColor(cls: string): string {
   }
 }
 
+/** 节点路径展示：路由推导失败（空数组）回退 talker → listener。 */
+function nodePathText(s: ListFlowStreamRow): string {
+  const path = s.nodePath.length > 0 ? s.nodePath : [s.talker, s.listener];
+  return path.join(" → ");
+}
+
 export function FlowStreamList({
   streams,
   selectedFlowSeq,
@@ -40,64 +47,79 @@ export function FlowStreamList({
   inFlowStage,
   isLoading,
 }: FlowStreamListProps) {
-  // 有数据时直接展示列表，不论 isLoading。
+  // 有数据时直接展示表格，不论 isLoading。
   if (streams.length > 0) {
     return (
-      <div className="flow-stream-list" role="listbox" aria-label="流量列表">
-        {streams.map((s) => {
-          const selected = s.streamSeq === selectedFlowSeq;
-          const color = classBadgeColor(s.class);
-          return (
-            <div
-              key={s.streamSeq}
-              className={`flow-stream-row${selected ? " selected" : ""}`}
-              role="option"
-              aria-selected={selected}
-              tabIndex={0}
-              onClick={() => onSelectFlowSeq(selected ? null : s.streamSeq)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" || e.key === " ") {
-                  e.preventDefault();
-                  onSelectFlowSeq(selected ? null : s.streamSeq);
-                }
-              }}
-            >
-              {/* 类别徽章：role="img" 让 aria-label 合法 */}
-              <span
-                className="flow-stream-badge"
-                style={{ background: color }}
-                role="img"
-                aria-label={`类别 ${s.class}`}
-              >
-                {s.class}
-              </span>
-
-              {/* 主要信息 */}
-              <span className="flow-stream-info">
-                <span className="flow-stream-seq mono">F{s.streamSeq}</span>
-                <span className="flow-stream-route">
-                  {s.talker} → {s.listener}
-                </span>
-                <span className="flow-stream-meta mono">
-                  {s.periodUs}µs · {s.frameBytes}B
-                </span>
-              </span>
-
-              {/* 详情按钮：stopPropagation 避免触发行选中 */}
-              <button
-                type="button"
-                className="flow-stream-detail-btn btn"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onOpenDetail(s);
-                }}
-                aria-label={`流 F${s.streamSeq} 详情`}
-              >
-                详情
-              </button>
-            </div>
-          );
-        })}
+      <div className="flow-stream-list">
+        <table className="eng-table flow-stream-table">
+          <thead>
+            <tr>
+              <th>流id</th>
+              <th>节点路径</th>
+              <th>流名称</th>
+              <th>PCP优先级</th>
+              <th>周期(μs)</th>
+              <th>最大帧长(B)</th>
+              <th>抖动(ns)</th>
+              <th>最大延迟(μs)</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            {streams.map((s) => {
+              const selected = s.streamSeq === selectedFlowSeq;
+              const color = classBadgeColor(s.class);
+              return (
+                <tr
+                  key={s.streamSeq}
+                  className={`flow-row${selected ? " selected" : ""}`}
+                  aria-selected={selected}
+                  tabIndex={0}
+                  onClick={() => onSelectFlowSeq(selected ? null : s.streamSeq)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      onSelectFlowSeq(selected ? null : s.streamSeq);
+                    }
+                  }}
+                >
+                  <td>
+                    <span
+                      className="flow-stream-badge"
+                      style={{ background: color }}
+                      role="img"
+                      aria-label={`类别 ${s.class}`}
+                    >
+                      {s.class}
+                    </span>
+                    <span className="flow-stream-seq mono">F{s.streamSeq}</span>
+                  </td>
+                  <td className="flow-stream-route mono">{nodePathText(s)}</td>
+                  <td>{s.name ?? "—"}</td>
+                  <td className="mono">{s.pcp}</td>
+                  <td className="mono">{s.periodUs}</td>
+                  <td className="mono">{s.frameBytes}</td>
+                  <td className="mono">{s.jitterNs ?? "—"}</td>
+                  <td className="mono">{s.maxLatencyUs ?? "—"}</td>
+                  <td>
+                    {/* stopPropagation 避免触发行选中 */}
+                    <button
+                      type="button"
+                      className="flow-stream-detail-btn btn"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onOpenDetail(s);
+                      }}
+                      aria-label={`流 F${s.streamSeq} 详情`}
+                    >
+                      详情
+                    </button>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
       </div>
     );
   }

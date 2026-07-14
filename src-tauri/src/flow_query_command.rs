@@ -128,9 +128,38 @@ pub async fn get_flow_plan(
     get_flow_plan_inner(pool, &request.session_id).await
 }
 
-/// 单流行（15 列）：流面板重设计 U3。命名 `ListFlowStreamRow`（非 `FlowStreamRow`）以规避
-/// `topology_undo` 私有同名结构体冲突。`redundant` 存 INTEGER，`!= 0` 映成 bool。
-/// 新五列（src_mac/dst_mac/vlan_id/earliest_send_offset_ns/latest_send_offset_ns）老行为 null。
+// ---------- 设备级流标识默认值（录入时落库，boss 定规则） ----------
+
+/// MAC 默认值：`00:00:23:00:00:{mid:02X}`。mid 非数字（异常态）→ None，不臆造。
+pub fn default_mac_for_mid(mid: &str) -> Option<String> {
+    let n: u8 = mid.parse().ok()?;
+    Some(format!("00:00:23:00:00:{n:02X}"))
+}
+
+/// IP 默认值：`192.168.0.{mid+1}`（+1 避开 .0 网络地址）。mid 非数字 → None。
+pub fn default_ip_for_mid(mid: &str) -> Option<String> {
+    let n: u8 = mid.parse().ok()?;
+    Some(format!("192.168.0.{}", u16::from(n) + 1))
+}
+
+pub const DEFAULT_SRC_L4_PORT: i64 = 10000;
+pub const DEFAULT_DST_L4_PORT: i64 = 20000;
+pub const DEFAULT_L4_PROTOCOL: &str = "UDP";
+pub const DEFAULT_VLAN_ID: i64 = 0;
+pub const DEFAULT_EARLIEST_SEND_OFFSET_NS: i64 = 0;
+pub const DEFAULT_LATEST_SEND_OFFSET_NS: i64 = 100;
+pub const DEFAULT_JITTER_NS: i64 = 50;
+
+/// 流名称默认值：`{class}流{seq}`（如 "ST流0"），详情弹窗可改。
+pub fn default_stream_name(class: &str, stream_seq: i64) -> String {
+    format!("{class}流{stream_seq}")
+}
+
+/// 单流行：流面板重设计 U3 + 参考图对齐扩展。命名 `ListFlowStreamRow`（非 `FlowStreamRow`）
+/// 以规避 `topology_undo` 私有同名结构体冲突。`redundant` 存 INTEGER，`!= 0` 映成 bool。
+/// 设备级流标识列（MAC/IP/端口/协议/VLAN/偏移/抖动/名称）老行为 NULL 时返回推导默认值
+/// （录入即落库是新行为，老行详情保存后补落库）；`node_path` 为路由显示名序列（推导失败为空，
+/// 前端回退 talker → listener）。
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ListFlowStreamRow {
@@ -149,6 +178,14 @@ pub struct ListFlowStreamRow {
     pub vlan_id: Option<i64>,
     pub earliest_send_offset_ns: Option<i64>,
     pub latest_send_offset_ns: Option<i64>,
+    pub name: Option<String>,
+    pub jitter_ns: Option<i64>,
+    pub src_ip: Option<String>,
+    pub dst_ip: Option<String>,
+    pub src_l4_port: Option<i64>,
+    pub dst_l4_port: Option<i64>,
+    pub l4_protocol: Option<String>,
+    pub node_path: Vec<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -164,6 +201,8 @@ pub struct ListFlowStreamsResult {
 }
 
 /// 只读查询内核：取指定会话的所有流集行，按 `stream_seq` 升序。
+/// 设备级流标识 NULL 列回退推导默认值（显示层回退，DB 不写——详情保存才落库）；
+/// `node_path` 现推路由并映射显示名（与 `get_flow_route_map_inner` 同路由逻辑，失败为空）。
 pub async fn list_flow_streams_inner(
     pool: &sqlx::Pool<sqlx::Sqlite>,
     session_id: &str,
@@ -171,7 +210,8 @@ pub async fn list_flow_streams_inner(
     let rows = sqlx::query(
         "SELECT stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener, \
                 max_latency_us, redundant, src_mac, dst_mac, vlan_id, \
-                earliest_send_offset_ns, latest_send_offset_ns \
+                earliest_send_offset_ns, latest_send_offset_ns, \
+                name, jitter_ns, src_ip, dst_ip, src_l4_port, dst_l4_port, l4_protocol \
          FROM flow_streams WHERE session_id = ? ORDER BY stream_seq",
     )
     .bind(session_id)
@@ -179,24 +219,97 @@ pub async fn list_flow_streams_inner(
     .await
     .map_err(|e| format!("读 flow_streams 失败：{e}"))?;
 
+    // 路由拓扑 + mid→显示名映射（回退裸 mid，同 get_flow_plan_inner 口径）。
+    let (nodes, links) = crate::flow_verify::load_route_topology(pool, session_id)
+        .await
+        .map_err(|e| format!("读拓扑失败：{e}"))?;
+    let dual_plane = links
+        .iter()
+        .any(|l| crate::flow_route::link_plane(l).is_some());
+    let display_name = |mid: &str| -> String {
+        nodes
+            .iter()
+            .find(|n| n.mid == mid)
+            .and_then(|n| n.name.clone())
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| mid.to_string())
+    };
+
     let streams = rows
         .iter()
-        .map(|r| ListFlowStreamRow {
-            stream_seq: r.get("stream_seq"),
-            class: r.get("class"),
-            pcp: r.get("pcp"),
-            period_us: r.get("period_us"),
-            frame_bytes: r.get("frame_bytes"),
-            count: r.get("count"),
-            talker: r.get("talker"),
-            listener: r.get("listener"),
-            max_latency_us: r.get("max_latency_us"),
-            redundant: r.get::<i64, _>("redundant") != 0,
-            src_mac: r.get("src_mac"),
-            dst_mac: r.get("dst_mac"),
-            vlan_id: r.get("vlan_id"),
-            earliest_send_offset_ns: r.get("earliest_send_offset_ns"),
-            latest_send_offset_ns: r.get("latest_send_offset_ns"),
+        .map(|r| {
+            let class: String = r.get("class");
+            let stream_seq: i64 = r.get("stream_seq");
+            let talker: String = r.get("talker");
+            let listener: String = r.get("listener");
+
+            // 路由显示名路径：RC 展示 A 平面路径；失败为空（前端回退 talker → listener）。
+            let node_path: Vec<String> = if class == "RC" {
+                crate::flow_route::derive_redundant_routes(&talker, &listener, &nodes, &links)
+                    .map(|(a, _)| a.node_path)
+                    .unwrap_or_default()
+            } else {
+                let plane = if dual_plane { Some("A") } else { None };
+                let req = crate::flow_route::RouteRequest {
+                    talker: &talker,
+                    listener: &listener,
+                    plane,
+                };
+                crate::flow_route::derive_route(&req, &nodes, &links)
+                    .map(|route| route.node_path)
+                    .unwrap_or_default()
+            }
+            .iter()
+            .map(|mid| display_name(mid))
+            .collect();
+
+            ListFlowStreamRow {
+                stream_seq,
+                pcp: r.get("pcp"),
+                period_us: r.get("period_us"),
+                frame_bytes: r.get("frame_bytes"),
+                count: r.get("count"),
+                max_latency_us: r.get("max_latency_us"),
+                redundant: r.get::<i64, _>("redundant") != 0,
+                src_mac: r
+                    .get::<Option<String>, _>("src_mac")
+                    .or_else(|| default_mac_for_mid(&talker)),
+                dst_mac: r
+                    .get::<Option<String>, _>("dst_mac")
+                    .or_else(|| default_mac_for_mid(&listener)),
+                vlan_id: r.get::<Option<i64>, _>("vlan_id").or(Some(DEFAULT_VLAN_ID)),
+                earliest_send_offset_ns: r
+                    .get::<Option<i64>, _>("earliest_send_offset_ns")
+                    .or(Some(DEFAULT_EARLIEST_SEND_OFFSET_NS)),
+                latest_send_offset_ns: r
+                    .get::<Option<i64>, _>("latest_send_offset_ns")
+                    .or(Some(DEFAULT_LATEST_SEND_OFFSET_NS)),
+                name: r
+                    .get::<Option<String>, _>("name")
+                    .or_else(|| Some(default_stream_name(&class, stream_seq))),
+                jitter_ns: r
+                    .get::<Option<i64>, _>("jitter_ns")
+                    .or(Some(DEFAULT_JITTER_NS)),
+                src_ip: r
+                    .get::<Option<String>, _>("src_ip")
+                    .or_else(|| default_ip_for_mid(&talker)),
+                dst_ip: r
+                    .get::<Option<String>, _>("dst_ip")
+                    .or_else(|| default_ip_for_mid(&listener)),
+                src_l4_port: r
+                    .get::<Option<i64>, _>("src_l4_port")
+                    .or(Some(DEFAULT_SRC_L4_PORT)),
+                dst_l4_port: r
+                    .get::<Option<i64>, _>("dst_l4_port")
+                    .or(Some(DEFAULT_DST_L4_PORT)),
+                l4_protocol: r
+                    .get::<Option<String>, _>("l4_protocol")
+                    .or_else(|| Some(DEFAULT_L4_PROTOCOL.to_string())),
+                class,
+                talker,
+                listener,
+                node_path,
+            }
         })
         .collect();
 
@@ -339,6 +452,20 @@ pub struct UpdateFlowStreamRequest {
     pub vlan_id: Option<i64>,
     pub earliest_send_offset_ns: Option<i64>,
     pub latest_send_offset_ns: Option<i64>,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub jitter_ns: Option<i64>,
+    #[serde(default)]
+    pub src_ip: Option<String>,
+    #[serde(default)]
+    pub dst_ip: Option<String>,
+    #[serde(default)]
+    pub src_l4_port: Option<i64>,
+    #[serde(default)]
+    pub dst_l4_port: Option<i64>,
+    #[serde(default)]
+    pub l4_protocol: Option<String>,
 }
 
 /// 写前验证 + 快照 + UPDATE 内核（可注入 pool 供单测）。
@@ -367,11 +494,11 @@ pub async fn update_flow_stream_inner(
         count: req.count,
         talker: row.get("talker"),
         listener: row.get("listener"),
-        src_ip: row.get("src_ip"),
-        dst_ip: row.get("dst_ip"),
-        src_l4_port: row.get("src_l4_port"),
-        dst_l4_port: row.get("dst_l4_port"),
-        l4_protocol: row.get("l4_protocol"),
+        src_ip: req.src_ip.clone().or_else(|| row.get("src_ip")),
+        dst_ip: req.dst_ip.clone().or_else(|| row.get("dst_ip")),
+        src_l4_port: req.src_l4_port.or_else(|| row.get("src_l4_port")),
+        dst_l4_port: req.dst_l4_port.or_else(|| row.get("dst_l4_port")),
+        l4_protocol: req.l4_protocol.clone().or_else(|| row.get("l4_protocol")),
         max_latency_us: req.max_latency_us,
         redundant: row.get("redundant"),
         paths: row.get("paths"),
@@ -398,10 +525,15 @@ pub async fn update_flow_stream_inner(
     .await
     .map_err(|e| format!("快照失败：{e}"))?;
 
-    // 6. 全列 UPDATE（含可空列）。
+    // 6. 全列 UPDATE（含可空列）。参考图新字段（名称/抖动/IP/端口/协议）用 COALESCE：
+    // 请求未带（None，如 agent 老调用）保留原值，不清空。
     let result = sqlx::query(
         "UPDATE flow_streams SET period_us=?, frame_bytes=?, count=?, max_latency_us=?, \
-         src_mac=?, dst_mac=?, vlan_id=?, earliest_send_offset_ns=?, latest_send_offset_ns=? \
+         src_mac=?, dst_mac=?, vlan_id=?, earliest_send_offset_ns=?, latest_send_offset_ns=?, \
+         name=COALESCE(?, name), jitter_ns=COALESCE(?, jitter_ns), \
+         src_ip=COALESCE(?, src_ip), dst_ip=COALESCE(?, dst_ip), \
+         src_l4_port=COALESCE(?, src_l4_port), dst_l4_port=COALESCE(?, dst_l4_port), \
+         l4_protocol=COALESCE(?, l4_protocol) \
          WHERE session_id=? AND stream_seq=?",
     )
     .bind(req.period_us)
@@ -413,6 +545,13 @@ pub async fn update_flow_stream_inner(
     .bind(req.vlan_id)
     .bind(req.earliest_send_offset_ns)
     .bind(req.latest_send_offset_ns)
+    .bind(&req.name)
+    .bind(req.jitter_ns)
+    .bind(&req.src_ip)
+    .bind(&req.dst_ip)
+    .bind(req.src_l4_port)
+    .bind(req.dst_l4_port)
+    .bind(&req.l4_protocol)
     .bind(&req.session_id)
     .bind(req.stream_seq)
     .execute(&mut *tx)
@@ -653,9 +792,10 @@ mod tests {
         });
     }
 
-    /// U3②：单条 ST 流（新 5 列为 NULL）→ 返回正确的 15 字段行，新字段为 null。
+    /// U3②：单条 ST 流（设备级标识列 NULL）→ 显示层回退推导默认值
+    /// （MAC/IP 按 mid、端口/协议/VLAN/偏移/抖动/名称按常量规则）。
     #[test]
-    fn list_flow_streams_single_st_stream_new_cols_null() {
+    fn list_flow_streams_single_st_stream_defaults_filled() {
         tauri::async_runtime::block_on(async {
             let pool = fresh_pool().await;
             seed_linear(&pool).await;
@@ -673,12 +813,22 @@ mod tests {
             assert_eq!(s.listener, "2");
             assert!(s.max_latency_us.is_none());
             assert!(!s.redundant);
-            // 新 5 列未写入 → null。
-            assert!(s.src_mac.is_none());
-            assert!(s.dst_mac.is_none());
-            assert!(s.vlan_id.is_none());
-            assert!(s.earliest_send_offset_ns.is_none());
-            assert!(s.latest_send_offset_ns.is_none());
+            // 设备级标识 NULL → 推导默认值（talker mid=1、listener mid=2）。
+            assert_eq!(s.src_mac.as_deref(), Some("00:00:23:00:00:01"));
+            assert_eq!(s.dst_mac.as_deref(), Some("00:00:23:00:00:02"));
+            assert_eq!(s.src_ip.as_deref(), Some("192.168.0.2"));
+            assert_eq!(s.dst_ip.as_deref(), Some("192.168.0.3"));
+            assert_eq!(s.vlan_id, Some(DEFAULT_VLAN_ID));
+            assert_eq!(
+                s.earliest_send_offset_ns,
+                Some(DEFAULT_EARLIEST_SEND_OFFSET_NS)
+            );
+            assert_eq!(s.latest_send_offset_ns, Some(DEFAULT_LATEST_SEND_OFFSET_NS));
+            assert_eq!(s.src_l4_port, Some(DEFAULT_SRC_L4_PORT));
+            assert_eq!(s.dst_l4_port, Some(DEFAULT_DST_L4_PORT));
+            assert_eq!(s.l4_protocol.as_deref(), Some(DEFAULT_L4_PROTOCOL));
+            assert_eq!(s.name.as_deref(), Some("ST流0"));
+            assert_eq!(s.jitter_ns, Some(DEFAULT_JITTER_NS));
         });
     }
 
@@ -760,6 +910,14 @@ mod tests {
             vlan_id: None,
             earliest_send_offset_ns: None,
             latest_send_offset_ns: None,
+            name: Some("ST流0".into()),
+            jitter_ns: Some(50),
+            src_ip: None,
+            dst_ip: None,
+            src_l4_port: None,
+            dst_l4_port: None,
+            l4_protocol: None,
+            node_path: vec!["ES-1".into(), "SW-0".into(), "ES-2".into()],
         };
         let v = serde_json::to_value(&row).unwrap();
         assert_eq!(v["streamSeq"], 0);
@@ -775,6 +933,11 @@ mod tests {
         assert!(v["vlanId"].is_null());
         assert!(v["earliestSendOffsetNs"].is_null());
         assert!(v["latestSendOffsetNs"].is_null());
+        assert_eq!(v["name"], "ST流0");
+        assert_eq!(v["jitterNs"], 50);
+        assert_eq!(v["nodePath"][0], "ES-1");
+        assert!(v["srcIp"].is_null());
+        assert!(v["l4Protocol"].is_null());
     }
 
     // ── get_flow_route_map 测试 ────────────────────────────────────────────
@@ -979,6 +1142,13 @@ mod tests {
             vlan_id: None,
             earliest_send_offset_ns: None,
             latest_send_offset_ns: None,
+            name: None,
+            jitter_ns: None,
+            src_ip: None,
+            dst_ip: None,
+            src_l4_port: None,
+            dst_l4_port: None,
+            l4_protocol: None,
         }
     }
 

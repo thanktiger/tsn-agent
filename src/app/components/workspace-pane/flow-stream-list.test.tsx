@@ -20,6 +20,14 @@ function makeStream(overrides: Partial<ListFlowStreamRow> = {}): ListFlowStreamR
     vlanId: null,
     earliestSendOffsetNs: null,
     latestSendOffsetNs: null,
+    name: null,
+    jitterNs: null,
+    srcIp: null,
+    dstIp: null,
+    srcL4Port: null,
+    dstL4Port: null,
+    l4Protocol: null,
+    nodePath: [],
     ...overrides,
   };
 }
@@ -74,7 +82,7 @@ describe("FlowStreamList", () => {
     const onSelectFlowSeq = vi.fn();
     const stream = makeStream({ streamSeq: 3 });
     render(<FlowStreamList {...baseProps({ streams: [stream], onSelectFlowSeq })} />);
-    fireEvent.click(screen.getByRole("option"));
+    fireEvent.click(screen.getAllByRole("row")[1]); // [0] 是表头行
     expect(onSelectFlowSeq).toHaveBeenCalledWith(3);
   });
 
@@ -84,14 +92,14 @@ describe("FlowStreamList", () => {
     render(
       <FlowStreamList {...baseProps({ streams: [stream], selectedFlowSeq: 3, onSelectFlowSeq })} />,
     );
-    fireEvent.click(screen.getByRole("option"));
+    fireEvent.click(screen.getAllByRole("row")[1]); // [0] 是表头行
     expect(onSelectFlowSeq).toHaveBeenCalledWith(null);
   });
 
   it("选中行 aria-selected=true，未选行 aria-selected=false", () => {
     const streams = [makeStream({ streamSeq: 0 }), makeStream({ streamSeq: 1 })];
     render(<FlowStreamList {...baseProps({ streams, selectedFlowSeq: 0 })} />);
-    const rows = screen.getAllByRole("option");
+    const rows = screen.getAllByRole("row").slice(1); // 去掉表头行
     expect(rows[0].getAttribute("aria-selected")).toBe("true");
     expect(rows[1].getAttribute("aria-selected")).toBe("false");
   });
@@ -109,13 +117,13 @@ describe("FlowStreamList", () => {
   it("streams 为空且 !isLoading → 渲染 PanelCta，无行", () => {
     render(<FlowStreamList {...baseProps({ streams: [], isLoading: false })} />);
     expect(screen.getByRole("button", { name: "录入流量" })).toBeTruthy();
-    expect(screen.queryByRole("option")).toBeNull();
+    expect(screen.queryByRole("table")).toBeNull();
   });
 
   it("streams 为空且 isLoading → 不渲染 PanelCta", () => {
     render(<FlowStreamList {...baseProps({ streams: [], isLoading: true })} />);
     expect(screen.queryByRole("button", { name: "录入流量" })).toBeNull();
-    expect(screen.queryByRole("option")).toBeNull();
+    expect(screen.queryByRole("table")).toBeNull();
   });
 
   it("!inFlowStage → PanelCta 按钮 disabled", () => {

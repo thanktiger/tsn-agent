@@ -182,6 +182,14 @@ function makeFlowStream(overrides: Partial<ListFlowStreamRow> = {}): ListFlowStr
     vlanId: null,
     earliestSendOffsetNs: null,
     latestSendOffsetNs: null,
+    name: null,
+    jitterNs: null,
+    srcIp: null,
+    dstIp: null,
+    srcL4Port: null,
+    dstL4Port: null,
+    l4Protocol: null,
+    nodePath: [],
     ...overrides,
   };
 }
@@ -778,7 +786,7 @@ describe("FlowPanel", () => {
       />,
     );
     await screen.findByText("F3");
-    fireEvent.click(screen.getByRole("option"));
+    fireEvent.click(screen.getAllByRole("row")[1]); // [0] 是表头行
     expect(onSelectFlowSeq).toHaveBeenCalledWith(3);
   });
 });
