@@ -761,6 +761,26 @@ function addStreamInputSchema(): z.ZodRawShape {
   };
 }
 
+// update_stream 入参：streamSeq + 规划字段（period/frame/count 必填——后端非可选，agent 先
+// inspect 读现值再回传，镜像弹窗「载入现值→提交整表」）+ 可选 maxLatency + 路径三态。
+function updateStreamInputSchema(): z.ZodRawShape {
+  return {
+    streamSeq: z.number().int().min(0).describe("要修改的流 streamSeq（先用 flow.inspect 定位）"),
+    periodUs: z.number().int().min(1).describe("发送周期（us），须整除门控周期 1000us"),
+    frameBytes: z.number().int().min(1).max(1500).describe("报文长度（字节），≤ 链路 MTU 1500"),
+    count: z.number().int().min(1).describe("期望发送报文数"),
+    maxLatencyUs: z.number().int().min(1).optional().describe("端到端最大时延（us），可选"),
+    path: z
+      .array(z.string().min(1))
+      .min(2)
+      .optional()
+      .describe(
+        "指定显式路径（可选，仅 ST/BE）：节点引用序列（mid 或唯一显示名，含首尾）；与 clearPath 互斥；RC 不可用",
+      ),
+    clearPath: z.boolean().optional().describe("true=改回系统自动（清除已指定路径）；与 path 互斥"),
+  };
+}
+
 export function createFlowToolRegistry(): FlowMcpToolDefinition[] {
   return [
     {
@@ -826,6 +846,31 @@ export function createFlowToolRegistry(): FlowMcpToolDefinition[] {
       handler: async (args) =>
         callSidecarTool("/db/flow/remove_stream", args, {
           streamSeq: pickValue(args, "streamSeq"),
+        }),
+    },
+    {
+      name: "flow.update_stream",
+      allowedToolName: "mcp__tsn_topology__flow_update_stream",
+      title: "Update a traffic stream",
+      description:
+        "Update an existing stream (by streamSeq from flow.inspect) — the agent-side equivalent of the " +
+        "detail-modal edit. Re-runs the verify_flow gate (same rules as add). periodUs/frameBytes/count " +
+        "are REQUIRED (read current values via flow.inspect first, then resend with your edits — mirrors " +
+        "how the modal loads then submits the full form). maxLatencyUs optional. Explicit path pinning " +
+        "for ST/BE: `path` (node reference sequence, mid or unique display name, incl. talker/listener) " +
+        "sets an explicit route; `clearPath: true` reverts to system-auto (shortest path); omit both to " +
+        "leave the path unchanged; not allowed for RC. Changing period/frame/count/path marks the gate " +
+        "plan stale (re-plan required) — the response's planningFieldsChanged flags this. Only touches flow tables.",
+      inputSchema: updateStreamInputSchema(),
+      handler: async (args) =>
+        callSidecarTool("/db/flow/update_stream", args, {
+          streamSeq: pickValue(args, "streamSeq"),
+          periodUs: pickValue(args, "periodUs"),
+          frameBytes: pickValue(args, "frameBytes"),
+          count: pickValue(args, "count"),
+          maxLatencyUs: pickValue(args, "maxLatencyUs"),
+          pathNodeRefs: pickValue(args, "path"),
+          clearPath: pickValue(args, "clearPath"),
         }),
     },
   ];

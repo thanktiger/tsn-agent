@@ -315,8 +315,9 @@ pub struct PathRoute {
     pub link_seqs: Vec<i64>,
 }
 
-/// 解析 paths 列 JSON，兼容旧 RC 形状 `{"a":{...},"b":{...}}`（读侧兼容，
-/// 旧形状归一由 session_import 写边界完成，此处只转不回写）。解析失败返回 None（视同未指定）。
+/// 解析 paths 列 JSON，兼容旧 RC 形状 `{"a":{...},"b":{...}}`（Rust 读侧读容，转成新形状
+/// 返回，不回写库）。库内旧形状不迁移（boss 定老工程不兼容，重新规划即得新形状）——前端
+/// 解析器只认新形状，故旧 RC 流路径在弹窗显示破折号，属可接受的既定行为。解析失败返回 None。
 pub fn parse_flow_paths(json: &str) -> Option<FlowPaths> {
     if let Ok(v) = serde_json::from_str::<FlowPaths>(json)
         && !v.routes.is_empty()
@@ -486,11 +487,36 @@ pub fn enumerate_candidate_paths(
     for edges in adj.values_mut() {
         edges.sort_by_key(|(_, _, seq)| *seq);
     }
+    // 可达性预检（BFS，与 derive_route 同 plane 子图）：listener 不可达即空返回，不进 DFS——
+    // 否则不含 listener 的密连子图会在任何路径完成前指数枚举，跑穿同步 sidecar（review adv-4/perf）。
+    {
+        let mut seen: HashSet<&str> = HashSet::new();
+        let mut q: VecDeque<&str> = VecDeque::new();
+        seen.insert(req.talker);
+        q.push_back(req.talker);
+        while let Some(u) = q.pop_front() {
+            if let Some(edges) = adj.get(u) {
+                for (next, _, _) in edges {
+                    if seen.insert(next.as_str()) {
+                        q.push_back(next.as_str());
+                    }
+                }
+            }
+        }
+        if !seen.contains(req.listener) {
+            return (Vec::new(), false);
+        }
+    }
+    // 收集充分多再排序取前 limit（真 k 最短）——原实现先截断后排序会漏掉经高 link_seq 分支
+    // 的短路径、只显长绕路（review correctness）。STEP_BUDGET 作硬底兜可达但分支爆的病态图。
+    const COLLECT_CAP: usize = 256;
+    const STEP_BUDGET: usize = 200_000;
     let mut found: Vec<Vec<i64>> = Vec::new();
-    let mut truncated = false;
     let mut stack_nodes: Vec<String> = vec![req.talker.to_string()];
     let mut stack_links: Vec<i64> = Vec::new();
-    // 收集上限：limit+1 用于判截断；深度上限=节点数（简单路径天然有界）。
+    let mut steps: usize = 0;
+    let mut budget_hit = false;
+    #[allow(clippy::too_many_arguments)]
     fn dfs(
         cur: &str,
         listener: &str,
@@ -499,8 +525,16 @@ pub fn enumerate_candidate_paths(
         stack_links: &mut Vec<i64>,
         found: &mut Vec<Vec<i64>>,
         cap: usize,
+        steps: &mut usize,
+        budget: usize,
+        budget_hit: &mut bool,
     ) {
-        if found.len() >= cap {
+        if found.len() >= cap || *budget_hit {
+            return;
+        }
+        *steps += 1;
+        if *steps > budget {
+            *budget_hit = true;
             return;
         }
         if cur == listener {
@@ -514,7 +548,18 @@ pub fn enumerate_candidate_paths(
                 }
                 stack_nodes.push(next.clone());
                 stack_links.push(*seq);
-                dfs(next, listener, adj, stack_nodes, stack_links, found, cap);
+                dfs(
+                    next,
+                    listener,
+                    adj,
+                    stack_nodes,
+                    stack_links,
+                    found,
+                    cap,
+                    steps,
+                    budget,
+                    budget_hit,
+                );
                 stack_nodes.pop();
                 stack_links.pop();
             }
@@ -527,13 +572,15 @@ pub fn enumerate_candidate_paths(
         &mut stack_nodes,
         &mut stack_links,
         &mut found,
-        limit + 1,
+        COLLECT_CAP,
+        &mut steps,
+        STEP_BUDGET,
+        &mut budget_hit,
     );
-    if found.len() > limit {
-        truncated = true;
-        found.truncate(limit);
-    }
     found.sort_by(|a, b| (a.len(), a.as_slice()).cmp(&(b.len(), b.as_slice())));
+    // 收集数超 limit 或预算触顶都算「还有未列出路径」。
+    let truncated = found.len() > limit || budget_hit;
+    found.truncate(limit);
     let routes = found
         .into_iter()
         .filter_map(|seqs| build_route_from_link_seqs(&seqs, req.talker, req.listener, links).ok())
@@ -949,6 +996,46 @@ mod tests {
         let (short, truncated) = enumerate_candidate_paths(&req, &links, 2);
         assert!(truncated);
         assert_eq!(short.len(), 2);
+    }
+
+    /// review 修复：listener 不可达（plane 过滤后）→ 空返回不进 DFS（不指数跑穿）。
+    #[test]
+    fn enumerate_candidates_unreachable_listener_returns_empty() {
+        // 0—2 一个连通块，孤立节点 1 无任何链路 → 1 不可达。
+        let links = vec![link(0, "0", 0, "2", 0, None)];
+        let req = RouteRequest {
+            talker: "0",
+            listener: "1",
+            plane: None,
+        };
+        let (routes, truncated) = enumerate_candidate_paths(&req, &links, 8);
+        assert!(routes.is_empty());
+        assert!(!truncated);
+    }
+
+    /// review 修复：短路径经高 link_seq 分支时仍进候选（先收集后排序，非先截断后排序）。
+    /// 构造：0→1 有直达 2 跳（经高 seq 的 node 4），也有多条 3 跳绕路（经低 seq 分支）；
+    /// limit=1 必须返回那条 2 跳最短，而非低 seq 先撞上的 3 跳。
+    #[test]
+    fn enumerate_candidates_shortest_via_high_seq_not_dropped() {
+        let links = vec![
+            // 低 seq 分支先被遍历，引出 3 跳绕路 0-2-3-1。
+            link(0, "0", 0, "2", 0, None),
+            link(1, "2", 1, "3", 0, None),
+            link(2, "3", 1, "1", 0, None),
+            // 高 seq 直达 2 跳 0-4-1。
+            link(3, "0", 1, "4", 0, None),
+            link(4, "4", 1, "1", 1, None),
+        ];
+        let req = RouteRequest {
+            talker: "0",
+            listener: "1",
+            plane: None,
+        };
+        let (routes, _truncated) = enumerate_candidate_paths(&req, &links, 1);
+        assert_eq!(routes.len(), 1);
+        // 排序后取前 1 = 真最短（2 跳），不是低 seq 先撞的 3 跳。
+        assert_eq!(routes[0].link_seqs.len(), 2, "应返回 2 跳最短而非 3 跳绕路");
     }
 
     /// agent 节点引用：唯一 name 解析、不存在/重名/平行链路各自结构化报错。

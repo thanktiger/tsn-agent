@@ -1021,4 +1021,21 @@ describe("flow MCP tool registry", () => {
     // maxLatencyUs 可选（省略合法）。
     expect(addStream.safeParse(base).success).toBe(true);
   });
+
+  it("flow.update_stream is registered with path/clearPath schema (agent-native parity)", () => {
+    const registry = createFlowToolRegistry();
+    const update = registry.find((t) => t.name === "flow.update_stream");
+    expect(update).toBeDefined();
+    const schema = z.object(update?.inputSchema ?? {});
+    const base = { streamSeq: 0, periodUs: 500, frameBytes: 512, count: 10000 };
+    expect(schema.safeParse(base).success).toBe(true);
+    // 指定路径（节点引用序列）。
+    expect(schema.safeParse({ ...base, path: ["ES-1", "SWA0", "ES-2"] }).success).toBe(true);
+    // 改回系统自动。
+    expect(schema.safeParse({ ...base, clearPath: true }).success).toBe(true);
+    // period/frame/count 必填——缺失即拒。
+    expect(schema.safeParse({ streamSeq: 0 }).success).toBe(false);
+    // 单节点路径非法（至少首尾两个）。
+    expect(schema.safeParse({ ...base, path: ["ES-1"] }).success).toBe(false);
+  });
 });

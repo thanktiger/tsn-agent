@@ -38,6 +38,7 @@ export const FLOW_MCP_ALLOWED_TOOLS = [
   "mcp__tsn_topology__flow_add_stream",
   "mcp__tsn_topology__flow_inspect",
   "mcp__tsn_topology__flow_remove_stream",
+  "mcp__tsn_topology__flow_update_stream",
 ];
 
 // U1（独立编排能力）：切阶段工具独立于四个阶段，用 SDK in-process 自定义工具承载，
