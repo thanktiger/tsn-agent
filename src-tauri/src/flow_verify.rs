@@ -283,7 +283,7 @@ fn map_route_error(
 
 /// 读路由推导所需拓扑结构列 → `VerifyNode`/`VerifyLink`（与 `inet_sim_command::load_topology`
 /// 同口径；此处独立查询以保持本模块 `sqlx::Error` 错误类型）。
-async fn load_route_topology(
+pub(crate) async fn load_route_topology(
     pool: &Pool<Sqlite>,
     session_id: &str,
 ) -> Result<(Vec<VerifyNode>, Vec<VerifyLink>), sqlx::Error> {

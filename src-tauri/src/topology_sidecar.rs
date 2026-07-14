@@ -213,6 +213,10 @@ pub fn build_router(token: SecretToken, route_state: Arc<RouteState>) -> Router 
             "/db/flow/remove_stream",
             post(crate::flow_sidecar_routes::remove_stream),
         )
+        .route(
+            "/db/flow/update_stream",
+            post(crate::flow_sidecar_routes::update_stream),
+        )
         .with_state(route_state)
         .route_layer(middleware::from_fn_with_state(
             token_state,

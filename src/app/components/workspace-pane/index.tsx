@@ -21,9 +21,16 @@ import {
   isEmptyTopologySnapshot,
   type TopologyRowSnapshot,
 } from "../../../sessions/topology-snapshot";
+import { useSessionDbListener } from "../../hooks/use-session-db-listener";
 import { DetailRow, Stat } from "../shared";
 import { FlowPanel } from "./flow-panel";
-import type { PlanUiState, VerifyUiState } from "./flow-sim";
+import {
+  type FlowRouteEntry,
+  invokeGetFlowRouteMap,
+  type PlanUiState,
+  type VerifyUiState,
+} from "./flow-sim";
+import type { FlowSubTab } from "./flow-subtabs";
 import type { HardwareUiState } from "./hardware-deploy";
 import { TimeSyncPanel, type TimesyncSubTab } from "./time-sync-panel";
 import type { SimUiState } from "./timesync-sim";
@@ -45,6 +52,7 @@ import {
 import { TsnFloatingEdge } from "./tsn-floating-edge";
 
 export type { PlanUiState, VerifyUiState } from "./flow-sim";
+export type { FlowSubTab } from "./flow-subtabs";
 export type { HardwareUiState } from "./hardware-deploy";
 export type { TimesyncSubTab } from "./time-sync-panel";
 export type { SimUiState } from "./timesync-sim";
@@ -188,6 +196,14 @@ export interface WorkspacePaneProps {
   onSelectTimesyncSubTab: (tab: TimesyncSubTab) => void;
   /** U4：set_gm 揭示在「面板已开但用户在别 tab」时给时间同步 tab 挂的脉冲 badge。 */
   timesyncTabHasBadge: boolean;
+  /** flow 揭示：agent 写流后在「面板已开但用户在别 tab」时给流量规划 tab 挂的脉冲 badge。 */
+  flowTabHasBadge?: boolean;
+  /** 流量规划子 tab 选择（App 级，随会话重置）。 */
+  activeFlowSubTab: FlowSubTab;
+  onSelectFlowSubTab: (tab: FlowSubTab) => void;
+  /** 选中流量序号（flow-list 子 tab 用，null 表示未选；随会话重置）。 */
+  selectedFlowSeq: number | null;
+  onSelectFlowSeq: (seq: number | null) => void;
   /** U10：底部 handle 条切换弹出框显隐。 */
   onToggleConfigPanel: () => void;
   onSelectConfigTab: (tab: ConfigTabId) => void;
@@ -224,6 +240,11 @@ export function WorkspacePane({
   activeTimesyncSubTab,
   onSelectTimesyncSubTab,
   timesyncTabHasBadge,
+  flowTabHasBadge,
+  activeFlowSubTab,
+  onSelectFlowSubTab,
+  selectedFlowSeq,
+  onSelectFlowSeq,
   onToggleConfigPanel,
   onSelectConfigTab,
   onNodeSelect,
@@ -255,30 +276,76 @@ export function WorkspacePane({
     return () => document.removeEventListener("keydown", handleKeyDown);
   }, [isTimesyncTreeDialogOpen]);
 
+  // U6：flow 路由图——选中流高亮画布边（flow tab 激活时拉取，DB 变更驱动重拉）。
+  const [flowRouteMap, setFlowRouteMap] = useState<Map<number, FlowRouteEntry>>(new Map());
+  const routeMapReqRef = useRef(0);
+
+  const doFetchFlowRouteMap = useCallback(() => {
+    if (activeConfigTab !== "flow") return;
+    const seq = ++routeMapReqRef.current;
+    void invokeGetFlowRouteMap(sessionId)
+      .then((result) => {
+        if (routeMapReqRef.current === seq) {
+          setFlowRouteMap(new Map(result.routes.map((r) => [r.streamSeq, r])));
+        }
+      })
+      .catch(() => {
+        // 非致命：保留现有 map，等下次触发
+      });
+  }, [activeConfigTab, sessionId]);
+
+  // 切 tab 时：flow tab 激活则拉取，离开则清空（避免用旧 session 数据装饰新 session 画布）。
+  useEffect(() => {
+    if (activeConfigTab !== "flow") {
+      setFlowRouteMap(new Map());
+      return;
+    }
+    doFetchFlowRouteMap();
+  }, [activeConfigTab, doFetchFlowRouteMap]);
+
+  // DB 变更驱动重拉（agent 规划落库 → 路由图更新）。
+  useSessionDbListener({
+    sessionId,
+    onChange: () => {
+      doFetchFlowRouteMap();
+    },
+  });
+
   const flowTopology = useMemo(() => {
     if (!topologySnapshot || isEmptyTopologySnapshot(topologySnapshot)) {
       return undefined;
     }
     const flow = topologySnapshotToReactFlow(topologySnapshot);
-    if (!showClockTree) {
-      return flow;
-    }
-    // 富化节点 data：注入时钟树角色，画布 TsnTopologyNode 据此渲染角色徽标 + GM 高亮。
-    // 富化 edges：树边醒目 + 父→子方向箭头，非树边淡化（替换平面着色，本阶段只看树结构）。
-    const linkByEdgeId = new Map(topologySnapshot.links.map((link) => [linkRowId(link), link]));
-    const propagationPlan = buildTimesyncPropagationPlan(topologySnapshot.links, timesyncSnapshot);
-    return {
-      ...flow,
-      nodes: enrichTimesyncNodes(flow.nodes, timesyncSnapshot),
-      edges: decorateTimesyncEdges(
+    let decoratedEdges = flow.edges;
+    let decoratedNodes = flow.nodes;
+    if (showClockTree) {
+      // 富化节点 data：注入时钟树角色，画布 TsnTopologyNode 据此渲染角色徽标 + GM 高亮。
+      // 富化 edges：树边醒目 + 父→子方向箭头，非树边淡化（替换平面着色，本阶段只看树结构）。
+      const linkByEdgeId = new Map(topologySnapshot.links.map((link) => [linkRowId(link), link]));
+      const propagationPlan = buildTimesyncPropagationPlan(
+        topologySnapshot.links,
+        timesyncSnapshot,
+      );
+      decoratedNodes = enrichTimesyncNodes(flow.nodes, timesyncSnapshot);
+      decoratedEdges = decorateTimesyncEdges(
         flow.edges,
         linkByEdgeId,
         timesyncSnapshot,
         propagationPlan,
         enableTopologyAnimation,
-      ),
-    };
-  }, [topologySnapshot, showClockTree, timesyncSnapshot, enableTopologyAnimation]);
+      );
+    }
+    // U6：flow 流高亮（selectedFlowSeq 非 null 且 activeConfigTab === "flow" 时装饰）。
+    decoratedEdges = decorateFlowHighlightEdges(decoratedEdges, selectedFlowSeq, flowRouteMap);
+    return { ...flow, nodes: decoratedNodes, edges: decoratedEdges };
+  }, [
+    topologySnapshot,
+    showClockTree,
+    timesyncSnapshot,
+    enableTopologyAnimation,
+    selectedFlowSeq,
+    flowRouteMap,
+  ]);
 
   const timesyncTreeDialogFlow = useMemo(() => {
     if (!topologySnapshot || isEmptyTopologySnapshot(topologySnapshot) || !showClockTree) {
@@ -831,6 +898,9 @@ export function WorkspacePane({
                 {tab.id === "time-sync" && timesyncTabHasBadge && (
                   <span className="config-tab-badge" role="img" aria-label="有新内容" />
                 )}
+                {tab.id === "flow" && flowTabHasBadge && (
+                  <span className="config-tab-badge" role="img" aria-label="有新内容" />
+                )}
               </button>
             ))}
             <div className="config-spacer" />
@@ -904,6 +974,10 @@ export function WorkspacePane({
                 onPlanStateChange={onFlowPlanStateChange}
                 verifyState={flowVerifyState}
                 onVerifyStateChange={onFlowVerifyStateChange}
+                activeFlowSubTab={activeFlowSubTab}
+                onSelectFlowSubTab={onSelectFlowSubTab}
+                selectedFlowSeq={selectedFlowSeq}
+                onSelectFlowSeq={onSelectFlowSeq}
               />
             )}
           </div>
@@ -952,6 +1026,32 @@ function isTopologyAnimationActive(simState: SimUiState, hardwareState: Hardware
     hardwareState.status === "confirming" ||
     hardwareState.status === "observing"
   );
+}
+
+/** U6：按选中流量序号装饰画布边——命中边加 flow-highlighted，其余边加 flow-dimmed。
+ * selectedFlowSeq 为 null 或 flowRouteMap 无对应条目时原样返回（无装饰）。 */
+export function decorateFlowHighlightEdges(
+  edges: Edge[],
+  selectedFlowSeq: number | null,
+  flowRouteMap: Map<number, FlowRouteEntry>,
+): Edge[] {
+  if (selectedFlowSeq === null) return edges;
+  const entry = flowRouteMap.get(selectedFlowSeq);
+  if (!entry) return edges;
+  const highlightIds = new Set<string>([...entry.linkIds, ...(entry.planeBLinkIds ?? [])]);
+  return edges.map((e) => {
+    const isHighlighted = highlightIds.has(e.id);
+    const classes = (e.className ?? "")
+      .replace(/\bflow-highlighted\b/g, "")
+      .replace(/\bflow-dimmed\b/g, "")
+      .trim();
+    return {
+      ...e,
+      className: isHighlighted
+        ? `${classes} flow-highlighted`.trim()
+        : `${classes} flow-dimmed`.trim(),
+    };
+  });
 }
 
 function decorateTimesyncEdges(

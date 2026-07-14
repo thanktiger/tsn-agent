@@ -302,9 +302,122 @@ export function gptpDiagLine(d: GptpDiag): string {
   return `gPTP 收敛：${d.convergedNodes}/${d.totalNodes} 节点 ≤ 阈值（${d.thresholdSummary}），最差 ${d.worstOffsetNs.toFixed(0)} ns @${d.worstNode}`;
 }
 
+/** flow 揭示动作（agent 写流后引导用户到流量规划 tab，镜像 timesync computeReveal）。 */
+export type FlowRevealAction = "expand-flow-list" | "badge" | "none";
+
+/**
+ * agent 经 sidecar 写流（domain="flow" mutation）后的分级揭示纯决策：
+ * - 面板收起 → 展开并落流量列表子 tab；
+ * - 面板开但在别的 tab → 挂 badge；
+ * - 已在流量 tab → 不动。
+ * 防误触：调用方须用 mutation 时间戳过滤掉「会话挂载前」的历史记录（切会话时
+ * catch-up 会全量回放旧 mutation）；UI 详情弹窗保存走 Tauri command 不发 mutation，
+ * 天然不触发。
+ */
+export function computeFlowReveal(input: {
+  hasNewFlowMutation: boolean;
+  inFlowStage: boolean;
+  panelExpanded: boolean;
+  activeIsFlow: boolean;
+}): FlowRevealAction {
+  if (!input.hasNewFlowMutation || !input.inFlowStage) {
+    return "none";
+  }
+  if (!input.panelExpanded) {
+    return "expand-flow-list";
+  }
+  return input.activeIsFlow ? "none" : "badge";
+}
+
+/** 单流行，对齐 flow_query_command::ListFlowStreamRow。
+ * 设备级标识列（MAC/IP/端口/协议/VLAN/偏移/抖动/名称）NULL 时后端回退推导默认值；
+ * nodePath 为路由显示名序列（推导失败为空，前端回退 talker → listener）。 */
+export interface ListFlowStreamRow {
+  streamSeq: number;
+  class: string;
+  pcp: number;
+  periodUs: number;
+  frameBytes: number;
+  count: number;
+  talker: string;
+  listener: string;
+  maxLatencyUs: number | null;
+  redundant: boolean;
+  srcMac: string | null;
+  dstMac: string | null;
+  vlanId: number | null;
+  earliestSendOffsetNs: number | null;
+  latestSendOffsetNs: number | null;
+  name: string | null;
+  jitterNs: number | null;
+  srcIp: string | null;
+  dstIp: string | null;
+  srcL4Port: number | null;
+  dstL4Port: number | null;
+  l4Protocol: string | null;
+  nodePath: string[];
+}
+
+/** 流集查询结果（对齐 flow_query_command::ListFlowStreamsResult）。 */
+export interface ListFlowStreamsResult {
+  streams: ListFlowStreamRow[];
+}
+
+/** 流更新请求（对齐 flow_query_command::UpdateFlowStreamRequest）。
+ * class/pcp 为只读字段（PCP 由 class 派生），故不在请求中。 */
+export interface UpdateFlowStreamRequest {
+  sessionId: string;
+  streamSeq: number;
+  periodUs: number;
+  frameBytes: number;
+  count: number;
+  maxLatencyUs: number | null;
+  srcMac: string | null;
+  dstMac: string | null;
+  vlanId: number | null;
+  earliestSendOffsetNs: number | null;
+  latestSendOffsetNs: number | null;
+  name: string | null;
+  jitterNs: number | null;
+  srcIp: string | null;
+  dstIp: string | null;
+  srcL4Port: number | null;
+  dstL4Port: number | null;
+  l4Protocol: string | null;
+}
+
+/** 流更新写通道 = update_flow_stream Tauri command（测试可注入替身）。 */
+export async function invokeUpdateFlowStream(request: UpdateFlowStreamRequest): Promise<void> {
+  return await invoke<void>("update_flow_stream", { request });
+}
+
 /** 默认门控明细读通道 = get_flow_plan Tauri command（测试可注入替身）。 */
 export async function invokeGetFlowPlan(sessionId: string): Promise<FlowPlanDetail> {
   return await invoke<FlowPlanDetail>("get_flow_plan", { request: { sessionId } });
+}
+
+/** 流集查询读通道 = list_flow_streams Tauri command（测试可注入替身）。 */
+export async function invokeListFlowStreams(sessionId: string): Promise<ListFlowStreamsResult> {
+  return await invoke<ListFlowStreamsResult>("list_flow_streams", { request: { sessionId } });
+}
+
+/** 单流路由条目（U5，对齐 flow_query_command::FlowRouteEntry）。
+ * `linkIds` = A 平面（或单平面）链路 id 列表，格式 `"link-{seq}"`（对齐 linkRowId）；
+ * `planeBLinkIds` 仅 RC 双平面 B 路径，ST/BE 及单平面为 null。 */
+export interface FlowRouteEntry {
+  streamSeq: number;
+  linkIds: string[];
+  planeBLinkIds: string[] | null;
+}
+
+/** 路由图查询结果（U5，对齐 flow_query_command::GetFlowRouteMapResult）。 */
+export interface GetFlowRouteMapResult {
+  routes: FlowRouteEntry[];
+}
+
+/** 路由图读通道 = get_flow_route_map Tauri command（测试可注入替身）。 */
+export async function invokeGetFlowRouteMap(sessionId: string): Promise<GetFlowRouteMapResult> {
+  return await invoke<GetFlowRouteMapResult>("get_flow_route_map", { request: { sessionId } });
 }
 
 /** 默认规划写通道 = plan_tas Tauri command（测试可注入替身）。 */

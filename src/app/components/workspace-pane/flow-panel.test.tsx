@@ -5,6 +5,8 @@ import { describe, expect, it, vi } from "vitest";
 import { FlowPanel, type FlowPanelProps } from "./flow-panel";
 import type {
   FlowPlanDetail,
+  ListFlowStreamRow,
+  ListFlowStreamsResult,
   PlanResult,
   PlanUiState,
   StreamVerdict,
@@ -162,6 +164,40 @@ function planDetailWithGcl(): FlowPlanDetail {
   });
 }
 
+/** U4 流集夹具：默认一条 ST 流。 */
+function makeFlowStream(overrides: Partial<ListFlowStreamRow> = {}): ListFlowStreamRow {
+  return {
+    streamSeq: 0,
+    class: "ST",
+    pcp: 6,
+    periodUs: 1000,
+    frameBytes: 128,
+    count: 1,
+    talker: "es1",
+    listener: "es2",
+    maxLatencyUs: null,
+    redundant: false,
+    srcMac: null,
+    dstMac: null,
+    vlanId: null,
+    earliestSendOffsetNs: null,
+    latestSendOffsetNs: null,
+    name: null,
+    jitterNs: null,
+    srcIp: null,
+    dstIp: null,
+    srcL4Port: null,
+    dstL4Port: null,
+    l4Protocol: null,
+    nodePath: [],
+    ...overrides,
+  };
+}
+
+function streamsResult(streams: ListFlowStreamRow[] = []): ListFlowStreamsResult {
+  return { streams };
+}
+
 function baseProps(overrides: Partial<FlowPanelProps> = {}): FlowPanelProps {
   return {
     inFlowStage: true,
@@ -170,16 +206,22 @@ function baseProps(overrides: Partial<FlowPanelProps> = {}): FlowPanelProps {
     onPlanStateChange: vi.fn(),
     verifyState: { status: "idle" },
     onVerifyStateChange: vi.fn(),
+    // 默认落 gate-plan 子 tab，便于大多数测规划元素的 case；需测软仿的 case 各自 override。
+    activeFlowSubTab: "gate-plan",
+    onSelectFlowSubTab: vi.fn(),
+    selectedFlowSeq: null,
+    onSelectFlowSeq: vi.fn(),
     planTas: vi.fn(async () => planOk()),
     verifyTas: vi.fn(async () => verifyResult()),
     getFlowPlan: vi.fn(async () => planDetail()),
+    listFlowStreams: vi.fn(async () => streamsResult()),
     ...overrides,
   };
 }
 
 describe("FlowPanel", () => {
-  it("R21：容器级诚实标注始终可见（读到结果前即可见）", () => {
-    render(<FlowPanel {...baseProps()} />);
+  it("R21：soft-sim 子 tab 诚实标注可见（读到结果前即可见）", () => {
+    render(<FlowPanel {...baseProps({ activeFlowSubTab: "soft-sim" })} />);
     expect(screen.getByText(/仿真实测 · 非 T10 硬件判决/)).toBeTruthy();
   });
 
@@ -237,10 +279,18 @@ describe("FlowPanel", () => {
   });
 
   it("规划成功后才允许验证", () => {
-    const { rerender } = render(<FlowPanel {...baseProps()} />);
+    // 验证按钮在 soft-sim 子 tab。
+    const { rerender } = render(<FlowPanel {...baseProps({ activeFlowSubTab: "soft-sim" })} />);
     // 未规划 → 验证禁用。
     expect(screen.getByRole("button", { name: "软仿验证" }).hasAttribute("disabled")).toBe(true);
-    rerender(<FlowPanel {...baseProps({ planState: { status: "done", result: planOk() } })} />);
+    rerender(
+      <FlowPanel
+        {...baseProps({
+          activeFlowSubTab: "soft-sim",
+          planState: { status: "done", result: planOk() },
+        })}
+      />,
+    );
     expect(screen.getByRole("button", { name: "软仿验证" }).hasAttribute("disabled")).toBe(false);
   });
 
@@ -251,14 +301,31 @@ describe("FlowPanel", () => {
       gateCount: 0,
       overall: "流集无 ST 流，无需门控综合；可直接验证。",
     });
-    render(<FlowPanel {...baseProps({ planState: { status: "done", result: noGating } })} />);
-    expect(screen.getByRole("button", { name: "软仿验证" }).hasAttribute("disabled")).toBe(false);
+    // gate-plan 子 tab：no_gating 文案可见。
+    const { rerender } = render(
+      <FlowPanel {...baseProps({ planState: { status: "done", result: noGating } })} />,
+    );
     expect(screen.getByText(/无需门控综合/)).toBeTruthy();
+    // soft-sim 子 tab：验证按钮放行。
+    rerender(
+      <FlowPanel
+        {...baseProps({
+          activeFlowSubTab: "soft-sim",
+          planState: { status: "done", result: noGating },
+        })}
+      />,
+    );
+    expect(screen.getByRole("button", { name: "软仿验证" }).hasAttribute("disabled")).toBe(false);
   });
 
   it("验证结果渲染逐流表（收/发 + 判定）", () => {
     render(
-      <FlowPanel {...baseProps({ verifyState: { status: "done", result: verifyResult() } })} />,
+      <FlowPanel
+        {...baseProps({
+          activeFlowSubTab: "soft-sim",
+          verifyState: { status: "done", result: verifyResult() },
+        })}
+      />,
     );
     expect(screen.getByText("3/3")).toBeTruthy();
     expect(screen.getByText("达标")).toBeTruthy();
@@ -266,14 +333,26 @@ describe("FlowPanel", () => {
 
   it("R16：空结果不渲染逐流表（不染绿）", () => {
     const empty = verifyResult({ status: "empty", perStream: [], overall: "结果为空" });
-    render(<FlowPanel {...baseProps({ verifyState: { status: "done", result: empty } })} />);
+    render(
+      <FlowPanel
+        {...baseProps({
+          activeFlowSubTab: "soft-sim",
+          verifyState: { status: "done", result: empty },
+        })}
+      />,
+    );
     expect(screen.queryByRole("table")).toBeNull();
     expect(screen.getByText(/结果为空/)).toBeTruthy();
   });
 
   it("U7：有 rounds 按轮分组渲染（轮名↔状态 within 小节绑定 + 顶层摘要串联）", () => {
     render(
-      <FlowPanel {...baseProps({ verifyState: { status: "done", result: roundsResult() } })} />,
+      <FlowPanel
+        {...baseProps({
+          activeFlowSubTab: "soft-sim",
+          verifyState: { status: "done", result: roundsResult() },
+        })}
+      />,
     );
     // U3 徽章条头：轮名与其状态徽章绑定在各自小节内（within，防跨轮误配 count 断言）。
     const healthy = screen.getByText("健康轮").closest("section") as HTMLElement;
@@ -288,7 +367,12 @@ describe("FlowPanel", () => {
 
   it("U3：轮状态徽章化（sim-badge ok/bad）+ 标注 chips 进徽章条", () => {
     render(
-      <FlowPanel {...baseProps({ verifyState: { status: "done", result: roundsResult() } })} />,
+      <FlowPanel
+        {...baseProps({
+          activeFlowSubTab: "soft-sim",
+          verifyState: { status: "done", result: roundsResult() },
+        })}
+      />,
     );
     const okBadges = screen.getAllByText("通过");
     for (const badge of okBadges) {
@@ -304,7 +388,12 @@ describe("FlowPanel", () => {
 
   it("U7：多轮表带「类别」列，RC 行时延/抖动标「首达路实测」", () => {
     render(
-      <FlowPanel {...baseProps({ verifyState: { status: "done", result: roundsResult() } })} />,
+      <FlowPanel
+        {...baseProps({
+          activeFlowSubTab: "soft-sim",
+          verifyState: { status: "done", result: roundsResult() },
+        })}
+      />,
     );
     expect(screen.getAllByText("类别").length).toBeGreaterThan(0);
     expect(screen.getAllByText("RC").length).toBeGreaterThan(0);
@@ -315,14 +404,24 @@ describe("FlowPanel", () => {
 
   it("U7/R13：BE 行达标旁并列送达率", () => {
     render(
-      <FlowPanel {...baseProps({ verifyState: { status: "done", result: roundsResult() } })} />,
+      <FlowPanel
+        {...baseProps({
+          activeFlowSubTab: "soft-sim",
+          verifyState: { status: "done", result: roundsResult() },
+        })}
+      />,
     );
     expect(screen.getByText("达标（送达率 50%）")).toBeTruthy();
   });
 
   it("U7/R15：gPTP 诊断行文案逐轮渲染（只报告）", () => {
     render(
-      <FlowPanel {...baseProps({ verifyState: { status: "done", result: roundsResult() } })} />,
+      <FlowPanel
+        {...baseProps({
+          activeFlowSubTab: "soft-sim",
+          verifyState: { status: "done", result: roundsResult() },
+        })}
+      />,
     );
     expect(
       screen.getByText("gPTP 收敛：3/4 节点 ≤ 阈值（1000ns），最差 1500 ns @es2"),
@@ -331,7 +430,12 @@ describe("FlowPanel", () => {
 
   it("U7/KTD8：报告态行显示 note、untested 流标记与断链标注可见", () => {
     render(
-      <FlowPanel {...baseProps({ verifyState: { status: "done", result: roundsResult() } })} />,
+      <FlowPanel
+        {...baseProps({
+          activeFlowSubTab: "soft-sim",
+          verifyState: { status: "done", result: roundsResult() },
+        })}
+      />,
     );
     expect(screen.getByText("仅健康轮判（故障轮不判）")).toBeTruthy();
     expect(screen.getByText(/流 3：未测容错/)).toBeTruthy();
@@ -340,7 +444,12 @@ describe("FlowPanel", () => {
 
   it("U7：无 rounds 老结果渲染现状不变（无轮小节、无类别列）", () => {
     render(
-      <FlowPanel {...baseProps({ verifyState: { status: "done", result: verifyResult() } })} />,
+      <FlowPanel
+        {...baseProps({
+          activeFlowSubTab: "soft-sim",
+          verifyState: { status: "done", result: verifyResult() },
+        })}
+      />,
     );
     expect(screen.queryByText(/健康轮/)).toBeNull();
     expect(screen.queryByText("类别")).toBeNull();
@@ -358,11 +467,23 @@ describe("FlowPanel", () => {
         worstOffsetNs: 500,
       },
     });
-    render(<FlowPanel {...baseProps({ verifyState: { status: "done", result: withDiag } })} />);
+    render(
+      <FlowPanel
+        {...baseProps({
+          activeFlowSubTab: "soft-sim",
+          verifyState: { status: "done", result: withDiag },
+        })}
+      />,
+    );
     expect(screen.getByText("gPTP 收敛：2/2 节点 ≤ 阈值（1000ns），最差 500 ns @sw1")).toBeTruthy();
     // 顶层键缺席（旧结果）→ 不渲染诊断行（不臆造）。
     render(
-      <FlowPanel {...baseProps({ verifyState: { status: "done", result: verifyResult() } })} />,
+      <FlowPanel
+        {...baseProps({
+          activeFlowSubTab: "soft-sim",
+          verifyState: { status: "done", result: verifyResult() },
+        })}
+      />,
     );
     expect(screen.getAllByText(/gPTP 收敛/).length).toBe(1);
   });
@@ -392,10 +513,12 @@ describe("FlowPanel", () => {
 
   it("U2③：no_gating（流集无 ST 流）→ 蓝色信息条、不画空图", async () => {
     const getFlowPlan = vi.fn(async () => planDetail({ stCount: 0, beCount: 2 }));
-    render(<FlowPanel {...baseProps({ getFlowPlan })} />);
+    // gate-plan 子 tab：蓝色信息条可见、无时序图。
+    const { rerender } = render(<FlowPanel {...baseProps({ getFlowPlan })} />);
     expect(await screen.findByText(/流集无 ST 流，无需门控/)).toBeTruthy();
     expect(screen.queryByRole("img", { name: "门控时序图" })).toBeNull();
-    // 无 ST 无需门控 → 验证按钮放行（查询三态非未规划）。
+    // soft-sim 子 tab：无 ST 无需门控 → 验证按钮放行（查询三态非未规划）。
+    rerender(<FlowPanel {...baseProps({ activeFlowSubTab: "soft-sim", getFlowPlan })} />);
     expect(screen.getByRole("button", { name: "软仿验证" }).hasAttribute("disabled")).toBe(false);
   });
 
@@ -406,15 +529,17 @@ describe("FlowPanel", () => {
     expect(cta.closest(".panel-cta")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "重新规划" })).toBeNull();
     unmount();
-    // 已规划（库里有门控表）：CTA 消失、重新规划进命令栏、验证放行（planState 仍 idle）。
+    // 已规划（库里有门控表）：gate-plan 子 tab：CTA 消失、重新规划进命令栏。
     const getFlowPlan = vi.fn(async () => planDetailWithGcl());
-    render(<FlowPanel {...baseProps({ getFlowPlan })} />);
+    const { rerender } = render(<FlowPanel {...baseProps({ getFlowPlan })} />);
     expect(await screen.findByRole("button", { name: "重新规划" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "规划门控表" })).toBeNull();
-    expect(screen.getByRole("button", { name: "软仿验证" }).hasAttribute("disabled")).toBe(false);
     // 切会话回来凭数据恢复展示（KTD1）：头行合成条目数 + 求解器徽章。
     expect(screen.getByText(/门控表 · 2 条目/)).toBeTruthy();
     expect(screen.getByText(/Z3·带可调度性保证/)).toBeTruthy();
+    // soft-sim 子 tab：验证放行（planState 仍 idle 但库里有门控表）。
+    rerender(<FlowPanel {...baseProps({ activeFlowSubTab: "soft-sim", getFlowPlan })} />);
+    expect(screen.getByRole("button", { name: "软仿验证" }).hasAttribute("disabled")).toBe(false);
   });
 
   it("U2/item5：planState→done 经 effect 刷新明细（非 handlePlan 内联，切 tab 重挂后完成也刷新）", async () => {
@@ -575,6 +700,10 @@ describe("FlowPanel", () => {
           onPlanStateChange={setPlanStateGuarded}
           verifyState={{ status: "idle" }}
           onVerifyStateChange={() => {}}
+          activeFlowSubTab="gate-plan"
+          onSelectFlowSubTab={() => {}}
+          selectedFlowSeq={null}
+          onSelectFlowSeq={() => {}}
           planTas={planTas}
           verifyTas={vi.fn(async () => verifyResult())}
           getFlowPlan={getFlowPlan}
@@ -600,5 +729,64 @@ describe("FlowPanel", () => {
     // s2 未被污染：无 s1 综合结果，CTA 仍在。
     expect(screen.queryByText(/已综合 4 个门控条目/)).toBeNull();
     expect(await screen.findByRole("button", { name: "规划门控表" })).toBeTruthy();
+  });
+
+  // ——— U4 流量列表 ———
+
+  it("U4：flow-list 子 tab 有流时渲染行列表（F0/F1 可见）", async () => {
+    const streams = [
+      makeFlowStream({ streamSeq: 0, class: "ST", talker: "es1", listener: "es2" }),
+      makeFlowStream({ streamSeq: 1, class: "RC", talker: "es2", listener: "es3" }),
+    ];
+    const listFlowStreams = vi.fn(async () => streamsResult(streams));
+    render(<FlowPanel {...baseProps({ activeFlowSubTab: "flow-list", listFlowStreams })} />);
+    expect(await screen.findByText("F0")).toBeTruthy();
+    expect(screen.getByText("F1")).toBeTruthy();
+  });
+
+  it("U4：flow-list 空且 !isLoading → PanelCta 可见（!inFlowStage → disabled）", async () => {
+    const listFlowStreams = vi.fn(async () => streamsResult([]));
+    render(
+      <FlowPanel
+        {...baseProps({
+          activeFlowSubTab: "flow-list",
+          inFlowStage: false,
+          listFlowStreams,
+        })}
+      />,
+    );
+    const cta = await screen.findByRole("button", { name: "录入流量" });
+    expect(cta.hasAttribute("disabled")).toBe(true);
+  });
+
+  it("U4：flow-list loading 中不出 PanelCta", () => {
+    // listFlowStreams 永不 resolve → streamsLoading 恒 true。
+    const listFlowStreams = vi.fn(() => new Promise<ListFlowStreamsResult>(() => {}));
+    render(<FlowPanel {...baseProps({ activeFlowSubTab: "flow-list", listFlowStreams })} />);
+    expect(screen.queryByRole("button", { name: "录入流量" })).toBeNull();
+  });
+
+  it("U4：DB 变更 → listFlowStreams 也重拉", async () => {
+    const listFlowStreams = vi.fn(async () => streamsResult([]));
+    render(<FlowPanel {...baseProps({ activeFlowSubTab: "flow-list", listFlowStreams })} />);
+    await waitFor(() => expect(listFlowStreams).toHaveBeenCalledTimes(1));
+    await act(async () => {
+      dbListenerOnChange.current?.();
+    });
+    await waitFor(() => expect(listFlowStreams).toHaveBeenCalledTimes(2));
+  });
+
+  it("U4：点击行 → onSelectFlowSeq 收到 streamSeq", async () => {
+    const onSelectFlowSeq = vi.fn();
+    const stream = makeFlowStream({ streamSeq: 3 });
+    const listFlowStreams = vi.fn(async () => streamsResult([stream]));
+    render(
+      <FlowPanel
+        {...baseProps({ activeFlowSubTab: "flow-list", listFlowStreams, onSelectFlowSeq })}
+      />,
+    );
+    await screen.findByText("F3");
+    fireEvent.click(screen.getAllByRole("row")[1]); // [0] 是表头行
+    expect(onSelectFlowSeq).toHaveBeenCalledWith(3);
   });
 });

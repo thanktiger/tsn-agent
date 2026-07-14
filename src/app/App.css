@@ -1958,6 +1958,12 @@ textarea:focus-visible {
   opacity: 0.28;
 }
 
+/* U6：flow 流选中高亮——dimmed 类淡化非选中边，配合 flow-highlighted 聚焦当前流路径。 */
+.topology-canvas .react-flow__edge.flow-dimmed {
+  opacity: 0.2;
+  transition: opacity 0.15s;
+}
+
 .topology-canvas .react-flow__node.selected .tsn-node,
 .topology-canvas .react-flow__node:focus .tsn-node {
   border-color: var(--accent);
@@ -2802,6 +2808,111 @@ textarea:focus-visible {
   color: var(--text-muted);
   font-size: 11px;
   list-style: none;
+}
+
+/* U8：流量详情弹窗（FlowDetailModal）——对齐 timesync-tree-modal 层叠结构。 */
+.flow-detail-modal-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.flow-detail-modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  border: none;
+  cursor: default;
+  padding: 0;
+}
+
+.flow-detail-modal {
+  position: relative;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 24px;
+  min-width: 400px;
+  max-width: 560px;
+  max-height: 80vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.18);
+}
+
+.flow-detail-modal h3 {
+  margin: 0 0 8px;
+  font-size: 15px;
+}
+
+.flow-detail-modal label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+}
+
+.flow-detail-modal input {
+  padding: 4px 8px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+.flow-detail-readonly {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 12px;
+  font-size: 12px;
+  align-items: center;
+  margin-bottom: 4px;
+}
+
+.flow-detail-label {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.flow-detail-modal-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 8px;
+}
+
+.flow-detail-modal-error {
+  color: #b91c1c;
+  font-size: 12px;
+  margin: 0;
+}
+
+/* U8：重规划提示 banner（流量参数变更后提示重新规划门控表）。 */
+.flow-replan-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 12px;
+  background: #f5a623;
+  color: #000;
+  font-size: 12px;
+  border-radius: 4px;
+  margin-bottom: 6px;
+}
+
+.flow-replan-banner button {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+  padding: 0 2px;
 }
 
 .config-tabs {
@@ -4363,4 +4474,185 @@ textarea:focus-visible {
 
 .topology-save-template-input:focus {
   outline: none;
+}
+
+/* flow 面板子标签页 */
+.flow-subtabs {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  background: #eef1f5;
+  border-radius: 8px;
+}
+.flow-subtab {
+  appearance: none;
+  border: none;
+  background: transparent;
+  padding: 5px 16px;
+  border-radius: 6px;
+  font-size: 13px;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition:
+    background 0.12s ease,
+    color 0.12s ease;
+}
+.flow-subtab:hover {
+  color: var(--text);
+}
+.flow-subtab.active {
+  background: #ffffff;
+  color: var(--accent);
+  font-weight: 600;
+  box-shadow: 0 1px 2px rgba(31, 41, 55, 0.12);
+}
+.flow-subtab:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* flow 流列表（表格化，复用 eng-table 基础样式） */
+.flow-stream-list {
+  padding: 8px;
+  overflow-y: auto;
+}
+.flow-stream-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 20px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 700;
+  color: #fff;
+  flex-shrink: 0;
+  margin-right: 6px;
+  vertical-align: middle;
+}
+.flow-stream-seq {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+/* eng-table 默认 vertical-align: top（时间同步表多行内容用）；流表行高被
+   「详情」按钮撑高，文字单元格需垂直居中。 */
+.flow-stream-table td {
+  vertical-align: middle;
+}
+.flow-stream-table td:first-child {
+  white-space: nowrap;
+}
+.flow-stream-route {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 260px;
+}
+
+/* flow 详情弹窗 */
+.flow-detail-modal-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.flow-detail-modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.35);
+  border: none;
+  cursor: pointer;
+}
+.flow-detail-modal-backdrop:disabled {
+  cursor: default;
+}
+.flow-detail-modal {
+  position: relative;
+  z-index: 1;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 24px;
+  width: 720px;
+  max-width: 95vw;
+  max-height: 85vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.18);
+}
+.flow-detail-modal h3 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.flow-detail-path {
+  align-self: flex-start;
+  padding: 4px 10px;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  background: var(--accent-soft, #fff3ee);
+  color: var(--text-primary);
+  font-size: 12px;
+}
+.flow-detail-section-title {
+  margin: 8px 0 0;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.flow-detail-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px 16px;
+}
+.flow-detail-grid.three {
+  grid-template-columns: 1fr 1fr 1fr;
+}
+.flow-detail-modal label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+.flow-detail-modal input[type="number"],
+.flow-detail-modal input[type="text"],
+.flow-detail-modal select {
+  height: 32px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-size: 13px;
+}
+.flow-detail-modal input:disabled {
+  opacity: 0.6;
+  background: var(--bg-tertiary, #f3f4f6);
+}
+.flow-detail-modal-error {
+  color: #c0392b;
+  font-size: 12px;
+  margin: 0;
+}
+.flow-detail-modal-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 4px;
+}
+.flow-detail-modal-hint {
+  margin-right: auto;
+  font-size: 12px;
+  color: var(--text-muted);
 }

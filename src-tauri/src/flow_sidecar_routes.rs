@@ -55,6 +55,8 @@ fn fail_with_flow_errors(errors: &[VerifyError]) -> Response {
 
 /// 单一插入助手（KTD6）：分配 `stream_seq = max+1`，落 `flow_streams` 全部结构列。
 /// 所有写入路径共用——校验闸 `verify_flow` 由调用方在此之前跑。返回分配的 stream_seq。
+/// 设备级流标识默认值在此落库（boss 定录入即落库）：请求未带的字段按 mid 推导
+/// MAC/IP、常量默认端口/协议/VLAN/偏移/抖动、名称 `{class}流{seq}`。
 pub async fn insert_stream(
     conn: &mut SqliteConnection,
     session_id: &str,
@@ -68,12 +70,30 @@ pub async fn insert_stream(
     .await
     .map_err(|e| format!("compute next stream_seq failed: {e}"))?;
 
+    use crate::flow_query_command as fq;
+    let src_ip = s
+        .src_ip
+        .clone()
+        .or_else(|| fq::default_ip_for_mid(&s.talker));
+    let dst_ip = s
+        .dst_ip
+        .clone()
+        .or_else(|| fq::default_ip_for_mid(&s.listener));
+    let src_l4_port = s.src_l4_port.unwrap_or(fq::DEFAULT_SRC_L4_PORT);
+    let dst_l4_port = s.dst_l4_port.unwrap_or(fq::DEFAULT_DST_L4_PORT);
+    let l4_protocol = s
+        .l4_protocol
+        .clone()
+        .unwrap_or_else(|| fq::DEFAULT_L4_PROTOCOL.to_string());
+
     sqlx::query(
         r#"INSERT INTO flow_streams
            (session_id, stream_seq, class, pcp, period_us, frame_bytes, count,
             talker, listener, src_ip, dst_ip, src_l4_port, dst_l4_port, l4_protocol,
-            max_latency_us, redundant, paths)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
+            max_latency_us, redundant, paths,
+            src_mac, dst_mac, vlan_id, earliest_send_offset_ns, latest_send_offset_ns,
+            name, jitter_ns)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
     )
     .bind(session_id)
     .bind(next_seq)
@@ -84,14 +104,21 @@ pub async fn insert_stream(
     .bind(s.count)
     .bind(&s.talker)
     .bind(&s.listener)
-    .bind(&s.src_ip)
-    .bind(&s.dst_ip)
-    .bind(s.src_l4_port)
-    .bind(s.dst_l4_port)
-    .bind(&s.l4_protocol)
+    .bind(&src_ip)
+    .bind(&dst_ip)
+    .bind(src_l4_port)
+    .bind(dst_l4_port)
+    .bind(&l4_protocol)
     .bind(s.max_latency_us)
     .bind(s.redundant)
     .bind(&s.paths)
+    .bind(fq::default_mac_for_mid(&s.talker))
+    .bind(fq::default_mac_for_mid(&s.listener))
+    .bind(fq::DEFAULT_VLAN_ID)
+    .bind(fq::DEFAULT_EARLIEST_SEND_OFFSET_NS)
+    .bind(fq::DEFAULT_LATEST_SEND_OFFSET_NS)
+    .bind(fq::default_stream_name(&s.class, next_seq))
+    .bind(fq::DEFAULT_JITTER_NS)
     .execute(&mut *conn)
     .await
     .map_err(|e| format!("insert flow_streams failed: {e}"))?;
@@ -356,7 +383,9 @@ pub async fn inspect(
 
     let stream_rows = match sqlx::query(
         r#"SELECT stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener,
-                  max_latency_us, redundant, paths
+                  max_latency_us, redundant, paths,
+                  src_mac, dst_mac, vlan_id, earliest_send_offset_ns, latest_send_offset_ns,
+                  name, jitter_ns, src_ip, dst_ip, src_l4_port, dst_l4_port, l4_protocol
            FROM flow_streams WHERE session_id = ? ORDER BY stream_seq"#,
     )
     .bind(&req.session_id)
@@ -388,6 +417,18 @@ pub async fn inspect(
                 "maxLatencyUs": r.get::<Option<i64>, _>("max_latency_us"),
                 "redundant": r.get::<i64, _>("redundant"),
                 "paths": r.get::<Option<String>, _>("paths"),
+                "srcMac": r.get::<Option<String>, _>("src_mac"),
+                "dstMac": r.get::<Option<String>, _>("dst_mac"),
+                "vlanId": r.get::<Option<i64>, _>("vlan_id"),
+                "earliestSendOffsetNs": r.get::<Option<i64>, _>("earliest_send_offset_ns"),
+                "latestSendOffsetNs": r.get::<Option<i64>, _>("latest_send_offset_ns"),
+                "name": r.get::<Option<String>, _>("name"),
+                "jitterNs": r.get::<Option<i64>, _>("jitter_ns"),
+                "srcIp": r.get::<Option<String>, _>("src_ip"),
+                "dstIp": r.get::<Option<String>, _>("dst_ip"),
+                "srcL4Port": r.get::<Option<i64>, _>("src_l4_port"),
+                "dstL4Port": r.get::<Option<i64>, _>("dst_l4_port"),
+                "l4Protocol": r.get::<Option<String>, _>("l4_protocol"),
             })
         })
         .collect();
@@ -430,6 +471,26 @@ pub async fn inspect(
         .collect();
 
     ok_summary(json!({ "streams": streams, "plans": plans }))
+}
+
+// ---------- update_stream ----------
+
+pub async fn update_stream(
+    State(state): State<Arc<RouteState>>,
+    Json(req): Json<crate::flow_query_command::UpdateFlowStreamRequest>,
+) -> Response {
+    if let Err(resp) = require_session(&state.pool, &req.session_id).await {
+        return resp;
+    }
+
+    match crate::flow_query_command::update_flow_stream_inner(&state.pool, &req).await {
+        Ok(()) => push_and_summary(
+            &state,
+            &req.session_id,
+            json!({ "streamSeq": req.stream_seq }),
+        ),
+        Err(e) => structured_error(StatusCode::UNPROCESSABLE_ENTITY, "UPDATE_FAILED", &e, true),
+    }
 }
 
 #[cfg(test)]
