@@ -731,6 +731,26 @@ describe("FlowPanel", () => {
     expect(await screen.findByRole("button", { name: "规划门控表" })).toBeTruthy();
   });
 
+  // ——— U5 门控详情弹窗入口 ———
+
+  it("U5：无规划数据（no-gating）→ 门控详情按钮禁用", async () => {
+    const getFlowPlan = vi.fn(async () => planDetail({ stCount: 0, beCount: 2 }));
+    render(<FlowPanel {...baseProps({ getFlowPlan })} />);
+    const btn = await screen.findByRole("button", { name: "门控详情" });
+    expect(btn.hasAttribute("disabled")).toBe(true);
+  });
+
+  it("U5：有门控表 → 门控详情按钮可点，点击开弹窗", async () => {
+    const getFlowPlan = vi.fn(async () => planDetailWithGcl());
+    const getGclDetail = vi.fn(async () => ({ windows: [], meta: null, streams: [] }));
+    render(<FlowPanel {...baseProps({ getFlowPlan, getGclDetail })} />);
+    const btn = await screen.findByRole("button", { name: "门控详情" });
+    expect(btn.hasAttribute("disabled")).toBe(false);
+    fireEvent.click(btn);
+    expect(await screen.findByRole("dialog", { name: "门控详情" })).toBeTruthy();
+    await waitFor(() => expect(getGclDetail).toHaveBeenCalledWith("s1"));
+  });
+
   // ——— U4 流量列表 ———
 
   it("U4：flow-list 子 tab 有流时渲染行列表（F0/F1 可见）", async () => {

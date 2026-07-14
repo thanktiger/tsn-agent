@@ -8,6 +8,7 @@ import {
   type FlowPlanDetail,
   type FlowPlanQueryState,
   flowPlanPresentation,
+  type GclDetail,
   gclDutyCycle,
   gclOpenIntervals,
   gptpDiagLine,
@@ -34,6 +35,7 @@ import {
 } from "./flow-sim";
 import { FlowStreamList } from "./flow-stream-list";
 import { type FlowSubTab, FlowSubTabs } from "./flow-subtabs";
+import { GclDetailModal } from "./gcl-detail-modal";
 import { PanelCta } from "./panel-cta";
 
 export interface FlowPanelProps {
@@ -58,6 +60,8 @@ export interface FlowPanelProps {
   getFlowPlan?: (sessionId: string) => Promise<FlowPlanDetail>;
   /** 流集查询读通道（U4，测试注入替身）。 */
   listFlowStreams?: (sessionId: string) => Promise<ListFlowStreamsResult>;
+  /** 门控详情弹窗读通道（U5，测试注入替身，透传 GclDetailModal）。 */
+  getGclDetail?: (sessionId: string) => Promise<GclDetail>;
 }
 
 export function FlowPanel({
@@ -75,6 +79,7 @@ export function FlowPanel({
   verifyTas = invokeVerifyTas,
   getFlowPlan = invokeGetFlowPlan,
   listFlowStreams = invokeListFlowStreams,
+  getGclDetail,
 }: FlowPanelProps) {
   // ref 即时拦并发（disabled 态下一拍才生效，防双击派发第二次）。
   const planInflight = useRef(false);
@@ -86,6 +91,8 @@ export function FlowPanel({
   // U8：详情弹窗 + 重规划提示 banner（切会话重置）。
   const [openModalStream, setOpenModalStream] = useState<ListFlowStreamRow | null>(null);
   const [bannerVisible, setBannerVisible] = useState(false);
+  // U5：门控详情弹窗开关（切会话重置）。
+  const [gclDetailOpen, setGclDetailOpen] = useState(false);
 
   // U2/KTD1：门控明细查询态——面板挂载即拉，展示态由数据推导（切会话回来凭数据恢复）。
   const [planQuery, setPlanQuery] = useState<FlowPlanQueryState>({ status: "loading" });
@@ -141,6 +148,7 @@ export function FlowPanel({
     setStreamsLoading(true);
     setOpenModalStream(null);
     setBannerVisible(false);
+    setGclDetailOpen(false);
     void refreshStreams();
   }, [refreshStreams]);
 
@@ -266,14 +274,26 @@ export function FlowPanel({
           <div className="timesync-commandbar flow-commandbar">
             <div className="timesync-commandbar__actions" role="group" aria-label="门控规划操作">
               {!fresh && !idleLoading && (
-                <button
-                  type="button"
-                  className="btn primary"
-                  onClick={() => void handlePlan()}
-                  disabled={planDisabled}
-                >
-                  {planning ? "综合中…（分钟级）" : "重新规划"}
-                </button>
+                <>
+                  {/* U5：门控详情弹窗入口（无规划数据禁用——数据推导口径同时序图显隐）。 */}
+                  <button
+                    type="button"
+                    className="btn"
+                    onClick={() => setGclDetailOpen(true)}
+                    disabled={queryPresentation !== "planned"}
+                    title={queryPresentation !== "planned" ? "请先规划出门控表" : undefined}
+                  >
+                    门控详情
+                  </button>
+                  <button
+                    type="button"
+                    className="btn primary"
+                    onClick={() => void handlePlan()}
+                    disabled={planDisabled}
+                  >
+                    {planning ? "综合中…（分钟级）" : "重新规划"}
+                  </button>
+                </>
               )}
             </div>
           </div>
@@ -358,6 +378,14 @@ export function FlowPanel({
           // 保存后重拉流集（反映更新后的数据）。
           void refreshStreams();
         }}
+      />
+
+      {/* U5：门控详情弹窗（全屏三页签，portal 级挂法同 FlowDetailModal）。 */}
+      <GclDetailModal
+        open={gclDetailOpen}
+        sessionId={sessionId}
+        onClose={() => setGclDetailOpen(false)}
+        getGclDetail={getGclDetail}
       />
     </section>
   );
