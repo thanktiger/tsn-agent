@@ -99,7 +99,9 @@ pub struct FlowStreamSpec {
 #[allow(dead_code)] // 变体由 U7(plan_tas)/U8(verify_tas) 构造。
 pub enum FlowTasSchedule<'a> {
     Synth,
-    Pin(&'a [GclEntry]),
+    /// `Pin(gcl, routes)`：`routes`=每条 ST/BE 流的 `(stream_seq, Route)`（KTD13 转发钉死用，
+    /// 空 slice=不钉死）。含 RC 会话由调用方传空 routes（现状 FRER 单写入者，见 KTD3）。
+    Pin(&'a [GclEntry], &'a [(i64, Route)]),
 }
 
 /// UDP app 端口基址（每流唯一端口 = 基址 + 稠密下标）。
@@ -1263,6 +1265,7 @@ fn build_flow_tas_ini(
     schedule: FlowTasSchedule,
     splits: &BTreeMap<String, SplitEs>,
     links: &[VerifyLink],
+    forwarding: &BTreeMap<String, Vec<(String, usize)>>,
 ) -> String {
     // sim 时长按流量推导（非固定 60s）：INET ActivePacketSource 无「产 N 个就停」参数、按
     // productionInterval 持续产包直到 sim 结束，故 sim 时长决定产包数。取 ST+RC 流 count×period
@@ -1321,7 +1324,7 @@ fn build_flow_tas_ini(
     // 平面==推导平面 A：全部相等 → 零下发（缺省即对齐）；任一不等 → 三件套（`%ethN` 目的地址 +
     // configurator 手工 <route> + addStaticRoutes=false，addStaticRoutes 全局生效故所有流都补
     // route）。macTable 静态下发钉不动平面（决定点在 talker L3 出口，spike 押注⑤实证），不走。
-    let is_pin = matches!(&schedule, FlowTasSchedule::Pin(_));
+    let is_pin = matches!(&schedule, FlowTasSchedule::Pin(..));
     let dual_plane = links
         .iter()
         .any(|l| crate::flow_route::link_plane(l).is_some());
@@ -1569,6 +1572,23 @@ fn build_flow_tas_ini(
         ));
     }
 
+    // --- 静态 L2 转发钉死（KTD13，is_pin && !frer）---
+    // 关自动配置器（否则整体覆盖 forwardingTable）+ 逐交换机 forwardingTable + 拉大 agingTime
+    // （默认 120s 会淘汰静态条目，RC 守卫加大 count 时理论越界）。行序由 BTreeMap 保证确定性。
+    // 与 pin_kit（L3 出口平面选择）互补：那锚 talker L3 出口平面，这钉每跳 L2 转发。
+    if is_pin && !frer && !forwarding.is_empty() {
+        ini.push_str("*.macForwardingTableConfigurator.typename = \"\"\n");
+        for (sw, entries) in forwarding {
+            let items = entries
+                .iter()
+                .map(|(dest, eth)| format!("{{address: \"{dest}\", interface: \"eth{eth}\"}}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            ini.push_str(&format!("*.{sw}.macTable.forwardingTable = [{items}]\n"));
+        }
+        ini.push_str("**.macTable.agingTime = 1000000s\n");
+    }
+
     // --- 门控段 ---
     match schedule {
         FlowTasSchedule::Synth => {
@@ -1612,7 +1632,7 @@ fn build_flow_tas_ini(
                 "*.gateScheduleConfigurator.configuration =\n    [{entries}]\n"
             ));
         }
-        FlowTasSchedule::Pin(gcl) => {
+        FlowTasSchedule::Pin(gcl, _) => {
             // 不声明 gateScheduleConfigurator.typename（保持 ""=不实例化）→ 门参数直接生效。
             for g in gcl {
                 let node = ned(&g.node);
@@ -1715,9 +1735,25 @@ pub fn build_flow_tas_sim_bundle(
     // 互补关窗（U5/KTD5，仅 pin）：会话存在 BE/RC 流才从 ST 门表推导补集条目追加进 pin 集；
     // 纯 ST 会话补集恒空、ini 位级不变。BE/RC 存在性从全流集判定（verify 传入全流集；
     // has_rc 兼看 overrides——与帧开销的会话级口径同源）。推导失败（占满/容不下 MTU 帧）响亮返错。
+    // KTD13 静态转发表（仅 pin && 无 RC）：从路径凭证算逐交换机双向条目，跨流冲突/歧义
+    // 响亮 Err。含 RC 会话（FRER 单写入者，KTD3）由调用方传空 routes → 空表 → ini 零改动。
+    let forwarding: BTreeMap<String, Vec<(String, usize)>> = match &schedule {
+        FlowTasSchedule::Pin(_, routes) => {
+            let frer = streams.iter().any(|s| s.class == "RC");
+            if frer || routes.is_empty() {
+                BTreeMap::new()
+            } else {
+                let ned_names = node_ned_names(nodes);
+                build_forwarding_tables(routes, links, &port_eth, &ned_names)
+                    .map_err(|e| vec![e])?
+            }
+        }
+        FlowTasSchedule::Synth => BTreeMap::new(),
+    };
+
     let pin_with_complement: Vec<GclEntry>;
     let schedule = match schedule {
-        FlowTasSchedule::Pin(gcl) => {
+        FlowTasSchedule::Pin(gcl, routes) => {
             let has_rc = overrides.has_rc || streams.iter().any(|s| s.class == "RC");
             let has_be = streams.iter().any(|s| s.class == "BE");
             let queue_counts: BTreeMap<String, i64> = mapped
@@ -1728,7 +1764,7 @@ pub fn build_flow_tas_sim_bundle(
             let comp = complement_gcl(gcl, &queue_counts, &port_rates, has_rc, has_be)
                 .map_err(|e| vec![e])?;
             pin_with_complement = gcl.iter().cloned().chain(comp).collect();
-            FlowTasSchedule::Pin(&pin_with_complement)
+            FlowTasSchedule::Pin(&pin_with_complement, routes)
         }
         FlowTasSchedule::Synth => FlowTasSchedule::Synth,
     };
@@ -1736,6 +1772,7 @@ pub fn build_flow_tas_sim_bundle(
     let gm_ned = &mapped[gm_mid].ned_name;
     let omnetpp_ini = build_flow_tas_ini(
         &mapped, &port_eth, gm_ned, timing, overrides, streams, schedule, &splits, links,
+        &forwarding,
     );
 
     let manifest = serde_json::json!({
@@ -2140,7 +2177,7 @@ mod tests {
             &timing,
             &SimOverrides::default(),
             &flow_streams(),
-            FlowTasSchedule::Pin(&gcl),
+            FlowTasSchedule::Pin(&gcl, &[]),
             "s1",
             7,
         )
@@ -2185,6 +2222,91 @@ mod tests {
             "{}",
             b.bundle.network_ned
         );
+    }
+
+    // ---------- U2（KTD13）：ini 发射转发钉死段 ----------
+
+    /// Pin + 纯 ST/BE + 非空 routes：ini 含关配置器行、逐交换机 forwardingTable 行、agingTime 行。
+    #[test]
+    fn pin_pure_stbe_emits_forwarding_table() {
+        let (nodes, links, timing) = sample();
+        // 1→2 经 sw0：link_seqs [0,1]，node_path [1,0,2]。
+        let r =
+            crate::flow_route::build_route_from_link_seqs(&[0, 1], "1", "2", &links).unwrap();
+        let routes = vec![(0i64, r.clone()), (1i64, r)]; // BE(seq0)+ST(seq1) 同路 → 去重
+        let b = build_flow_tas_sim_bundle(
+            &nodes,
+            &links,
+            "1",
+            &timing,
+            &SimOverrides::default(),
+            &flow_streams(),
+            FlowTasSchedule::Pin(&[], &routes),
+            "s1",
+            7,
+        )
+        .unwrap();
+        let ini = &b.bundle.omnetpp_ini;
+        assert!(
+            ini.contains("*.macForwardingTableConfigurator.typename = \"\""),
+            "{ini}"
+        );
+        assert!(
+            ini.contains(
+                "*.sw01.macTable.forwardingTable = [{address: \"es01%eth0\", interface: \"eth1\"}, {address: \"es02%eth0\", interface: \"eth0\"}]"
+            ),
+            "{ini}"
+        );
+        assert!(ini.contains("**.macTable.agingTime = 1000000s"), "{ini}");
+    }
+
+    /// Pin + 含 RC（即便传了 routes）：转发钉死三类行全不出现（FRER 单写入者），FRER 段仍在。
+    #[test]
+    fn pin_with_rc_omits_forwarding_table() {
+        let (nodes, links, timing) = dual_plane_sample();
+        let r =
+            crate::flow_route::build_route_from_link_seqs(&[0, 1], "1", "2", &links).unwrap();
+        let b = build_flow_tas_sim_bundle(
+            &nodes,
+            &links,
+            "0",
+            &timing,
+            &SimOverrides {
+                has_rc: true,
+                ..Default::default()
+            },
+            &rc_session_streams(),
+            FlowTasSchedule::Pin(&[], &[(0, r)]),
+            "s1",
+            7,
+        )
+        .unwrap();
+        let ini = &b.bundle.omnetpp_ini;
+        assert!(!ini.contains("forwardingTable"), "含 RC 不钉死：{ini}");
+        assert!(
+            !ini.contains("*.macForwardingTableConfigurator.typename = \"\""),
+            "{ini}"
+        );
+        assert!(ini.contains("*.*.hasStreamRedundancy = true"), "FRER 段仍在：{ini}");
+    }
+
+    /// Synth 模式：转发钉死段不出现（规划 bundle 零影响）。
+    #[test]
+    fn synth_mode_omits_forwarding_table() {
+        let (nodes, links, timing) = sample();
+        let b = build_flow_tas_sim_bundle(
+            &nodes,
+            &links,
+            "1",
+            &timing,
+            &SimOverrides::default(),
+            &flow_streams(),
+            FlowTasSchedule::Synth,
+            "s1",
+            7,
+        )
+        .unwrap();
+        assert!(!b.bundle.omnetpp_ini.contains("forwardingTable"));
     }
 
     /// synth 模式：Z3 配置器 + configuration 数组（含 +58B 开销、ST pcp7、pathFragments）。
@@ -2592,7 +2714,7 @@ mod tests {
                 ..Default::default()
             },
             &rc_session_streams(),
-            FlowTasSchedule::Pin(&[]),
+            FlowTasSchedule::Pin(&[], &[]),
             "s1",
             7,
         )
@@ -2767,7 +2889,7 @@ mod tests {
             &timing,
             &SimOverrides::default(),
             &streams,
-            FlowTasSchedule::Pin(&[]),
+            FlowTasSchedule::Pin(&[], &[]),
             "s1",
             7,
         )
@@ -2799,7 +2921,7 @@ mod tests {
             &timing,
             &SimOverrides::default(),
             &streams,
-            FlowTasSchedule::Pin(&[]),
+            FlowTasSchedule::Pin(&[], &[]),
             "s1",
             7,
         )
@@ -3002,7 +3124,7 @@ mod tests {
             &timing,
             &SimOverrides::default(),
             &streams,
-            FlowTasSchedule::Pin(&pinned),
+            FlowTasSchedule::Pin(&pinned, &[]),
             "s1",
             7,
         )
@@ -3031,7 +3153,7 @@ mod tests {
             &timing,
             &SimOverrides::default(),
             &flow_streams(), // BE + ST 混流
-            FlowTasSchedule::Pin(&pinned),
+            FlowTasSchedule::Pin(&pinned, &[]),
             "s1",
             7,
         )
@@ -3156,7 +3278,7 @@ mod tests {
                 ..Default::default()
             },
             &rc_session_streams(),
-            FlowTasSchedule::Pin(&[]),
+            FlowTasSchedule::Pin(&[], &[]),
             "s1",
             7,
         )
@@ -3216,7 +3338,7 @@ mod tests {
                 ..Default::default()
             },
             &rc_session_streams(),
-            FlowTasSchedule::Pin(&[]),
+            FlowTasSchedule::Pin(&[], &[]),
             "s1",
             7,
         )

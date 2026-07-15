@@ -336,7 +336,7 @@ pub async fn verify_tas_inner<R: RemoteRunner>(
                 ..Default::default()
             },
             &specs,
-            FlowTasSchedule::Pin(&gcl),
+            FlowTasSchedule::Pin(&gcl, &[]),
             session_id,
             0,
         ) {
