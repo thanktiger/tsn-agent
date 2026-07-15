@@ -1096,4 +1096,14 @@ describe("FlowPanel 求解器选择 + 两步重新规划 + stale 禁验证", () 
       expect(screen.getByRole("button", { name: "软仿验证" }).hasAttribute("disabled")).toBe(false),
     );
   });
+
+  it("综合中不显示上一次结果：头行与概览八卡隐藏，仅进度行（boss 真机反馈）", async () => {
+    const getGclDetail = vi.fn(async () => gclDetailPlanned());
+    render(<FlowPanel {...baseProps({ getGclDetail, planState: { status: "running" } })} />);
+    expect(await screen.findByText(/正在跑 Z3 门控综合/)).toBeTruthy();
+    // 库里有旧规划（planned 夹具），但 running 态不画旧头行/旧八卡。
+    await waitFor(() => expect(getGclDetail).toHaveBeenCalled());
+    expect(screen.queryByText(/门控表 · 5 条目/)).toBeNull();
+    expect(screen.queryByText("调度状态")).toBeNull();
+  });
 });

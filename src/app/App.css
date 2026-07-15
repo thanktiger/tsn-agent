@@ -2717,6 +2717,18 @@ textarea:focus-visible {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  /* boss 真机反馈：判定条与命令栏按钮之间要有间距。 */
+  margin-top: 10px;
+}
+
+/* 门控详情=重要查看入口，主题色描边轻强调（boss 定）。 */
+.btn.btn-accent {
+  border-color: rgba(250, 84, 28, 0.45);
+  color: var(--accent);
+}
+
+.btn.btn-accent:hover:not(:disabled) {
+  border-color: var(--accent);
 }
 
 /* sim-overall 判定条内的求解器出处徽章（R8/KTD7 诚实边界）。 */

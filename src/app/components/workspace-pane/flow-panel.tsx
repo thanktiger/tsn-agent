@@ -295,7 +295,7 @@ export function FlowPanel({
                   {/* U5：门控详情弹窗入口（无规划数据禁用——数据推导口径同时序图显隐）。 */}
                   <button
                     type="button"
-                    className="btn"
+                    className="btn btn-accent"
                     onClick={() => setGclDetailOpen(true)}
                     disabled={queryPresentation !== "planned"}
                     title={queryPresentation !== "planned" ? "请先规划出门控表" : undefined}
@@ -338,15 +338,17 @@ export function FlowPanel({
               disabled={planDisabled}
               title={!inFlowStage ? "请先进入流量规划阶段" : undefined}
             />
-          ) : (
+          ) : planning ? null : (
+            // boss 真机反馈：综合中不显示上一次结果的头行（库态推导会把旧结果画回来），只留进度行。
             <PlanResultArea planState={planState} gclQuery={gclQuery} />
           )}
 
           {/* U9/R15：门控概览八卡（仅已规划态渲染；数据源=get_gcl_detail，与详情弹窗同源 KTD8）。
               U2：渲染条件不含 fresh，Armed 须单独收口，否则八卡与初始 CTA 同屏。 */}
-          {queryPresentation === "planned" && gclQuery.status === "loaded" && !replanArmed && (
-            <GclOverviewSection overview={buildGclOverview(gclQuery.detail)} />
-          )}
+          {queryPresentation === "planned" &&
+            gclQuery.status === "loaded" &&
+            !replanArmed &&
+            !planning && <GclOverviewSection overview={buildGclOverview(gclQuery.detail)} />}
 
           {/*
             R4：RC 流的 redundant/paths 字段「仅 RC 才显」是**录入表单**规则；本面板是规划/软仿
