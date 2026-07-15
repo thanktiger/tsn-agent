@@ -39,10 +39,33 @@ jobs:
         id: release
         run: npm run release:prepare
 
+  e2e:
+    name: E2E (Playwright) — 发布前闸门
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright browser
+        run: npx playwright install --with-deps chromium
+
+      - name: E2E (Playwright)
+        run: npm run e2e
+
   build:
     name: Build ${{ matrix.name }}
     if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
-    needs: prepare-release
+    needs: [prepare-release, e2e]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     strategy:
