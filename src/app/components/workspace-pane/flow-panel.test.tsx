@@ -573,27 +573,14 @@ describe("FlowPanel", () => {
     expect(screen.getAllByText(/gPTP 收敛/).length).toBe(1);
   });
 
-  it("U2②：有门控明细 → 时序图行数 = 端口数、折叠明细表条目数一致（展开后出表）", async () => {
+  it("U2②（boss 精简）：已规划 → 只渲染判定头行，时序图/明细表并入弹窗不再重复", async () => {
     const getFlowPlan = vi.fn(async () => planDetailWithGcl());
     render(<FlowPanel {...baseProps({ getFlowPlan })} />);
-    // 面板挂载即拉明细；时序图每行一个 (节点,端口)，行按首个开窗起点升序（es2 起点 0 在前）。
-    const chart = await screen.findByRole("img", { name: "门控时序图" });
-    const labels = [...chart.querySelectorAll(".flow-gcl-row-label")].map((t) => t.textContent);
-    expect(labels).toEqual(["es2·eth0", "sw1·eth1"]);
-    expect(chart.querySelectorAll(".flow-gcl-track").length).toBe(2);
-    // 开窗色块 hover title 显示精确值（sw1：472.39µs → 476.95µs，4560ns）。
-    const titles = [...chart.querySelectorAll(".flow-gcl-window title")].map((t) => t.textContent);
-    expect(titles).toContain("开 472.39µs → 476.95µs（4560ns）");
-    // 折叠明细：默认收起（无表），头部显示条目数，点开出表。
-    const toggle = screen.getByRole("button", { name: /门控明细 · 2 条目/ });
-    expect(screen.queryByRole("table")).toBeNull();
-    fireEvent.click(toggle);
-    const table = screen.getByRole("table");
-    expect(table.querySelectorAll("tbody tr").length).toBe(2);
-    expect(screen.getByText("eth1")).toBeTruthy();
-    expect(screen.getByText("472.39–476.95")).toBeTruthy(); // 开窗(µs) 列。
-    expect(screen.getByText("0.5%")).toBeTruthy(); // sw1 占空比 4560/1000000。
-    expect(screen.getByText("30.0%")).toBeTruthy(); // es2 占空比 300000/1000000。
+    // 头行（凭数据合成：条目数 + 求解器徽章）。
+    expect(await screen.findByText(/门控表 · 2 条目/)).toBeTruthy();
+    // 面板不再渲染时序图与门控明细折叠表。
+    expect(screen.queryByRole("img", { name: "门控时序图" })).toBeNull();
+    expect(screen.queryByRole("button", { name: /门控明细/ })).toBeNull();
   });
 
   it("U2③：no_gating（流集无 ST 流）→ 蓝色信息条、不画空图", async () => {
@@ -637,13 +624,14 @@ describe("FlowPanel", () => {
       <FlowPanel {...baseProps({ getFlowPlan, planState: { status: "running" } })} />,
     );
     await waitFor(() => expect(getFlowPlan).toHaveBeenCalledTimes(1));
-    expect(screen.queryByRole("img", { name: "门控时序图" })).toBeNull();
+    expect(screen.queryByText(/门控表 · 2 条目/)).toBeNull();
     rerender(
       <FlowPanel
         {...baseProps({ getFlowPlan, planState: { status: "done", result: planOk() } })}
       />,
     );
-    expect(await screen.findByRole("img", { name: "门控时序图" })).toBeTruthy();
+    // done → effect 重拉明细 → 重新规划按钮进命令栏（明细已刷新的可见信号）。
+    expect(await screen.findByRole("button", { name: "重新规划" })).toBeTruthy();
     expect(getFlowPlan).toHaveBeenCalledTimes(2);
   });
 
@@ -713,7 +701,7 @@ describe("FlowPanel", () => {
     expect(screen.queryByRole("img", { name: "门控时序图" })).toBeNull();
   });
 
-  it("item10.7：solver_failed × 库里有旧门控表（有 ST）→ 保留旧图（旧 GCL 仍会被 pin，诚实）", async () => {
+  it("item10.7：solver_failed × 库里有旧门控表（有 ST）→ 保留失败判定（旧 GCL 仍会被 pin；图表在弹窗）", async () => {
     const solverFailed = planOk({
       status: "solver_failed",
       solver: undefined,
@@ -726,8 +714,9 @@ describe("FlowPanel", () => {
         {...baseProps({ getFlowPlan, planState: { status: "done", result: solverFailed } })}
       />,
     );
-    expect(await screen.findByRole("img", { name: "门控时序图" })).toBeTruthy();
-    expect(screen.getByText(/门控综合失败/)).toBeTruthy();
+    expect(await screen.findByText(/门控综合失败/)).toBeTruthy();
+    // 旧 GCL 的图表展示在门控详情弹窗，面板不再画图。
+    expect(screen.queryByRole("img", { name: "门控时序图" })).toBeNull();
   });
 
   it("会话切换后迟到结果被丢弃", async () => {
@@ -852,7 +841,7 @@ describe("FlowPanel", () => {
 
   it("U9/AE7：已规划态渲染八卡，数值与 buildGclOverview 口径一致", async () => {
     renderOverview();
-    expect(await screen.findByRole("button", { name: /门控概览/ })).toBeTruthy();
+    expect(await screen.findByText("门控概览")).toBeTruthy();
     // ① 调度状态：绿卡「可调度」+ 副行「GCL 已生成」。
     const statusCard = cardOf("调度状态");
     expect(within(statusCard).getByText("可调度")).toBeTruthy();
@@ -932,17 +921,6 @@ describe("FlowPanel", () => {
     expect(screen.queryByText("调度状态")).toBeNull();
   });
 
-  it("U9：折叠交互——默认展开，点击折叠再点展开", async () => {
-    renderOverview();
-    const toggle = await screen.findByRole("button", { name: /门控概览/ });
-    expect(toggle.getAttribute("aria-expanded")).toBe("true");
-    expect(screen.getByText("调度状态")).toBeTruthy();
-    fireEvent.click(toggle);
-    expect(screen.queryByText("调度状态")).toBeNull();
-    fireEvent.click(toggle);
-    expect(screen.getByText("调度状态")).toBeTruthy();
-  });
-
   it("U9：无可归属链路 → 带宽卡显示「—」+ 副行「链路速率未知」", async () => {
     const detail = gclDetailPlanned({
       streams: [
@@ -951,7 +929,7 @@ describe("FlowPanel", () => {
       ],
     });
     renderOverview(detail);
-    await screen.findByRole("button", { name: /门控概览/ });
+    await screen.findByText("门控概览");
     const bwCard = cardOf("最大链路带宽占用");
     expect(within(bwCard).getByText("—")).toBeTruthy();
     expect(within(bwCard).getByText("链路速率未知")).toBeTruthy();

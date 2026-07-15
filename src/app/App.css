@@ -2920,6 +2920,14 @@ textarea:focus-visible {
 
 /* U9/R15：门控概览八卡（gcl-overview-* 类族）——卡片 grid 复用面板卡片视觉语言
    （sim-overall 绿/琥珀同色系），窄面板 auto-fit 自动换行。 */
+/* 门控概览静态标题（boss 定不折叠）。 */
+.gcl-overview-title {
+  margin: 0 0 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted, #6b7280);
+}
+
 .gcl-overview {
   display: flex;
   flex-direction: column;

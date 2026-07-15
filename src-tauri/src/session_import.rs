@@ -316,6 +316,15 @@ async fn perform_import_inner(
         }
     }
 
+    // boss 定：导入的工程一律提示重新规划——gcl_raw_archive 有意不随导出（重放源缺位，
+    // verify 会报无规划），置 stale=1 让概览/弹窗出「需重新规划」琥珀提示，口径一致。
+    // 无 gcl_plan_meta 行（未规划/旧导出）则 no-op。
+    sqlx::query("UPDATE gcl_plan_meta SET stale = 1 WHERE session_id = ?")
+        .bind(&target_session_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("导入置 stale 失败：{e}"))?;
+
     tx.commit().await.map_err(|e| format!("commit 失败：{e}"))?;
 
     Ok(ImportSessionResponse {
@@ -1038,6 +1047,36 @@ mod tests {
                     .await
                     .unwrap();
             assert_eq!(wins, 0, "缺表按零行处理（空规划态）");
+        });
+    }
+
+    /// boss 定：导入的已规划工程须提示重新规划——raw 重放源不随导出，
+    /// verify 会报无规划，导入时置 gcl_plan_meta.stale=1 让 UI 出琥珀提示口径一致。
+    #[test]
+    fn import_marks_plan_meta_stale() {
+        tauri::async_runtime::block_on(async {
+            let (dir, main_pool) = seed_main_pool().await;
+            let src_pool = source_pool(dir.path()).await;
+            sqlx::query("INSERT INTO sessions (id, title, created_at, updated_at, payload) VALUES ('orig', 't', 'now', 'now', '{}')")
+                .execute(&src_pool).await.unwrap();
+            // 源工程已规划（meta stale=0）+ 一条窗口行。
+            sqlx::query("INSERT INTO gcl_plan_meta (session_id, provider, status, cycle_ns, algorithm, stale, created_at) VALUES ('orig', 'inet-z3', 'ok', 1000000, 'Z3', 0, 'now')")
+                .execute(&src_pool).await.unwrap();
+            sqlx::query("INSERT INTO gcl_windows (session_id, provider, node, eth_n, entry_idx, start_ns, duration_ns, gate_states, flow_refs) VALUES ('orig', 'inet-z3', '0', 1, 0, 0, 1000000, 255, NULL)")
+                .execute(&src_pool).await.unwrap();
+            src_pool.close().await;
+
+            let src_path = dir.path().join("src.db");
+            let resp = perform_import(&main_pool, &src_path, Some("imported"))
+                .await
+                .unwrap();
+            let stale: i64 =
+                sqlx::query_scalar("SELECT stale FROM gcl_plan_meta WHERE session_id = ?")
+                    .bind(&resp.session_id)
+                    .fetch_one(&main_pool)
+                    .await
+                    .unwrap();
+            assert_eq!(stale, 1, "导入工程的规划应标记过期（需重新规划提示）");
         });
     }
 
