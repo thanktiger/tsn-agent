@@ -575,17 +575,11 @@ pub(crate) fn build_forwarding_tables(
         }
         let talker = &r.node_path[0];
         let listener = &r.node_path[r.node_path.len() - 1];
-        let (Some(&first_seq), Some(&last_seq)) = (r.link_seqs.first(), r.link_seqs.last()) else {
-            continue;
-        };
-        let (Some(first_link), Some(last_link)) = (by_seq.get(&first_seq), by_seq.get(&last_seq))
-        else {
-            return Err(internal_err(seq, "路径链路已不存在"));
-        };
-        // 目的地址锚：listener 末链入口端口 / talker 首链出口端口（%ethN 消双宿歧义）。
+        // 目的地址锚：talker 首跳出口 ethN=egress 首项（R12 已锚 ethN），listener 末链入口端口
+        // 经 route_listener_eth（destAddress %ethN 同源）。凭证已过复验，映射失败属内部不变量破坏。
         let (Some(t_eth), Some(l_eth)) = (
-            node_eth_on_link(first_link, talker),
-            node_eth_on_link(last_link, listener),
+            r.egress.first().map(|(_, k)| *k),
+            route_listener_eth(r, &by_seq, port_eth),
         ) else {
             return Err(internal_err(seq, "端点端口无法映射到 ethN"));
         };
@@ -1374,8 +1368,9 @@ fn build_flow_tas_ini(
         && streams
             .iter()
             .any(|s| talker_eth0_plane(links, port_eth, &s.talker).as_deref() != Some("A"));
-    // stream idx → listener 平面 A 侧接口后缀 "%ethK"；route 行按 (talker,listener) 去重。
-    let mut pin_dest: BTreeMap<usize, String> = BTreeMap::new();
+    // stream_seq → listener 平面 A 侧接口后缀 "%ethK"（与 forward_dest 同键，消费处单一约定）；
+    // route 行按 (talker,listener) 去重。
+    let mut pin_dest: BTreeMap<i64, String> = BTreeMap::new();
     let mut route_lines: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     if pin_kit {
         for &i in &order {
@@ -1411,7 +1406,7 @@ fn build_flow_tas_ini(
             ) else {
                 continue;
             };
-            pin_dest.insert(i, format!("%eth{k_l}"));
+            pin_dest.insert(s.stream_seq, format!("%eth{k_l}"));
             route_lines.insert(format!(
                 "<route hosts='{}' destination='{}%eth{k_l}' netmask='255.255.255.255' interface='eth{k_t}'/>",
                 ned(&s.talker),
@@ -1453,7 +1448,7 @@ fn build_flow_tas_ini(
             // pin_kit 的 pin_dest 在双平面无 RC 场景与之等值，作后备。
             let dest_suffix = forward_dest
                 .get(&s.stream_seq)
-                .or_else(|| pin_dest.get(&i))
+                .or_else(|| pin_dest.get(&s.stream_seq))
                 .cloned()
                 .unwrap_or_default();
             ini.push_str(&format!("*.{tned}.app[{a}].typename = \"UdpSourceApp\"\n"));
@@ -2652,16 +2647,21 @@ mod tests {
         let r = route_via(&[0, 3, 4, 2], "t", "l", &links);
         let fwd =
             build_forwarding_tables(&[(0, r)], &links, &port_eth, &ned, &sw_set(&nodes)).unwrap();
-        // s1 端口 {0,1,2}→eth{0,1,2}；绕路出口=端口2=eth2（非直连端口1=eth1）。
-        let s1 = fwd.get("sw01").unwrap();
-        let listener_eg = s1
-            .iter()
-            .find(|(dest, _)| dest == "es02%eth0")
-            .map(|(_, eg)| *eg)
-            .unwrap();
-        assert_eq!(listener_eg, 2, "s1 正向应指向绕路端口 eth2");
-        // 中间交换机 s2 出现在表里。
-        assert!(fwd.contains_key("sw02"), "中间交换机应出现：{fwd:?}");
+        // 沿途每交换机（含中间 s2）都含正反两条目，锁死双向完整性（漏条目 → 泛洪风暴）。
+        // 正向去 listener=es02%eth0：s1 走绕路口 eth2（非直连 eth1）、s2 走 eth1、s3 走 eth1。
+        // 反向去 talker=es01%eth0：s1 走 eth0、s2 走 eth0、s3 走绕路来向口 eth2。
+        assert_eq!(
+            fwd.get("sw01").unwrap(),
+            &vec![("es01%eth0".to_string(), 0), ("es02%eth0".to_string(), 2)]
+        );
+        assert_eq!(
+            fwd.get("sw02").unwrap(),
+            &vec![("es01%eth0".to_string(), 0), ("es02%eth0".to_string(), 1)]
+        );
+        assert_eq!(
+            fwd.get("sw03").unwrap(),
+            &vec![("es01%eth0".to_string(), 2), ("es02%eth0".to_string(), 1)]
+        );
     }
 
     /// 两流同 (sw, 目的地址) 同出口（同路径）→ 去重为一条（每交换机仍恰 2 条目）。
