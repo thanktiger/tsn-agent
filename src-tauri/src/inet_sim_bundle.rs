@@ -13,6 +13,7 @@
 //! `ethg[k]` 还是 `eth[k]`、以及 `.vec` 里 `timeChanged` 的真实 module 路径，再固化 scavetool
 //! filter。端口→k 的换算规则（本模块）不依赖实跑、已固化。
 
+use crate::flow_route::Route;
 use crate::topology_verify::{VerifyError, VerifyLink, VerifyNode};
 use std::collections::BTreeMap;
 
@@ -486,6 +487,124 @@ fn talker_eth0_plane(
                 || (l.dst_node == mid && l.dst_port == Some(min_port))
         })
         .and_then(crate::flow_route::link_plane)
+}
+
+/// KTD13：把每条 ST/BE 流的路径凭证翻译成逐交换机静态 L2 转发条目（双向全覆盖）。
+/// 返回 `交换机 ned 名 → Vec<(目的地址 "ned%ethN", 出口 ethN)>`（(ned,dest) 键有序 → Vec 天然
+/// 按 dest 排序，确定性）。正向：沿 `route.egress`（除 talker）每交换机 hop → 去 listener 走该 hop
+/// 出口，目的地址锚 listener 末链入口端口；反向：沿 `node_path` 反走，每中间交换机取指向 talker
+/// 侧端口 → 去 talker，目的地址锚 talker 首链出口端口。地址用 `%ethN` 消双宿端系统裸名 MAC 解析
+/// 歧义（spike pin_dest 实证）。跨流冲突（同交换机同目的不同出口）静态 MAC 转发不分流、物理不可
+/// 满足 → 响亮 `FORWARDING_CONFLICT`（点名两流 + 交换机 + 消解引导，文案照 flow_route 先例）；同
+/// 键同出口去重。终端口/反向端口从 `link_seqs` + `port_eth` 同源取（凭证已过复验，映射失败属内部
+/// 不变量破坏，`FORWARDING_INTERNAL` 直接 Err）。
+pub(crate) fn build_forwarding_tables(
+    routes: &[(i64, Route)],
+    links: &[VerifyLink],
+    port_eth: &BTreeMap<String, BTreeMap<i64, usize>>,
+    ned_names: &BTreeMap<String, String>,
+) -> Result<BTreeMap<String, Vec<(String, usize)>>, VerifyError> {
+    let by_seq: BTreeMap<i64, &VerifyLink> = links.iter().map(|l| (l.link_seq, l)).collect();
+    // 节点在指定链路上的库端口 → ethN（无该端口/无映射 → None）。
+    let node_eth_on_link = |link: &VerifyLink, node: &str| -> Option<usize> {
+        let port = if link.src_node == node {
+            link.src_port
+        } else if link.dst_node == node {
+            link.dst_port
+        } else {
+            None
+        }?;
+        port_eth.get(node).and_then(|m| m.get(&port)).copied()
+    };
+    let internal_err = |seq: i64, what: &str| VerifyError {
+        code: "FORWARDING_INTERNAL".to_string(),
+        message_zh: format!("流 {seq} 转发表构造内部不变量破坏：{what}（凭证应已过复验）。"),
+        node_ref: None,
+    };
+    // 键 (交换机 ned, 目的地址) → (出口 ethN, 来源 stream_seq)。冲突/去重据此判。
+    let mut acc: BTreeMap<(String, String), (usize, i64)> = BTreeMap::new();
+    let push = |acc: &mut BTreeMap<(String, String), (usize, i64)>,
+                sw_ned: &str,
+                dest: String,
+                egress: usize,
+                seq: i64|
+     -> Result<(), VerifyError> {
+        match acc.get(&(sw_ned.to_string(), dest.clone())) {
+            Some(&(prev_eg, prev_seq)) if prev_eg != egress => Err(VerifyError {
+                code: "FORWARDING_CONFLICT".to_string(),
+                message_zh: format!(
+                    "交换机 {sw_ned} 上流 {prev_seq} 与流 {seq} 对同一目的 {dest} 要求不同出口（eth{prev_eg} vs eth{egress}），静态 MAC 转发无法按流区分。请为共享该端点的流指定与绕路同侧的路径后重试。"
+                ),
+                node_ref: None,
+            }),
+            Some(_) => Ok(()), // 同出口重复 → 去重。
+            None => {
+                acc.insert((sw_ned.to_string(), dest), (egress, seq));
+                Ok(())
+            }
+        }
+    };
+
+    for (seq, r) in routes {
+        let seq = *seq;
+        if r.node_path.len() < 2 {
+            continue;
+        }
+        let talker = &r.node_path[0];
+        let listener = &r.node_path[r.node_path.len() - 1];
+        let (Some(&first_seq), Some(&last_seq)) = (r.link_seqs.first(), r.link_seqs.last()) else {
+            continue;
+        };
+        let (Some(first_link), Some(last_link)) = (by_seq.get(&first_seq), by_seq.get(&last_seq))
+        else {
+            return Err(internal_err(seq, "路径链路已不存在"));
+        };
+        // 目的地址锚：listener 末链入口端口 / talker 首链出口端口（%ethN 消双宿歧义）。
+        let (Some(t_eth), Some(l_eth)) = (
+            node_eth_on_link(first_link, talker),
+            node_eth_on_link(last_link, listener),
+        ) else {
+            return Err(internal_err(seq, "端点端口无法映射到 ethN"));
+        };
+        let ned_of = |mid: &str| ned_names.get(mid).cloned().unwrap_or_else(|| mid.to_string());
+        let talker_addr = format!("{}%eth{t_eth}", ned_of(talker));
+        let listener_addr = format!("{}%eth{l_eth}", ned_of(listener));
+
+        // 正向：egress 除 talker 每交换机 hop → 去 listener（走该 hop 的 egress 端口）。
+        for (mid, eg) in r.egress.iter() {
+            if mid == talker {
+                continue;
+            }
+            let Some(sw_ned) = ned_names.get(mid) else {
+                continue; // 非交换机（不映射）——中间节点理论不出现，防御跳过。
+            };
+            push(&mut acc, sw_ned, listener_addr.clone(), *eg, seq)?;
+        }
+
+        // 反向：node_path 中间交换机取指向 talker 侧端口（link_seqs[i-1]）→ 去 talker。
+        for i in 1..r.node_path.len() - 1 {
+            let sw_mid = &r.node_path[i];
+            let Some(sw_ned) = ned_names.get(sw_mid) else {
+                continue;
+            };
+            let Some(&back_seq) = r.link_seqs.get(i - 1) else {
+                continue;
+            };
+            let Some(back_link) = by_seq.get(&back_seq) else {
+                return Err(internal_err(seq, "路径链路已不存在"));
+            };
+            let Some(back_eth) = node_eth_on_link(back_link, sw_mid) else {
+                return Err(internal_err(seq, "交换机反向端口无法映射到 ethN"));
+            };
+            push(&mut acc, sw_ned, talker_addr.clone(), back_eth, seq)?;
+        }
+    }
+
+    let mut out: BTreeMap<String, Vec<(String, usize)>> = BTreeMap::new();
+    for ((sw_ned, dest), (egress, _seq)) in acc {
+        out.entry(sw_ned).or_default().push((dest, egress));
+    }
+    Ok(out)
 }
 
 /// mid → ned 名（sw{NN}/es{NN}，两位零填充）映射，`map_and_validate` 的命名单一源（按节点
@@ -2226,6 +2345,183 @@ mod tests {
 
     /// 双平面 fixture：es01(mid1) 双宿 —A— sw01(mid0) —A— es02(mid2)；—B— sw02(mid3) —B—。
     /// GM=sw01(mid0)。es01/es02 端口 {0,1}：0→平面 A、1→平面 B（即 talker eth0 落平面 A）。
+    // ---------- U1（KTD13）：静态转发表构造 ----------
+
+    /// 无 plane 键的单平面链路（转发表构造与平面无关，derive 用 plane=None 全链路）。
+    fn plink(seq: i64, src: &str, sp: i64, dst: &str, dp: i64) -> VerifyLink {
+        VerifyLink {
+            link_seq: seq,
+            src_node: src.into(),
+            dst_node: dst.into(),
+            src_port: Some(sp),
+            dst_port: Some(dp),
+            speed: None,
+            styles_json: "{}".into(),
+        }
+    }
+
+    fn route_via(
+        seqs: &[i64],
+        talker: &str,
+        listener: &str,
+        links: &[VerifyLink],
+    ) -> crate::flow_route::Route {
+        crate::flow_route::build_route_from_link_seqs(seqs, talker, listener, links).unwrap()
+    }
+
+    /// 直路 t—s1—s2—l：沿途每交换机含正反两条目，出口 ethN 与 links 一致，地址带 %ethN。
+    /// 兼验反向条目正确性（listener 侧交换机含去 talker 条目，地址 talker%ethN）。
+    #[test]
+    fn forwarding_linear_bidirectional_entries() {
+        let nodes = vec![
+            node("t", "endSystem"),
+            node("l", "endSystem"),
+            node("s1", "switch"),
+            node("s2", "switch"),
+        ];
+        let links = vec![
+            plink(0, "t", 0, "s1", 0),
+            plink(1, "s1", 1, "s2", 0),
+            plink(2, "s2", 1, "l", 0),
+        ];
+        let port_eth = build_port_eth_map(&links);
+        let ned = node_ned_names(&nodes);
+        let r = route_via(&[0, 1, 2], "t", "l", &links);
+        let fwd = build_forwarding_tables(&[(0, r)], &links, &port_eth, &ned).unwrap();
+        // t=es01, l=es02, s1=sw01, s2=sw02。
+        assert_eq!(
+            fwd.get("sw01").unwrap(),
+            &vec![("es01%eth0".to_string(), 0), ("es02%eth0".to_string(), 1)]
+        );
+        assert_eq!(
+            fwd.get("sw02").unwrap(),
+            &vec![("es01%eth0".to_string(), 0), ("es02%eth0".to_string(), 1)]
+        );
+        // talker/listener 不进表。
+        assert!(fwd.get("es01").is_none() && fwd.get("es02").is_none());
+    }
+
+    /// 绕路流（三角拓扑）：中间交换机 s2 出现；直连口交换机 s1 的正向条目指向绕路端口（eth2）
+    /// 而非直连端口（eth1）。
+    #[test]
+    fn forwarding_detour_uses_detour_port() {
+        let nodes = vec![
+            node("t", "endSystem"),
+            node("l", "endSystem"),
+            node("s1", "switch"),
+            node("s2", "switch"),
+            node("s3", "switch"),
+        ];
+        let links = vec![
+            plink(0, "t", 0, "s1", 0),
+            plink(1, "s1", 1, "s3", 0), // 直连 s1—s3
+            plink(2, "s3", 1, "l", 0),
+            plink(3, "s1", 2, "s2", 0), // 绕路 s1—s2—s3
+            plink(4, "s2", 1, "s3", 2),
+        ];
+        let port_eth = build_port_eth_map(&links);
+        let ned = node_ned_names(&nodes);
+        // 绕路 link_seqs [0,3,4,2]：t-s1-s2-s3-l。
+        let r = route_via(&[0, 3, 4, 2], "t", "l", &links);
+        let fwd = build_forwarding_tables(&[(0, r)], &links, &port_eth, &ned).unwrap();
+        // s1 端口 {0,1,2}→eth{0,1,2}；绕路出口=端口2=eth2（非直连端口1=eth1）。
+        let s1 = fwd.get("sw01").unwrap();
+        let listener_eg = s1
+            .iter()
+            .find(|(dest, _)| dest == "es02%eth0")
+            .map(|(_, eg)| *eg)
+            .unwrap();
+        assert_eq!(listener_eg, 2, "s1 正向应指向绕路端口 eth2");
+        // 中间交换机 s2 出现在表里。
+        assert!(fwd.contains_key("sw02"), "中间交换机应出现：{fwd:?}");
+    }
+
+    /// 两流同 (sw, 目的地址) 同出口（同路径）→ 去重为一条（每交换机仍恰 2 条目）。
+    #[test]
+    fn forwarding_dedup_same_egress() {
+        let nodes = vec![
+            node("t", "endSystem"),
+            node("l", "endSystem"),
+            node("s1", "switch"),
+            node("s2", "switch"),
+        ];
+        let links = vec![
+            plink(0, "t", 0, "s1", 0),
+            plink(1, "s1", 1, "s2", 0),
+            plink(2, "s2", 1, "l", 0),
+        ];
+        let port_eth = build_port_eth_map(&links);
+        let ned = node_ned_names(&nodes);
+        let r0 = route_via(&[0, 1, 2], "t", "l", &links);
+        let r1 = route_via(&[0, 1, 2], "t", "l", &links);
+        let fwd = build_forwarding_tables(&[(0, r0), (1, r1)], &links, &port_eth, &ned).unwrap();
+        assert_eq!(fwd.get("sw01").unwrap().len(), 2, "去重后每交换机 2 条目");
+        assert_eq!(fwd.get("sw02").unwrap().len(), 2);
+    }
+
+    /// 主用例冲突：同 talker/listener 的绕路流（seq0）+ 最短路流（seq1）→ 正向分叉交换机 s1
+    /// 对同一 listener 目的要求不同出口 → FORWARDING_CONFLICT，点名两流 + 交换机 + 消解引导。
+    #[test]
+    fn forwarding_forward_fork_conflict() {
+        let nodes = vec![
+            node("t", "endSystem"),
+            node("l", "endSystem"),
+            node("s1", "switch"),
+            node("s2", "switch"),
+            node("s3", "switch"),
+        ];
+        let links = vec![
+            plink(0, "t", 0, "s1", 0),
+            plink(1, "s1", 1, "s3", 0), // 直连
+            plink(2, "s3", 1, "l", 0),
+            plink(3, "s1", 2, "s2", 0), // 绕路
+            plink(4, "s2", 1, "s3", 2),
+        ];
+        let port_eth = build_port_eth_map(&links);
+        let ned = node_ned_names(&nodes);
+        let detour = route_via(&[0, 3, 4, 2], "t", "l", &links); // s1 出口 eth2
+        let shortest = route_via(&[0, 1, 2], "t", "l", &links); // s1 出口 eth1
+        let err =
+            build_forwarding_tables(&[(0, detour), (1, shortest)], &links, &port_eth, &ned)
+                .unwrap_err();
+        assert_eq!(err.code, "FORWARDING_CONFLICT");
+        assert!(err.message_zh.contains("流 0") && err.message_zh.contains("流 1"), "{}", err.message_zh);
+        assert!(err.message_zh.contains("sw01"), "{}", err.message_zh);
+        assert!(err.message_zh.contains("同侧"), "含消解引导：{}", err.message_zh);
+    }
+
+    /// 反向冲突：同 talker、不同 listener、共享首跳后路径分叉 → 汇合交换机 s 的反向键
+    /// (s, talker%ethN) 冲突（两流从不同邻居到达 s，指向 talker 的端口不同）。
+    #[test]
+    fn forwarding_reverse_fork_conflict() {
+        let nodes = vec![
+            node("t", "endSystem"),
+            node("l1", "endSystem"),
+            node("l2", "endSystem"),
+            node("s1", "switch"),
+            node("s2", "switch"),
+            node("s", "switch"),
+        ];
+        let links = vec![
+            plink(0, "t", 0, "s1", 0),
+            plink(1, "s1", 1, "s", 0),  // flow A: s1→s 直连
+            plink(2, "s", 1, "l1", 0),  // flow A 终
+            plink(3, "s1", 2, "s2", 0), // flow B: s1→s2
+            plink(4, "s2", 1, "s", 2),  // flow B: s2→s
+            plink(5, "s", 3, "l2", 0),  // flow B 终
+        ];
+        let port_eth = build_port_eth_map(&links);
+        let ned = node_ned_names(&nodes);
+        let flow_a = route_via(&[0, 1, 2], "t", "l1", &links); // t-s1-s-l1，s 反向经 link1
+        let flow_b = route_via(&[0, 3, 4, 5], "t", "l2", &links); // t-s1-s2-s-l2，s 反向经 link4
+        let err =
+            build_forwarding_tables(&[(0, flow_a), (1, flow_b)], &links, &port_eth, &ned)
+                .unwrap_err();
+        assert_eq!(err.code, "FORWARDING_CONFLICT", "{}", err.message_zh);
+        // 冲突在汇合交换机 s（=sw03，命名顺序 s1,s2,s）对目的 talker（es01）。
+        assert!(err.message_zh.contains("es01%eth0"), "反向键锚 talker：{}", err.message_zh);
+    }
+
     fn dual_plane_sample() -> (Vec<VerifyNode>, Vec<VerifyLink>, Vec<SimNodeTiming>) {
         let nodes = vec![
             node("0", "switch"),
