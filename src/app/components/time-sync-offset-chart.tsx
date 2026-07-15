@@ -1,5 +1,6 @@
 import type * as ECharts from "echarts";
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import { useEChartsOption } from "../hooks/use-echarts";
 import "./time-sync-offset-chart.css";
 
 export const TIME_SYNC_ALL_SERIES_ID = "all";
@@ -281,82 +282,33 @@ function EchartsLineCanvas({
   thresholdNs: number;
 }) {
   const chartElementRef = useRef<HTMLDivElement | null>(null);
+  // dataZoom 状态保持（本组件独有，不进共享 hook）：数据轮询刷新重建 option 时带回用户当前
+  // 缩放窗口。chartInstanceRef 经 onInit 拿实例，供重建时读实时缩放态兜底。
   const chartInstanceRef = useRef<ECharts.ECharts | undefined>(undefined);
   const dataZoomStateRef = useRef<DataZoomState | undefined>(undefined);
-  const latestOptionRef = useRef<ECharts.EChartsOption>(
-    buildTimeSyncChartOption(points, series, thresholdNs, dataZoomStateRef.current),
-  );
 
-  useEffect(() => {
-    const chart = chartInstanceRef.current;
-    dataZoomStateRef.current = readDataZoomState(chart) ?? dataZoomStateRef.current;
-    latestOptionRef.current = buildTimeSyncChartOption(
-      points,
-      series,
-      thresholdNs,
-      dataZoomStateRef.current,
-    );
-    chartInstanceRef.current?.setOption(latestOptionRef.current, {
-      notMerge: true,
-      lazyUpdate: true,
-    });
+  const option = useMemo(() => {
+    dataZoomStateRef.current =
+      readDataZoomState(chartInstanceRef.current) ?? dataZoomStateRef.current;
+    return buildTimeSyncChartOption(points, series, thresholdNs, dataZoomStateRef.current);
   }, [points, series, thresholdNs]);
 
-  useEffect(() => {
-    const el = chartElementRef.current;
-    if (!el) {
-      return undefined;
-    }
-    let disposed = false;
-    let chart: ECharts.ECharts | undefined;
-    let observer: ResizeObserver | undefined;
-
-    void import("echarts")
-      .then((echarts) => {
-        // import 是异步的——StrictMode 双挂载 / HMR 会在 import 解析前就 cleanup，此时直接退出不 init。
-        if (disposed || chartElementRef.current !== el) {
-          return;
-        }
-        // 同一 dom 重复 init 时 echarts 会返回旧实例并告警，随后前一个 effect 的 cleanup 把这个
-        // 共享实例 dispose 掉 → setOption 打在已 disposed 的实例上 → 空白画布。先清残留实例，确保
-        // 每次都拿到全新实例；cleanup 只 dispose 本 effect 自己的 chart（局部变量，非共享 ref）。
-        echarts.getInstanceByDom(el)?.dispose();
-        chart = echarts.init(el, undefined, { renderer: "canvas" });
-        chartInstanceRef.current = chart;
-        const handleDataZoom = (payload: unknown) => {
-          dataZoomStateRef.current =
-            dataZoomStateFromPayload(payload) ??
-            readDataZoomState(chart) ??
-            dataZoomStateRef.current;
-        };
-        chart.on("datazoom", handleDataZoom);
-        chart.setOption(latestOptionRef.current, {
-          notMerge: true,
-          lazyUpdate: true,
-        });
-        // init 可能在容器完成布局前读到 0 宽/高（Tauri WebKit 时序）——立即 resize 读真实尺寸，
-        // 并用 ResizeObserver 盯容器本身（面板分栏布局变化不会触发 window resize，必须盯元素）。
-        chart.resize();
-        if (typeof ResizeObserver !== "undefined") {
-          observer = new ResizeObserver(() => chart?.resize());
-          observer.observe(el);
-        }
-      })
-      .catch((err) => {
-        // 把被 promise 吞掉的 echarts import/init/setOption 报错暴露出来（排查空白画布）。
-        console.error("[time-sync-chart] echarts 渲染失败:", err);
-      });
-
+  const handleInit = useCallback((chart: ECharts.ECharts) => {
+    chartInstanceRef.current = chart;
+    const handleDataZoom = (payload: unknown) => {
+      dataZoomStateRef.current =
+        dataZoomStateFromPayload(payload) ?? readDataZoomState(chart) ?? dataZoomStateRef.current;
+    };
+    chart.on("datazoom", handleDataZoom);
     return () => {
-      disposed = true;
-      observer?.disconnect();
-      chart?.off("datazoom");
-      chart?.dispose();
+      chart.off("datazoom");
       if (chartInstanceRef.current === chart) {
         chartInstanceRef.current = undefined;
       }
     };
   }, []);
+
+  useEChartsOption(chartElementRef, option, { logTag: "time-sync-chart", onInit: handleInit });
 
   return (
     <div

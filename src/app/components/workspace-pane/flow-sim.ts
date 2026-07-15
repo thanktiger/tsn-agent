@@ -84,126 +84,6 @@ export interface VerifyTasResult {
   gptpDiag?: GptpDiag;
 }
 
-/** 门控表单条目（U2，对齐 flow_plan_command::FlowPlanEntry）。node=mid、nodeName=显示名（缺名回退 mid）。 */
-export interface FlowPlanEntry {
-  node: string;
-  nodeName: string;
-  ethN: number;
-  gateIndex: number;
-  initiallyOpen: boolean;
-  offsetNs: number;
-  durationsNs: number[];
-}
-
-/** 门控表明细（U2，对齐 flow_plan_command::FlowPlanDetail）。三态（KTD1）全由数据推导。 */
-export interface FlowPlanDetail {
-  cycleNs: number;
-  solver?: string;
-  stCount: number;
-  rcCount: number;
-  beCount: number;
-  entries: FlowPlanEntry[];
-}
-
-/** 门控明细查询态（组件内）：loading=取数中、unavailable=取数失败（回退按钮态判据）、loaded=有数据。 */
-export type FlowPlanQueryState =
-  | { status: "loading" }
-  | { status: "unavailable" }
-  | { status: "loaded"; detail: FlowPlanDetail };
-
-/**
- * KTD1 三态（由查询数据推导，不依赖规划动作记忆）。镜像后端 verify「无 ST 一律不 pin」口径：
- * 流集无 ST 流时，即便库里残留存量门控表，验证也不会消费它——不得呈现为「已规划」。
- * - stCount==0 且流集非空 → no-gating（蓝条「无需门控」；存量门控表与流集不符的矛盾态也落此，
- *   由面板追加「验证不会消费」文案，不画时序图）；
- * - stCount==0 且流集空 → unplanned（居中 CTA）；
- * - stCount>0 且 entries 非空 → planned（画时序图 + 明细表）；
- * - stCount>0 且 entries 空 → unplanned（有 ST 待规划）。
- */
-export function flowPlanPresentation(
-  detail: FlowPlanDetail,
-): "planned" | "no-gating" | "unplanned" {
-  if (detail.stCount === 0) {
-    return detail.rcCount + detail.beCount > 0 ? "no-gating" : "unplanned";
-  }
-  return detail.entries.length > 0 ? "planned" : "unplanned";
-}
-
-/**
- * 开窗区间还原纯函数（U2/KTD2）——与后端 `inet_sim_bundle::gcl_open_intervals` 同语义：
- * INET PeriodicGate t=0 时排程已前进 offset，即 state(t) = seq((t + offset) mod cycle)，
- * 序列坐标 p 的开窗落在绝对时间 (p - offset) mod cycle；initiallyOpen 定首段状态、durations
- * 交替翻转；跨周期边界的开窗拆成尾段 + 头段。durations 空 → 恒 initiallyOpen。
- * （后端在 durations 总和 ≠ 周期时响亮 Err——那是互补关窗推导的前置；本函数纯展示，按同一
- * 公式尽力渲染。）返回 [startNs, endNs) 列表。
- */
-export function gclOpenIntervals(entry: FlowPlanEntry, cycleNs: number): Array<[number, number]> {
-  if (entry.durationsNs.length === 0) {
-    return entry.initiallyOpen ? [[0, cycleNs]] : [];
-  }
-  const off = entry.offsetNs % cycleNs;
-  let open = entry.initiallyOpen;
-  let pos = 0;
-  const out: Array<[number, number]> = [];
-  for (const d of entry.durationsNs) {
-    if (open && d > 0) {
-      const start = (pos + cycleNs - off) % cycleNs;
-      if (start + d <= cycleNs) {
-        out.push([start, start + d]);
-      } else {
-        // offset 回绕：开窗跨周期边界，拆成尾段 + 头段。
-        out.push([start, cycleNs]);
-        out.push([0, start + d - cycleNs]);
-      }
-    }
-    pos += d;
-    open = !open;
-  }
-  return out;
-}
-
-/** 占空比（U2 明细表列）：开窗总时长 / 门周期，0..1。 */
-export function gclDutyCycle(entry: FlowPlanEntry, cycleNs: number): number {
-  const openTotal = gclOpenIntervals(entry, cycleNs).reduce((sum, [s, e]) => sum + (e - s), 0);
-  return cycleNs > 0 ? openTotal / cycleNs : 0;
-}
-
-/** 时序图单行 = (节点, 端口)：该端口全部门条目的开窗区间并集（当前 ST 单门，通常即一条）。 */
-export interface GateTimelineRow {
-  node: string;
-  nodeName: string;
-  ethN: number;
-  windows: Array<[number, number]>;
-}
-
-/** 时序图行构建（U2/KTD2）：按 (node, ethN) 分组，行按首个开窗起点升序（Z3 流水线阶梯错位
- * 自然呈现）；无开窗的行排末尾。 */
-export function buildGateTimelineRows(
-  entries: FlowPlanEntry[],
-  cycleNs: number,
-): GateTimelineRow[] {
-  const byPort = new Map<string, GateTimelineRow>();
-  for (const entry of entries) {
-    const key = `${entry.node}|${entry.ethN}`;
-    let row = byPort.get(key);
-    if (!row) {
-      row = { node: entry.node, nodeName: entry.nodeName, ethN: entry.ethN, windows: [] };
-      byPort.set(key, row);
-    }
-    row.windows.push(...gclOpenIntervals(entry, cycleNs));
-  }
-  const rows = [...byPort.values()];
-  for (const row of rows) {
-    row.windows.sort((a, b) => a[0] - b[0]);
-  }
-  rows.sort((a, b) => {
-    const fa = a.windows[0]?.[0] ?? Number.POSITIVE_INFINITY;
-    const fb = b.windows[0]?.[0] ?? Number.POSITIVE_INFINITY;
-    return fa - fb;
-  });
-  return rows;
-}
-
 /** ns → µs 显示（时序图 hover / 明细表），保留两位小数：472390 → "472.39"。 */
 export function nsToUs(ns: number): string {
   return (ns / 1000).toFixed(2);
@@ -404,11 +284,6 @@ export async function invokeUpdateFlowStream(
   return await invoke<UpdateFlowStreamResult>("update_flow_stream", { request });
 }
 
-/** 默认门控明细读通道 = get_flow_plan Tauri command（测试可注入替身）。 */
-export async function invokeGetFlowPlan(sessionId: string): Promise<FlowPlanDetail> {
-  return await invoke<FlowPlanDetail>("get_flow_plan", { request: { sessionId } });
-}
-
 /** 流集查询读通道 = list_flow_streams Tauri command（测试可注入替身）。 */
 export async function invokeListFlowStreams(sessionId: string): Promise<ListFlowStreamsResult> {
   return await invoke<ListFlowStreamsResult>("list_flow_streams", { request: { sessionId } });
@@ -556,14 +431,21 @@ export async function invokeGetGclDetail(sessionId: string): Promise<GclDetail> 
   return await invoke<GclDetail>("get_gcl_detail", { request: { sessionId } });
 }
 
-/** GclDetail 三态（新表口径；flowPlanPresentation 兼容保留到 U9 切换消费）：
- * meta=null → 未规划（从未规划/老工程）；status=no_gating → 无需门控；有窗口行 → 已规划。 */
+/**
+ * KTD1 三态（由查询数据推导，不依赖规划动作记忆；面板头行/CTA/验证按钮闸单一口径）。
+ * 镜像后端 verify「无 ST 一律不 pin」口径：流集无 ST 流时，即便库里残留存量门控表，
+ * 验证也不会消费它——不得呈现为「已规划」。
+ * - 无 ST 且流集非空 → no-gating（蓝条「无需门控」；存量门控表与流集不符的矛盾态也落此，
+ *   由面板追加「验证不会消费」文案）；
+ * - 无 ST 且流集空 → unplanned（居中 CTA）；
+ * - 有 ST 且有窗口行 → planned；
+ * - 有 ST 且无窗口行 → unplanned（有 ST 待规划）。
+ */
 export function gclPresentation(detail: GclDetail): "planned" | "no-gating" | "unplanned" {
-  if (!detail.meta) {
-    return "unplanned";
-  }
-  if (detail.meta.status === "no_gating") {
-    return "no-gating";
+  const hasSt = detail.streams.some((s) => s.class === "ST");
+  if (!hasSt) {
+    const hasOthers = detail.streams.some((s) => s.class === "RC" || s.class === "BE");
+    return hasOthers ? "no-gating" : "unplanned";
   }
   return detail.windows.length > 0 ? "planned" : "unplanned";
 }

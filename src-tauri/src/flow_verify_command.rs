@@ -156,7 +156,7 @@ impl VerifyTasResult {
 }
 
 /// 读 pin 的 GCL：重放 raw_archive par 行（KTD4）——同一解析器
-/// （`flow_plan_command::parse_gcl_from_sca`）两次跑同一输入，输出 GclEntry 直接进现管线。
+/// （`gcl_synth::parse_gcl_from_sca`）两次跑同一输入，输出 GclEntry 直接进现管线。
 /// 空 durations 恒态门被解析器滤掉（不进 pin，补集关窗由 complement_gcl 生成，G2.4 语义保持）。
 /// 无存档行 / 重放为空 → 空 vec（调用方按 has_st 判 no_plan）。solver 取 gcl_plan_meta 的
 /// algorithm（缺行回退 Z3——只用于区分补集门标识，非 COMPLEMENT_SOLVER 即可）。
@@ -179,7 +179,7 @@ async fn load_gcl(
         return Ok(vec![]);
     };
     let solver = algorithm.unwrap_or_else(|| "Z3".to_string());
-    Ok(crate::flow_plan_command::parse_gcl_from_sca(
+    Ok(crate::gcl_synth::parse_gcl_from_sca(
         &par_lines, ned_to_mid, &solver,
     ))
 }
@@ -1342,7 +1342,7 @@ mod tests {
             let mut ned_to_mid = BTreeMap::new();
             ned_to_mid.insert("sw1".to_string(), "0".to_string());
             let got = load_gcl(&pool, "s1", &ned_to_mid).await.unwrap();
-            let expected = crate::flow_plan_command::parse_gcl_from_sca(&par, &ned_to_mid, "Eager");
+            let expected = crate::gcl_synth::parse_gcl_from_sca(&par, &ned_to_mid, "Eager");
             assert_eq!(got, expected, "重放=同一解析器两次跑同一输入");
             assert_eq!(got.len(), 1, "空 durations 恒态门不进 pin：{got:?}");
             assert_eq!(got[0].node, "0", "ned→mid 折回");
