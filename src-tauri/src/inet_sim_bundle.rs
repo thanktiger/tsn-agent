@@ -491,6 +491,35 @@ fn talker_eth0_plane(
         .and_then(crate::flow_route::link_plane)
 }
 
+/// 节点在指定链路上的库端口 → ethN（无该端口/无映射 → None）。KTD13：转发表键与 destAddress
+/// 后缀共用它取端点 `%ethN`，保证 L2 转发键与 L3 目的解析落同一接口（防多宿端系统失配泛洪）。
+fn endpoint_eth(
+    link: &VerifyLink,
+    node: &str,
+    port_eth: &BTreeMap<String, BTreeMap<i64, usize>>,
+) -> Option<usize> {
+    let port = if link.src_node == node {
+        link.src_port
+    } else if link.dst_node == node {
+        link.dst_port
+    } else {
+        None
+    }?;
+    port_eth.get(node).and_then(|m| m.get(&port)).copied()
+}
+
+/// 路径 listener 侧末链入口端口 → ethN（KTD13 P2：destAddress `%ethN` 与转发表键同源）。
+fn route_listener_eth(
+    r: &Route,
+    by_seq: &BTreeMap<i64, &VerifyLink>,
+    port_eth: &BTreeMap<String, BTreeMap<i64, usize>>,
+) -> Option<usize> {
+    let listener = r.node_path.last()?;
+    let &last_seq = r.link_seqs.last()?;
+    let last = by_seq.get(&last_seq)?;
+    endpoint_eth(last, listener, port_eth)
+}
+
 /// KTD13：把每条 ST/BE 流的路径凭证翻译成逐交换机静态 L2 转发条目（双向全覆盖）。
 /// 返回 `交换机 ned 名 → Vec<(目的地址 "ned%ethN", 出口 ethN)>`（(ned,dest) 键有序 → Vec 天然
 /// 按 dest 排序，确定性）。正向：沿 `route.egress`（除 talker）每交换机 hop → 去 listener 走该 hop
@@ -505,19 +534,11 @@ pub(crate) fn build_forwarding_tables(
     links: &[VerifyLink],
     port_eth: &BTreeMap<String, BTreeMap<i64, usize>>,
     ned_names: &BTreeMap<String, String>,
+    switch_mids: &std::collections::BTreeSet<String>,
 ) -> Result<BTreeMap<String, Vec<(String, usize)>>, VerifyError> {
     let by_seq: BTreeMap<i64, &VerifyLink> = links.iter().map(|l| (l.link_seq, l)).collect();
-    // 节点在指定链路上的库端口 → ethN（无该端口/无映射 → None）。
-    let node_eth_on_link = |link: &VerifyLink, node: &str| -> Option<usize> {
-        let port = if link.src_node == node {
-            link.src_port
-        } else if link.dst_node == node {
-            link.dst_port
-        } else {
-            None
-        }?;
-        port_eth.get(node).and_then(|m| m.get(&port)).copied()
-    };
+    let node_eth_on_link =
+        |link: &VerifyLink, node: &str| -> Option<usize> { endpoint_eth(link, node, port_eth) };
     let internal_err = |seq: i64, what: &str| VerifyError {
         code: "FORWARDING_INTERNAL".to_string(),
         message_zh: format!("流 {seq} 转发表构造内部不变量破坏：{what}（凭证应已过复验）。"),
@@ -578,12 +599,20 @@ pub(crate) fn build_forwarding_tables(
         let listener_addr = format!("{}%eth{l_eth}", ned_of(listener));
 
         // 正向：egress 除 talker 每交换机 hop → 去 listener（走该 hop 的 egress 端口）。
+        // 中间转发节点必须是交换机（端系统无 macTable，钉不了）——非交换机响亮 Err，
+        // 不静默跳过（否则漏条目 + 自动配置器已关 → 泛洪）。
         for (mid, eg) in r.egress.iter() {
             if mid == talker {
                 continue;
             }
+            if !switch_mids.contains(mid) {
+                return Err(internal_err(
+                    seq,
+                    "路径中间转发节点非交换机，无 macTable 可钉",
+                ));
+            }
             let Some(sw_ned) = ned_names.get(mid) else {
-                continue; // 非交换机（不映射）——中间节点理论不出现，防御跳过。
+                return Err(internal_err(seq, "交换机无 ned 名"));
             };
             push(&mut acc, sw_ned, listener_addr.clone(), *eg, seq)?;
         }
@@ -591,8 +620,14 @@ pub(crate) fn build_forwarding_tables(
         // 反向：node_path 中间交换机取指向 talker 侧端口（link_seqs[i-1]）→ 去 talker。
         for i in 1..r.node_path.len() - 1 {
             let sw_mid = &r.node_path[i];
+            if !switch_mids.contains(sw_mid) {
+                return Err(internal_err(
+                    seq,
+                    "路径中间转发节点非交换机，无 macTable 可钉",
+                ));
+            }
             let Some(sw_ned) = ned_names.get(sw_mid) else {
-                continue;
+                return Err(internal_err(seq, "交换机无 ned 名"));
             };
             let Some(&back_seq) = r.link_seqs.get(i - 1) else {
                 continue;
@@ -1385,6 +1420,22 @@ fn build_flow_tas_ini(
         }
     }
 
+    // KTD13 P2：发射静态转发表时，listener destAddress 也须带 `%ethN`——转发表键按 `%ethN`
+    // 编、自动配置器已关无学习兜底，若 destAddress 是裸名（多宿端系统解析到别的接口 MAC）则
+    // 查表 miss → 泛洪。后缀从与转发表同一份 routes 的 listener 末链入口端口取（route_listener_eth
+    // 同源），单宿端系统恒 %eth0 与裸名等价、位级不变。仅 is_pin && !frer && 有转发条目时填。
+    let mut forward_dest: BTreeMap<i64, String> = BTreeMap::new();
+    if is_pin && !frer && !forwarding.is_empty() {
+        let by_seq: BTreeMap<i64, &VerifyLink> = links.iter().map(|l| (l.link_seq, l)).collect();
+        if let FlowTasSchedule::Pin(_, routes) = &schedule {
+            for (seq, r) in *routes {
+                if let Some(l_eth) = route_listener_eth(r, &by_seq, port_eth) {
+                    forward_dest.insert(*seq, format!("%eth{l_eth}"));
+                }
+            }
+        }
+    }
+
     // --- numApps（每节点一次，含既发又收的节点）---
     for (node, count) in &node_apps {
         ini.push_str(&format!("*.{}.numApps = {count}\n", ned(node)));
@@ -1398,7 +1449,13 @@ fn build_flow_tas_ini(
             let p = &placements[i];
             let a = p.talker_app;
             let lned = ned(&s.listener);
-            let dest_suffix = pin_dest.get(&i).cloned().unwrap_or_default();
+            // forward_dest（转发表同源）优先——它保证 L3 目的与 L2 转发键落同一接口；
+            // pin_kit 的 pin_dest 在双平面无 RC 场景与之等值，作后备。
+            let dest_suffix = forward_dest
+                .get(&s.stream_seq)
+                .or_else(|| pin_dest.get(&i))
+                .cloned()
+                .unwrap_or_default();
             ini.push_str(&format!("*.{tned}.app[{a}].typename = \"UdpSourceApp\"\n"));
             ini.push_str(&format!(
                 "*.{tned}.app[{a}].io.destAddress = \"{lned}{dest_suffix}\"\n"
@@ -1749,7 +1806,12 @@ pub fn build_flow_tas_sim_bundle(
                 BTreeMap::new()
             } else {
                 let ned_names = node_ned_names(nodes);
-                build_forwarding_tables(routes, links, &port_eth, &ned_names)
+                let switch_mids: std::collections::BTreeSet<String> = nodes
+                    .iter()
+                    .filter(|n| map_node_type(n.node_type.as_deref()) == Some("TsnSwitch"))
+                    .map(|n| n.mid.clone())
+                    .collect();
+                build_forwarding_tables(routes, links, &port_eth, &ned_names, &switch_mids)
                     .map_err(|e| vec![e])?
             }
         }
@@ -2270,6 +2332,28 @@ mod tests {
             "{ini}"
         );
         assert!(ini.contains("**.macTable.agingTime = 1000000s"), "{ini}");
+        // P2：发射转发表时 destAddress 也带 %ethN（与转发键同源）——单宿端系统恒 %eth0。
+        assert!(
+            ini.contains("io.destAddress = \"es02%eth0\""),
+            "destAddress 须带 %ethN 后缀与转发键一致：{ini}"
+        );
+    }
+
+    /// P3：路径中间转发节点是端系统（无 macTable）→ 响亮 FORWARDING_INTERNAL，不静默漏条目。
+    #[test]
+    fn forwarding_transit_end_system_errors_loud() {
+        let nodes = vec![
+            node("t", "endSystem"),
+            node("x", "endSystem"), // 多口端系统当中转——无 macTable，钉不了。
+            node("l", "endSystem"),
+        ];
+        let links = vec![plink(0, "t", 0, "x", 0), plink(1, "x", 1, "l", 0)];
+        let port_eth = build_port_eth_map(&links);
+        let ned = node_ned_names(&nodes);
+        let r = route_via(&[0, 1], "t", "l", &links);
+        let err = build_forwarding_tables(&[(0, r)], &links, &port_eth, &ned, &sw_set(&nodes))
+            .unwrap_err();
+        assert_eq!(err.code, "FORWARDING_INTERNAL");
     }
 
     /// Pin + 含 RC（即便传了 routes）：转发钉死三类行全不出现（FRER 单写入者），FRER 段仍在。
@@ -2503,6 +2587,14 @@ mod tests {
         crate::flow_route::build_route_from_link_seqs(seqs, talker, listener, links).unwrap()
     }
 
+    fn sw_set(nodes: &[VerifyNode]) -> std::collections::BTreeSet<String> {
+        nodes
+            .iter()
+            .filter(|n| map_node_type(n.node_type.as_deref()) == Some("TsnSwitch"))
+            .map(|n| n.mid.clone())
+            .collect()
+    }
+
     /// 直路 t—s1—s2—l：沿途每交换机含正反两条目，出口 ethN 与 links 一致，地址带 %ethN。
     /// 兼验反向条目正确性（listener 侧交换机含去 talker 条目，地址 talker%ethN）。
     #[test]
@@ -2521,7 +2613,8 @@ mod tests {
         let port_eth = build_port_eth_map(&links);
         let ned = node_ned_names(&nodes);
         let r = route_via(&[0, 1, 2], "t", "l", &links);
-        let fwd = build_forwarding_tables(&[(0, r)], &links, &port_eth, &ned).unwrap();
+        let fwd =
+            build_forwarding_tables(&[(0, r)], &links, &port_eth, &ned, &sw_set(&nodes)).unwrap();
         // t=es01, l=es02, s1=sw01, s2=sw02。
         assert_eq!(
             fwd.get("sw01").unwrap(),
@@ -2557,7 +2650,8 @@ mod tests {
         let ned = node_ned_names(&nodes);
         // 绕路 link_seqs [0,3,4,2]：t-s1-s2-s3-l。
         let r = route_via(&[0, 3, 4, 2], "t", "l", &links);
-        let fwd = build_forwarding_tables(&[(0, r)], &links, &port_eth, &ned).unwrap();
+        let fwd =
+            build_forwarding_tables(&[(0, r)], &links, &port_eth, &ned, &sw_set(&nodes)).unwrap();
         // s1 端口 {0,1,2}→eth{0,1,2}；绕路出口=端口2=eth2（非直连端口1=eth1）。
         let s1 = fwd.get("sw01").unwrap();
         let listener_eg = s1
@@ -2588,7 +2682,14 @@ mod tests {
         let ned = node_ned_names(&nodes);
         let r0 = route_via(&[0, 1, 2], "t", "l", &links);
         let r1 = route_via(&[0, 1, 2], "t", "l", &links);
-        let fwd = build_forwarding_tables(&[(0, r0), (1, r1)], &links, &port_eth, &ned).unwrap();
+        let fwd = build_forwarding_tables(
+            &[(0, r0), (1, r1)],
+            &links,
+            &port_eth,
+            &ned,
+            &sw_set(&nodes),
+        )
+        .unwrap();
         assert_eq!(fwd.get("sw01").unwrap().len(), 2, "去重后每交换机 2 条目");
         assert_eq!(fwd.get("sw02").unwrap().len(), 2);
     }
@@ -2615,8 +2716,14 @@ mod tests {
         let ned = node_ned_names(&nodes);
         let detour = route_via(&[0, 3, 4, 2], "t", "l", &links); // s1 出口 eth2
         let shortest = route_via(&[0, 1, 2], "t", "l", &links); // s1 出口 eth1
-        let err = build_forwarding_tables(&[(0, detour), (1, shortest)], &links, &port_eth, &ned)
-            .unwrap_err();
+        let err = build_forwarding_tables(
+            &[(0, detour), (1, shortest)],
+            &links,
+            &port_eth,
+            &ned,
+            &sw_set(&nodes),
+        )
+        .unwrap_err();
         assert_eq!(err.code, "FORWARDING_CONFLICT");
         assert!(
             err.message_zh.contains("流 0") && err.message_zh.contains("流 1"),
@@ -2655,8 +2762,14 @@ mod tests {
         let ned = node_ned_names(&nodes);
         let flow_a = route_via(&[0, 1, 2], "t", "l1", &links); // t-s1-s-l1，s 反向经 link1
         let flow_b = route_via(&[0, 3, 4, 5], "t", "l2", &links); // t-s1-s2-s-l2，s 反向经 link4
-        let err = build_forwarding_tables(&[(0, flow_a), (1, flow_b)], &links, &port_eth, &ned)
-            .unwrap_err();
+        let err = build_forwarding_tables(
+            &[(0, flow_a), (1, flow_b)],
+            &links,
+            &port_eth,
+            &ned,
+            &sw_set(&nodes),
+        )
+        .unwrap_err();
         assert_eq!(err.code, "FORWARDING_CONFLICT", "{}", err.message_zh);
         // 冲突在汇合交换机 s（=sw03，命名顺序 s1,s2,s）对目的 talker（es01）。
         assert!(
