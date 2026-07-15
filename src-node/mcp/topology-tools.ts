@@ -800,7 +800,11 @@ export function createFlowToolRegistry(): FlowMcpToolDefinition[] {
         "stream's own period as the latency bound when omitted). Optional path pins an explicit route " +
         "for ST/BE streams: a node reference sequence (mid or unique display name) including talker and " +
         "listener endpoints — use it to disambiguate equal-length multipath topologies; not allowed for " +
-        "RC (its dual paths are system-derived). Returns the assigned streamSeq on success.",
+        "RC (its dual paths are system-derived). Without path, the route is derived at recording time " +
+        "and persisted as a system credential; on a topology with multiple equal-length routes the " +
+        "stream is REJECTED with AMBIGUOUS_ROUTE — retry with an explicit path (use topology.inspect " +
+        "to see the topology); unreachable talker/listener pairs are rejected with NO_ROUTE. Returns " +
+        "the assigned streamSeq on success.",
       inputSchema: addStreamInputSchema(),
       handler: async (args) =>
         callSidecarTool("/db/flow/add_stream", args, {

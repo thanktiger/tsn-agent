@@ -26,6 +26,10 @@ pub const MAX_IMPORT_FILE_BYTES: u64 = 10 * 1024 * 1024;
 /// 会经 sidecar inspect 原文直达模型上下文。
 const MAX_SMALL_TEXT_BYTES: usize = 4 * 1024; // styles_json / name / mid 等
 const MAX_NAME_TEXT_BYTES: usize = 256; // sessions.title / project_name
+/// flow_gcl_plan.windows_json 列专属上限（照 sessions.payload 豁免先例）：整份门控
+/// 结果的窗口数组进一列，量级远超 4KB 兜底（真机十余端口 × 数窗即数十 KB），
+/// 给 512KB 宽松上限防外部篡改文件单列灌爆（文件 10MB 是总闸）。
+const MAX_WINDOWS_JSON_BYTES: usize = 512 * 1024;
 /// sessions.payload 字节上限：导出携带完整会话（已脱敏），主库实测 payload 在
 /// 数十 KB 量级；给 2MB 宽松上限防外部篡改文件单行灌爆（文件 10MB 是总闸）。
 const MAX_PAYLOAD_BYTES: usize = 2 * 1024 * 1024;
@@ -316,10 +320,10 @@ async fn perform_import_inner(
         }
     }
 
-    // boss 定：导入的工程一律提示重新规划——gcl_raw_archive 有意不随导出（重放源缺位，
-    // verify 会报无规划），置 stale=1 让概览/弹窗出「需重新规划」琥珀提示，口径一致。
-    // 无 gcl_plan_meta 行（未规划/旧导出）则 no-op。
-    sqlx::query("UPDATE gcl_plan_meta SET stale = 1 WHERE session_id = ?")
+    // boss 定：导入的工程一律提示重新规划——raw 存档是本机文件、有意不随导出（重放源
+    // 缺位，verify 会报无规划），置 stale=1 让概览/弹窗出「需重新规划」琥珀提示，口径一致。
+    // 无 flow_gcl_plan 行（未规划/旧导出）则 no-op。
+    sqlx::query("UPDATE flow_gcl_plan SET stale = 1 WHERE session_id = ?")
         .bind(&target_session_id)
         .execute(&mut *tx)
         .await
@@ -345,6 +349,16 @@ fn validate_text_field(
     let Ok(Some(value)) = row.try_get::<Option<String>, _>(col) else {
         return Ok(());
     };
+    // windows_json 列专属上限（512KB，见常量注释）——不吃 4KB 兜底。
+    if col == "windows_json" {
+        if value.len() > MAX_WINDOWS_JSON_BYTES {
+            return Err(format!(
+                "{table}.{col} 字段长度 {} 字节超过上限 {MAX_WINDOWS_JSON_BYTES}，拒绝导入",
+                value.len()
+            ));
+        }
+        return Ok(());
+    }
     if value.len() > MAX_SMALL_TEXT_BYTES {
         return Err(format!(
             "{table}.{col} 字段长度 {} 字节超过上限 {MAX_SMALL_TEXT_BYTES}，拒绝导入",
@@ -1016,20 +1030,18 @@ mod tests {
         });
     }
 
-    /// Covers KTD10：旧导出文件（无门控新表）按零行跳过导入成功——不硬报错，
+    /// Covers KTD10：旧导出文件（无门控单表）按零行跳过导入成功——不硬报错，
     /// 降级为空规划态。
     #[test]
     fn import_skips_missing_new_tables_as_zero_rows() {
         tauri::async_runtime::block_on(async {
             let (dir, main_pool) = seed_main_pool().await;
             let src_pool = source_pool(dir.path()).await;
-            // 模拟旧版本导出：把门控新表从源库删掉。
-            for table in ["gcl_windows", "gcl_plan_meta", "gcl_raw_archive"] {
-                sqlx::query(&format!("DROP TABLE {table}"))
-                    .execute(&src_pool)
-                    .await
-                    .unwrap();
-            }
+            // 模拟旧版本导出：把门控单表从源库删掉。
+            sqlx::query("DROP TABLE flow_gcl_plan")
+                .execute(&src_pool)
+                .await
+                .unwrap();
             sqlx::query("INSERT INTO sessions (id, title, created_at, updated_at, payload) VALUES ('orig', 't', 'now', 'now', '{}')")
                 .execute(&src_pool).await.unwrap();
             sqlx::query("INSERT INTO topology_nodes (session_id, mid, x, y, insert_order) VALUES ('orig', '0', 0.0, 0.0, 0), ('orig', '1', 1.0, 1.0, 1)")
@@ -1039,19 +1051,20 @@ mod tests {
             let src_path = dir.path().join("src.db");
             let resp = perform_import(&main_pool, &src_path, Some("legacy"))
                 .await
-                .expect("缺新表的旧导出文件应按零行跳过导入成功");
+                .expect("缺单表的旧导出文件应按零行跳过导入成功");
             assert_eq!(resp.rows_inserted.topology_nodes, 2);
-            let wins: i64 =
-                sqlx::query_scalar("SELECT COUNT(*) FROM gcl_windows WHERE session_id='legacy'")
+            let plans: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM flow_gcl_plan WHERE session_id='legacy'")
                     .fetch_one(&main_pool)
                     .await
                     .unwrap();
-            assert_eq!(wins, 0, "缺表按零行处理（空规划态）");
+            assert_eq!(plans, 0, "缺表按零行处理（空规划态）");
         });
     }
 
-    /// boss 定：导入的已规划工程须提示重新规划——raw 重放源不随导出，
-    /// verify 会报无规划，导入时置 gcl_plan_meta.stale=1 让 UI 出琥珀提示口径一致。
+    /// boss 定：导入的已规划工程须提示重新规划——raw 重放源（本机文件）不随导出，
+    /// verify 会报无规划，导入时置 flow_gcl_plan.stale=1 让 UI 出琥珀提示口径一致。
+    /// 顺带覆盖 AE3：windows_json 随行导入保真。
     #[test]
     fn import_marks_plan_meta_stale() {
         tauri::async_runtime::block_on(async {
@@ -1059,10 +1072,10 @@ mod tests {
             let src_pool = source_pool(dir.path()).await;
             sqlx::query("INSERT INTO sessions (id, title, created_at, updated_at, payload) VALUES ('orig', 't', 'now', 'now', '{}')")
                 .execute(&src_pool).await.unwrap();
-            // 源工程已规划（meta stale=0）+ 一条窗口行。
-            sqlx::query("INSERT INTO gcl_plan_meta (session_id, provider, status, cycle_ns, algorithm, stale, created_at) VALUES ('orig', 'inet-z3', 'ok', 1000000, 'Z3', 0, 'now')")
-                .execute(&src_pool).await.unwrap();
-            sqlx::query("INSERT INTO gcl_windows (session_id, provider, node, eth_n, entry_idx, start_ns, duration_ns, gate_states, flow_refs) VALUES ('orig', 'inet-z3', '0', 1, 0, 0, 1000000, 255, NULL)")
+            // 源工程已规划（行 stale=0，windows_json 带一窗）。
+            let windows = r#"[{"node":"0","ethN":1,"entryIdx":0,"startNs":0,"durationNs":1000000,"gateStates":255,"flowRefs":null}]"#;
+            sqlx::query("INSERT INTO flow_gcl_plan (session_id, provider, status, cycle_ns, algorithm, stale, created_at, windows_json) VALUES ('orig', 'inet-z3', 'ok', 1000000, 'Z3', 0, 'now', ?)")
+                .bind(windows)
                 .execute(&src_pool).await.unwrap();
             src_pool.close().await;
 
@@ -1070,13 +1083,51 @@ mod tests {
             let resp = perform_import(&main_pool, &src_path, Some("imported"))
                 .await
                 .unwrap();
-            let stale: i64 =
-                sqlx::query_scalar("SELECT stale FROM gcl_plan_meta WHERE session_id = ?")
-                    .bind(&resp.session_id)
-                    .fetch_one(&main_pool)
-                    .await
-                    .unwrap();
+            let (stale, windows_json): (i64, String) = sqlx::query_as(
+                "SELECT stale, windows_json FROM flow_gcl_plan WHERE session_id = ?",
+            )
+            .bind(&resp.session_id)
+            .fetch_one(&main_pool)
+            .await
+            .unwrap();
             assert_eq!(stale, 1, "导入工程的规划应标记过期（需重新规划提示）");
+            assert_eq!(windows_json, windows, "windows_json 随行导入保真");
+        });
+    }
+
+    /// windows_json 列专属上限：超 512KB 拒绝导入（4KB 兜底豁免仅到 512KB 为止）。
+    #[test]
+    fn import_rejects_oversized_windows_json() {
+        tauri::async_runtime::block_on(async {
+            let (dir, main_pool) = seed_main_pool().await;
+            let src_pool = source_pool(dir.path()).await;
+            sqlx::query("INSERT INTO sessions (id, title, created_at, updated_at, payload) VALUES ('orig', 't', 'now', 'now', '{}')")
+                .execute(&src_pool).await.unwrap();
+            // 合法量级（>4KB、<512KB）应通过豁免。
+            let mid_size = format!("[{}]", "1,".repeat(5000));
+            sqlx::query("INSERT INTO flow_gcl_plan (session_id, provider, status, cycle_ns, algorithm, stale, created_at, windows_json) VALUES ('orig', 'inet-z3', 'ok', 1000000, 'Z3', 0, 'now', ?)")
+                .bind(&mid_size)
+                .execute(&src_pool).await.unwrap();
+            src_pool.close().await;
+            let src_path = dir.path().join("src.db");
+            perform_import(&main_pool, &src_path, Some("mid"))
+                .await
+                .expect(">4KB 但 <512KB 的 windows_json 应豁免通过");
+
+            // 超 512KB → 拒。
+            let src_pool = source_pool(dir.path()).await;
+            let bomb = "x".repeat(512 * 1024 + 1);
+            sqlx::query("UPDATE flow_gcl_plan SET windows_json = ? WHERE session_id='orig'")
+                .bind(&bomb)
+                .execute(&src_pool)
+                .await
+                .unwrap();
+            src_pool.close().await;
+            let err = perform_import(&main_pool, &src_path, Some("bombed"))
+                .await
+                .unwrap_err();
+            assert!(err.contains("windows_json"), "err={err}");
+            assert!(err.contains("超过上限"), "err={err}");
         });
     }
 

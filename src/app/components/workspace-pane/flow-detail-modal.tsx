@@ -82,7 +82,7 @@ function classBadgeColor(cls: string): string {
   }
 }
 
-/** 路径选择值："auto"=系统自动 / "current"=当前显式指定（不在候选中，可能已失效）/
+/** 路径选择值："auto"=系统自动 / "current"=当前凭证路径（不在候选中，可能已失效）/
  * `c{idx}`=候选下标。 */
 type PathSelection = "auto" | "current" | `c${number}`;
 
@@ -190,7 +190,7 @@ export function FlowDetailModal({
       : `${stream.talker} → ${stream.listener}`;
 
   /** 下拉选中变化：更新选中 + 画布预览联动（auto → null；候选 → 其 linkSeqs；
-   * current → 库里显式 linkSeqs）。 */
+   * current → 库里凭证 linkSeqs）。 */
   function handlePathSelect(value: PathSelection) {
     setPathSelection(value);
     if (value === "auto") {
@@ -306,7 +306,7 @@ export function FlowDetailModal({
               >
                 <option value="auto">系统自动（最短路）</option>
                 {pathSelection === "current" && (
-                  <option value="current" title="当前库内显式指定，不在候选列表中">
+                  <option value="current" title="当前库内路径凭证，不在候选列表中">
                     当前指定路径（可能已失效）
                   </option>
                 )}

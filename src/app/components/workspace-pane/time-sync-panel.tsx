@@ -490,7 +490,7 @@ function formatThreshold(ns: number): string {
   return ns % 1000 === 0 ? `${ns / 1000}µs` : `${ns}ns`;
 }
 
-/** 取模块短名：`TsnAgentTimesyncNetwork.sw1.clock` → `sw1`（去网络前缀与 .clock 后缀）。 */
+/** 取模块短名：`TsnAgentTimesyncNetwork.sw01.clock` → `sw01`（去网络前缀与 .clock 后缀）。 */
 function shortNodeName(mid: string): string {
   const parts = mid.split(".");
   if (parts.length >= 2 && parts[parts.length - 1] === "clock") {

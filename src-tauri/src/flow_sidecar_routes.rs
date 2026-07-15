@@ -1,9 +1,11 @@
 //! 流量规划写库 sidecar route（`/db/flow/*`）。镜像 `timesync_sidecar_routes`：
 //! 复用同一 `RouteState` / Bearer / session middleware。
-//! - `add_stream`：`verify_flow` 校验闸 → 单一 `insert_stream` 落 `flow_streams`。
-//! - `inspect`：读 streams + 门控新表（gcl_windows/gcl_plan_meta）给 agent
-//!   （talker/listener→mid 解析用；SKILL.md 文案同步归 U7）。
-//! - `remove_stream`：删某 `stream_seq`，并清门控表（删流=规划失效，KTD6）。
+//! - `add_stream`：`verify_flow` 校验闸 → 路径落凭证（RC 双路径 / ST-BE 无 path 时
+//!   derive_route 沉淀凭证，歧义 AMBIGUOUS_ROUTE、不可达 NO_ROUTE 拒绝）→
+//!   单一 `insert_stream` 落 `flow_streams`。
+//! - `inspect`：读 streams + 门控结果单行（flow_gcl_plan，windows_json 展开为
+//!   gclWindows/gclMeta 既有响应形状）给 agent（talker/listener→mid 解析用）。
+//! - `remove_stream`：删某 `stream_seq`，并清门控行 + raw 文件（删流=规划失效，KTD6）。
 //!
 //! 写 handler 范式：`require_session` → begin tx → `snapshot_pre_image(FLOW_DOMAIN)`
 //! （为后续单步撤销留 pre-image，撤销触发本期 defer）→ insert/delete → commit →
@@ -179,7 +181,8 @@ impl AddStreamRequest {
                 l4_protocol: self.l4_protocol,
                 max_latency_us: self.max_latency_us,
                 // redundant 不透传请求值（系统推导：RC 由落库前 derive_rc_paths 覆盖）。
-                // paths 由 handler 解析 path 节点引用后填（R16 显式指定），未指定 NULL。
+                // paths 由 handler 填：path 节点引用 → 显式指定凭证（R16）；
+                // 未指定 → 录入时 derive_route 沉淀凭证（歧义/不可达拒绝）。
                 redundant: 0,
                 paths: None,
             },
@@ -222,7 +225,9 @@ pub async fn add_stream(
             &nodes,
             &links,
         ) {
-            Ok(route) => input.paths = Some(crate::flow_route::explicit_paths_json(&route)),
+            Ok(route) => {
+                input.paths = Some(crate::flow_route::paths_json(std::slice::from_ref(&route)));
+            }
             Err(errors) => {
                 // 路由层错误 → 录入闸用户语言（与 verify_flow 同映射）。
                 let mapped: Vec<crate::flow_verify::VerifyError> = errors
@@ -256,7 +261,7 @@ pub async fn add_stream(
     }
 
     // RC 流：录入时推导 A/B 双平面路径落预留槽（R2；预存值仅凭证，规划/验证期重推导，KTD6）。
-    // redundant/paths 由系统推导，覆盖请求侧任何传入值；ST/BE 不变（redundant=0 / paths NULL）。
+    // redundant/paths 由系统推导，覆盖请求侧任何传入值；ST/BE 显式指定沿 path 参数（上方）。
     // 校验闸已跑过同一推导，此处 Err 分支纯防御。
     if input.class == "RC" {
         match derive_rc_paths(&state.pool, &session_id, &input.talker, &input.listener).await {
@@ -271,6 +276,57 @@ pub async fn add_stream(
                     "DATABASE_ERROR",
                     &e.to_string(),
                     true,
+                );
+            }
+        }
+    } else if input.paths.is_none() {
+        // ST/BE 无显式路径：录入即推导、沉淀路径凭证（凭证优先，规划期复验/
+        // 静默刷新）。plane 语义与 plan_tas 同口径（single_path_plane：双平面锁 A）。
+        // 歧义/不可达在录入时拒绝：歧义引导带 path 参数消歧；不可达流录了也没意义。
+        let (nodes, links) =
+            match crate::flow_verify::load_route_topology(&state.pool, &session_id).await {
+                Ok(t) => t,
+                Err(e) => {
+                    return structured_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "DATABASE_ERROR",
+                        &e.to_string(),
+                        true,
+                    );
+                }
+            };
+        let plane = crate::flow_route::single_path_plane(&links);
+        match crate::flow_route::derive_route(
+            &crate::flow_route::RouteRequest {
+                talker: &input.talker,
+                listener: &input.listener,
+                plane,
+            },
+            &nodes,
+            &links,
+        ) {
+            Ok(route) => {
+                input.paths = Some(crate::flow_route::paths_json(std::slice::from_ref(&route)));
+            }
+            Err(errors) => {
+                if errors.iter().any(|e| e.code == "AMBIGUOUS_ROUTE") {
+                    return structured_error(
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        "AMBIGUOUS_ROUTE",
+                        &format!(
+                            "从 {} 到 {} 存在多条等长路径，请在 path 参数中指定节点序列（可先用 topology.inspect 查看拓扑）。",
+                            input.talker, input.listener
+                        ),
+                        false,
+                    );
+                }
+                // NO_ROUTE 等：码/消息透传拒绝。
+                let first = errors.first();
+                return structured_error(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    first.map(|e| e.code.as_str()).unwrap_or("ROUTE_ERROR"),
+                    &first.map(|e| e.message_zh.clone()).unwrap_or_default(),
+                    false,
                 );
             }
         }
@@ -310,7 +366,7 @@ pub async fn add_stream(
         }
     };
 
-    // KTD14：加流 = 既有规划过期，同事务置 gcl_plan_meta.stale（无行 no-op）。
+    // KTD14：加流 = 既有规划过期，同事务置 flow_gcl_plan.stale（无行 no-op）。
     if let Err(e) = crate::flow_plan_command::mark_gcl_stale(&mut *tx, &session_id).await {
         return structured_error(StatusCode::INTERNAL_SERVER_ERROR, "UPDATE_FAILED", &e, true);
     }
@@ -387,28 +443,27 @@ pub async fn remove_stream(
                 );
             }
         };
-    // KTD6 删流语义：删流 = 规划失效，清空该 session 的门控三新表 + flow_plans 残留，
-    // 需重新规划（旧实现按 stream_seq 删 flow_plans——stream_seq 恒 0 删不到，既有漏洞）。
-    // 表都归 flow domain，pre-image 已快照可撤（raw_archive 不入快照，KTD1）。
-    // KTD14：meta 行随清空消失，无需另置 stale（无 meta = 未规划态，比过期态更强）。
-    for table in [
-        "gcl_windows",
-        "gcl_plan_meta",
-        "gcl_raw_archive",
-        "flow_plans",
-    ] {
-        if let Err(e) = sqlx::query(&format!("DELETE FROM {table} WHERE session_id = ?"))
-            .bind(&req.session_id)
-            .execute(&mut *tx)
-            .await
-        {
-            return structured_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "DELETE_FAILED",
-                &e.to_string(),
-                true,
-            );
-        }
+    // KTD6 删流语义：删流 = 规划失效，清该 session 的 flow_gcl_plan 行 + raw 文件，
+    // 需重新规划。行归 flow domain，pre-image 已快照可撤（raw 文件不入快照，KTD1）。
+    // KTD14：行随清空消失，无需另置 stale（无行 = 未规划态，比过期态更强）。
+    if let Err(e) = sqlx::query("DELETE FROM flow_gcl_plan WHERE session_id = ?")
+        .bind(&req.session_id)
+        .execute(&mut *tx)
+        .await
+    {
+        return structured_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DELETE_FAILED",
+            &e.to_string(),
+            true,
+        );
+    }
+    if let Err(e) = crate::gcl_raw_store::remove_raw(
+        &state.gcl_raw_base_dir,
+        &req.session_id,
+        crate::flow_plan_command::GCL_PROVIDER,
+    ) {
+        return structured_error(StatusCode::INTERNAL_SERVER_ERROR, "DELETE_FAILED", &e, true);
     }
 
     if let Err(e) = tx.commit().await {
@@ -495,45 +550,10 @@ pub async fn inspect(
         })
         .collect();
 
-    // 门控读面切新表体系（U3）：逐窗行（gcl_windows）+ 规划元数据（gcl_plan_meta）。
-    let window_rows = match sqlx::query(
-        r#"SELECT node, eth_n, entry_idx, start_ns, duration_ns, gate_states, flow_refs
-           FROM gcl_windows WHERE session_id = ? AND provider = ?
-           ORDER BY node, eth_n, entry_idx"#,
-    )
-    .bind(&req.session_id)
-    .bind(crate::flow_plan_command::GCL_PROVIDER)
-    .fetch_all(&state.pool)
-    .await
-    {
-        Ok(rows) => rows,
-        Err(e) => {
-            return structured_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "DATABASE_ERROR",
-                &e.to_string(),
-                true,
-            );
-        }
-    };
-    let gcl_windows: Vec<Value> = window_rows
-        .iter()
-        .map(|r| {
-            json!({
-                "node": r.get::<String, _>("node"),
-                "ethN": r.get::<i64, _>("eth_n"),
-                "entryIdx": r.get::<i64, _>("entry_idx"),
-                "startNs": r.get::<i64, _>("start_ns"),
-                "durationNs": r.get::<i64, _>("duration_ns"),
-                // 0-255 位图（bit g = gate g 开）。
-                "gateStates": r.get::<i64, _>("gate_states"),
-                // flow_refs 回原始 JSON 字符串（agent inspect 只读透传，不解析）；无关联 = null。
-                "flowRefs": r.get::<Option<String>, _>("flow_refs"),
-            })
-        })
-        .collect();
-    let meta_row = match sqlx::query(
-        r#"SELECT status, cycle_ns, algorithm, stale FROM gcl_plan_meta
+    // 门控读面（单表化）：flow_gcl_plan 单行展开 windows_json → gclWindows/gclMeta
+    // 响应形状逐字段与三表版一致（外部行为零变化）。
+    let plan_row = match sqlx::query(
+        r#"SELECT status, cycle_ns, algorithm, stale, windows_json FROM flow_gcl_plan
            WHERE session_id = ? AND provider = ?"#,
     )
     .bind(&req.session_id)
@@ -551,14 +571,52 @@ pub async fn inspect(
             );
         }
     };
-    let gcl_meta = meta_row.map_or(Value::Null, |r| {
-        json!({
-            "status": r.get::<String, _>("status"),
-            "cycleNs": r.get::<i64, _>("cycle_ns"),
-            "algorithm": r.get::<String, _>("algorithm"),
-            "stale": r.get::<i64, _>("stale") != 0,
-        })
-    });
+    let (gcl_windows, gcl_meta) = match &plan_row {
+        None => (vec![], Value::Null),
+        Some(r) => {
+            let windows_json: String = r.get("windows_json");
+            let rows: Vec<crate::gcl_synth::GclWindowRow> =
+                match serde_json::from_str(&windows_json) {
+                    Ok(rows) => rows,
+                    Err(e) => {
+                        return structured_error(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "DATABASE_ERROR",
+                            &format!("解析 windows_json 失败：{e}"),
+                            true,
+                        );
+                    }
+                };
+            let mut rows = rows;
+            // 排序口径与三表版 ORDER BY node, eth_n, entry_idx 一致。
+            rows.sort_by(|a, b| {
+                (&a.node, a.eth_n, a.entry_idx).cmp(&(&b.node, b.eth_n, b.entry_idx))
+            });
+            let windows: Vec<Value> = rows
+                .into_iter()
+                .map(|w| {
+                    json!({
+                        "node": w.node,
+                        "ethN": w.eth_n as i64,
+                        "entryIdx": w.entry_idx as i64,
+                        "startNs": w.start_ns as i64,
+                        "durationNs": w.duration_ns as i64,
+                        // 0-255 位图（bit g = gate g 开）。
+                        "gateStates": w.gate_states as i64,
+                        // flowRefs 回原始 JSON 字符串（agent inspect 只读透传，不解析）；无关联 = null。
+                        "flowRefs": w.flow_refs,
+                    })
+                })
+                .collect();
+            let meta = json!({
+                "status": r.get::<String, _>("status"),
+                "cycleNs": r.get::<i64, _>("cycle_ns"),
+                "algorithm": r.get::<String, _>("algorithm"),
+                "stale": r.get::<i64, _>("stale") != 0,
+            });
+            (windows, meta)
+        }
+    };
 
     ok_summary(json!({ "streams": streams, "gclWindows": gcl_windows, "gclMeta": gcl_meta }))
 }
@@ -709,6 +767,7 @@ mod tests {
             let (pool, buf) = test_state().await;
             add_node(&pool, "0").await;
             add_node(&pool, "1").await;
+            add_link(&pool, 0, "0", 0, "1", 0, None).await;
             let (router, token) = build_test_router_with_pool(pool.clone(), buf.clone()).await;
 
             let (status, parsed) =
@@ -735,14 +794,15 @@ mod tests {
         });
     }
 
-    /// KTD14：已规划态（meta stale=0）加流 → 同事务置 stale=1（agent 通道也触发过期提示）。
+    /// KTD14：已规划态（行 stale=0）加流 → 同事务置 stale=1（agent 通道也触发过期提示）。
     #[test]
     fn add_stream_marks_gcl_stale() {
         tauri::async_runtime::block_on(async {
             let (pool, buf) = test_state().await;
             add_node(&pool, "0").await;
             add_node(&pool, "1").await;
-            sqlx::query("INSERT INTO gcl_plan_meta (session_id, provider, status, cycle_ns, algorithm, stale, created_at) VALUES ('s1', 'inet-z3', 'ok', 1000000, 'Z3', 0, 'now')")
+            add_link(&pool, 0, "0", 0, "1", 0, None).await;
+            sqlx::query("INSERT INTO flow_gcl_plan (session_id, provider, status, cycle_ns, algorithm, stale, created_at, windows_json) VALUES ('s1', 'inet-z3', 'ok', 1000000, 'Z3', 0, 'now', '[]')")
                 .execute(&pool).await.unwrap();
             let (router, token) = build_test_router_with_pool(pool.clone(), buf.clone()).await;
 
@@ -752,7 +812,7 @@ mod tests {
             assert_eq!(parsed["ok"], true, "{parsed:?}");
 
             let stale: i64 =
-                sqlx::query_scalar("SELECT stale FROM gcl_plan_meta WHERE session_id='s1'")
+                sqlx::query_scalar("SELECT stale FROM flow_gcl_plan WHERE session_id='s1'")
                     .fetch_one(&pool)
                     .await
                     .unwrap();
@@ -786,8 +846,9 @@ mod tests {
     }
 
     /// R1/R2/R3/①：双平面拓扑上 ST@pcp7 / RC@pcp6 / BE@pcp0 各录入成功；
-    /// 断言 redundant/paths **列值本身**——ST/BE redundant=0、paths NULL，
-    /// RC redundant=1、paths JSON 的 a/b node_path 与 link_seqs 逐项匹配（非 blob 整体比对）。
+    /// 断言 redundant/paths **列值本身**——ST/BE redundant=0、paths=录入沉淀的
+    /// 单 route 凭证（裸数组；双平面锁 A：0-2-1），RC redundant=1、paths JSON
+    /// 的 [0]/[1] node_path 与 link_seqs 逐项匹配（非 blob 整体比对）。
     #[test]
     fn three_classes_persist_redundant_and_paths_columns() {
         tauri::async_runtime::block_on(async {
@@ -813,32 +874,38 @@ mod tests {
             .await
             .unwrap();
             assert_eq!(rows.len(), 3);
-            assert_eq!((rows[0].1.as_str(), rows[0].2), ("ST", 0));
-            assert!(rows[0].3.is_none(), "ST paths 应为 NULL");
-            assert_eq!((rows[2].1.as_str(), rows[2].2), ("BE", 0));
-            assert!(rows[2].3.is_none(), "BE paths 应为 NULL");
+            // ST/BE：录入即沉淀单 route 凭证（裸数组；双平面锁平面 A → 0-2-1）。
+            for idx in [0usize, 2] {
+                assert_eq!(rows[idx].2, 0, "{} redundant 应为 0", rows[idx].1);
+                let p: serde_json::Value =
+                    serde_json::from_str(rows[idx].3.as_deref().expect("paths 应沉淀凭证"))
+                        .unwrap();
+                assert!(p.is_array(), "{}: 应为裸数组: {p}", rows[idx].1);
+                assert_eq!(p[0]["node_path"], json!(["0", "2", "1"]));
+                assert_eq!(p[0]["link_seqs"], json!([0, 1]));
+            }
 
             assert_eq!((rows[1].1.as_str(), rows[1].2), ("RC", 1));
             let paths: serde_json::Value =
                 serde_json::from_str(rows[1].3.as_deref().unwrap()).unwrap();
-            // KTD12 统一形状：routes[0]=A 平面、routes[1]=B 平面，origin=system。
-            assert_eq!(paths["version"], json!(1));
-            assert_eq!(paths["origin"], json!("system"));
-            assert_eq!(paths["routes"][0]["node_path"], json!(["0", "2", "1"]));
-            assert_eq!(paths["routes"][0]["link_seqs"], json!([0, 1]));
-            assert_eq!(paths["routes"][1]["node_path"], json!(["0", "3", "1"]));
-            assert_eq!(paths["routes"][1]["link_seqs"], json!([2, 3]));
+            // KTD12 统一形状（裸数组）：[0]=A 平面、[1]=B 平面。
+            assert!(paths.is_array(), "应为裸数组: {paths}");
+            assert_eq!(paths[0]["node_path"], json!(["0", "2", "1"]));
+            assert_eq!(paths[0]["link_seqs"], json!([0, 1]));
+            assert_eq!(paths[1]["node_path"], json!(["0", "3", "1"]));
+            assert_eq!(paths[1]["link_seqs"], json!([2, 3]));
         });
     }
 
-    /// 非 RC 类强制 redundant=0/paths NULL：ST 请求带 redundant=1 + 垃圾 paths →
-    /// 落库列值仍 0/NULL（请求侧传入值不透传，与推导注释承诺一致）。
+    /// 非 RC 类强制 redundant=0 + paths 不透传：ST 请求带 redundant=1 + 垃圾 paths →
+    /// 落库 redundant 仍 0、paths 为系统沉淀凭证（非请求垃圾值）。
     #[test]
     fn non_rc_request_redundant_paths_not_passed_through() {
         tauri::async_runtime::block_on(async {
             let (pool, buf) = test_state().await;
             add_node(&pool, "0").await;
             add_node(&pool, "1").await;
+            add_link(&pool, 0, "0", 0, "1", 0, None).await;
             let (router, token) = build_test_router_with_pool(pool.clone(), buf.clone()).await;
 
             let mut body = valid_st_body();
@@ -855,7 +922,137 @@ mod tests {
             .await
             .unwrap();
             assert_eq!(redundant, 0, "ST 落库恒 redundant=0");
-            assert!(paths.is_none(), "ST 落库恒 paths NULL: {paths:?}");
+            let p: serde_json::Value = serde_json::from_str(paths.as_deref().unwrap()).unwrap();
+            assert!(p.is_array(), "垃圾 paths 不透传: {p}");
+            assert_eq!(p[0]["link_seqs"], json!([0]));
+        });
+    }
+
+    /// 唯一路径录入 → 自动沉淀单 route 凭证（paths JSON 裸数组列值本身）。
+    #[test]
+    fn add_stream_sediments_system_path_credential() {
+        tauri::async_runtime::block_on(async {
+            let (pool, buf) = test_state().await;
+            add_node(&pool, "0").await;
+            add_node(&pool, "1").await;
+            add_node(&pool, "2").await;
+            add_link(&pool, 0, "0", 0, "2", 0, None).await;
+            add_link(&pool, 1, "2", 1, "1", 0, None).await;
+            let (router, token) = build_test_router_with_pool(pool.clone(), buf.clone()).await;
+
+            let (status, parsed) =
+                post(router, &token, "/db/flow/add_stream", valid_st_body()).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(parsed["ok"], true, "{parsed:?}");
+
+            let paths: Option<String> = sqlx::query_scalar(
+                "SELECT paths FROM flow_streams WHERE session_id='s1' AND stream_seq=0",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            let p: serde_json::Value =
+                serde_json::from_str(paths.as_deref().expect("录入应沉淀凭证")).unwrap();
+            assert!(p.is_array(), "应为裸数组: {p}");
+            assert_eq!(p[0]["node_path"], json!(["0", "2", "1"]));
+            assert_eq!(p[0]["link_seqs"], json!([0, 1]));
+        });
+    }
+
+    /// 菱形拓扑（等长两路 0-2-1 / 0-3-1）录 ST 无 path → AMBIGUOUS_ROUTE 拒绝、
+    /// 消息含「path 参数」引导、不落表。
+    #[test]
+    fn add_stream_ambiguous_route_rejected_with_guidance() {
+        tauri::async_runtime::block_on(async {
+            let (pool, buf) = test_state().await;
+            for mid in ["0", "1", "2", "3"] {
+                add_node(&pool, mid).await;
+            }
+            add_link(&pool, 0, "0", 0, "2", 0, None).await;
+            add_link(&pool, 1, "2", 1, "1", 0, None).await;
+            add_link(&pool, 2, "0", 1, "3", 0, None).await;
+            add_link(&pool, 3, "3", 1, "1", 1, None).await;
+            let (router, token) = build_test_router_with_pool(pool.clone(), buf.clone()).await;
+
+            let (status, parsed) =
+                post(router, &token, "/db/flow/add_stream", valid_st_body()).await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{parsed:?}");
+            assert_eq!(parsed["ok"], false);
+            assert_eq!(parsed["code"], "AMBIGUOUS_ROUTE");
+            let msg = parsed["message"].as_str().unwrap_or_default();
+            assert!(msg.contains("path 参数"), "应引导带 path 重录：{msg}");
+            assert!(msg.contains("多条等长路径"), "{msg}");
+
+            let count: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM flow_streams WHERE session_id='s1'")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(count, 0, "歧义被拒的流不落表");
+        });
+    }
+
+    /// 同一菱形带 path 参数 → 显式指定路径照常落库为裸数组凭证。
+    #[test]
+    fn add_stream_with_explicit_path_persists_credential() {
+        tauri::async_runtime::block_on(async {
+            let (pool, buf) = test_state().await;
+            for mid in ["0", "1", "2", "3"] {
+                add_node(&pool, mid).await;
+            }
+            add_link(&pool, 0, "0", 0, "2", 0, None).await;
+            add_link(&pool, 1, "2", 1, "1", 0, None).await;
+            add_link(&pool, 2, "0", 1, "3", 0, None).await;
+            add_link(&pool, 3, "3", 1, "1", 1, None).await;
+            let (router, token) = build_test_router_with_pool(pool.clone(), buf.clone()).await;
+
+            let mut body = valid_st_body();
+            body["path"] = json!(["0", "3", "1"]);
+            let (status, parsed) = post(router, &token, "/db/flow/add_stream", body).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(parsed["ok"], true, "{parsed:?}");
+
+            let paths: Option<String> = sqlx::query_scalar(
+                "SELECT paths FROM flow_streams WHERE session_id='s1' AND stream_seq=0",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            let p: serde_json::Value = serde_json::from_str(paths.as_deref().unwrap()).unwrap();
+            assert!(p.is_array(), "应为裸数组: {p}");
+            assert_eq!(p[0]["node_path"], json!(["0", "3", "1"]));
+            assert_eq!(p[0]["link_seqs"], json!([2, 3]));
+        });
+    }
+
+    /// 不可达（listener 孤岛）录 ST → NO_ROUTE 码/消息透传拒绝、不落表。
+    #[test]
+    fn add_stream_unreachable_rejected_no_route() {
+        tauri::async_runtime::block_on(async {
+            let (pool, buf) = test_state().await;
+            add_node(&pool, "0").await;
+            add_node(&pool, "1").await; // 无链路，1 不可达
+            let (router, token) = build_test_router_with_pool(pool.clone(), buf.clone()).await;
+
+            let (status, parsed) =
+                post(router, &token, "/db/flow/add_stream", valid_st_body()).await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{parsed:?}");
+            assert_eq!(parsed["ok"], false);
+            assert_eq!(parsed["code"], "NO_ROUTE");
+            assert!(
+                parsed["message"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("没有可达路径"),
+                "{parsed:?}"
+            );
+
+            let count: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM flow_streams WHERE session_id='s1'")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(count, 0, "不可达被拒的流不落表");
         });
     }
 
@@ -928,7 +1125,7 @@ mod tests {
                 serde_json::from_str(paths_col.as_deref().expect("paths 列非 NULL")).unwrap();
 
             let node_set = |idx: usize| -> std::collections::HashSet<String> {
-                paths["routes"][idx]["node_path"]
+                paths[idx]["node_path"]
                     .as_array()
                     .unwrap()
                     .iter()
@@ -946,7 +1143,7 @@ mod tests {
             );
 
             let link_set = |idx: usize| -> std::collections::HashSet<i64> {
-                paths["routes"][idx]["link_seqs"]
+                paths[idx]["link_seqs"]
                     .as_array()
                     .unwrap()
                     .iter()
@@ -968,6 +1165,7 @@ mod tests {
             let (pool, buf) = test_state().await;
             add_node(&pool, "0").await;
             add_node(&pool, "1").await;
+            add_link(&pool, 0, "0", 0, "1", 0, None).await;
             let (router, token) = build_test_router_with_pool(pool.clone(), buf.clone()).await;
 
             let (_, p0) = post(
@@ -998,14 +1196,15 @@ mod tests {
         });
     }
 
-    /// inspect 门控读面：seed gcl_windows/gcl_plan_meta → gclWindows 行 camelCase 全列 +
-    /// gclMeta（status/cycleNs/algorithm/stale）。
+    /// inspect 门控读面：seed flow_gcl_plan 单行（windows_json）→ gclWindows 行 camelCase
+    /// 全列 + gclMeta（status/cycleNs/algorithm/stale）——响应形状与三表版逐字段一致。
     #[test]
     fn inspect_returns_gcl_windows_and_meta() {
         tauri::async_runtime::block_on(async {
             let (pool, buf) = test_state().await;
             add_node(&pool, "0").await;
             add_node(&pool, "1").await;
+            add_link(&pool, 0, "0", 0, "1", 0, None).await;
             let (router, token) = build_test_router_with_pool(pool.clone(), buf.clone()).await;
             post(
                 router.clone(),
@@ -1014,9 +1213,7 @@ mod tests {
                 valid_st_body(),
             )
             .await;
-            sqlx::query("INSERT INTO gcl_windows (session_id, provider, node, eth_n, entry_idx, start_ns, duration_ns, gate_states, flow_refs) VALUES ('s1', 'inet-z3', '0', 1, 0, 0, 300000, 128, '[{\"seq\":0,\"source\":\"derived\"}]')")
-                .execute(&pool).await.unwrap();
-            sqlx::query("INSERT INTO gcl_plan_meta (session_id, provider, status, cycle_ns, algorithm, stale, created_at) VALUES ('s1', 'inet-z3', 'ok', 1000000, 'Z3', 0, 'now')")
+            sqlx::query("INSERT INTO flow_gcl_plan (session_id, provider, status, cycle_ns, algorithm, stale, created_at, windows_json) VALUES ('s1', 'inet-z3', 'ok', 1000000, 'Z3', 0, 'now', '[{\"node\":\"0\",\"ethN\":1,\"entryIdx\":0,\"startNs\":0,\"durationNs\":300000,\"gateStates\":128,\"flowRefs\":\"[{\\\"seq\\\":0,\\\"source\\\":\\\"derived\\\"}]\"}]')")
                 .execute(&pool).await.unwrap();
 
             let (status, parsed) = post(
@@ -1043,15 +1240,22 @@ mod tests {
         });
     }
 
-    /// remove_stream 删该流；再 inspect 为空。KTD6：删流 = 规划失效——门控三新表
-    /// （gcl_windows/gcl_plan_meta/gcl_raw_archive）该 session 全清。
+    /// remove_stream 删该流；再 inspect 为空。KTD6：删流 = 规划失效——flow_gcl_plan
+    /// 行 + raw 存档文件该 session 全清。
     #[test]
     fn remove_stream_deletes_row_and_clears_gcl_tables() {
         tauri::async_runtime::block_on(async {
             let (pool, buf) = test_state().await;
+            let dir = tempfile::tempdir().unwrap();
             add_node(&pool, "0").await;
             add_node(&pool, "1").await;
-            let (router, token) = build_test_router_with_pool(pool.clone(), buf.clone()).await;
+            add_link(&pool, 0, "0", 0, "1", 0, None).await;
+            let (router, token) = crate::topology_sidecar::build_test_router_with_pool_and_dir(
+                pool.clone(),
+                buf.clone(),
+                dir.path().to_path_buf(),
+            )
+            .await;
 
             post(
                 router.clone(),
@@ -1060,13 +1264,16 @@ mod tests {
                 valid_st_body(),
             )
             .await;
-            // 造已规划态：三新表各一行。
-            sqlx::query("INSERT INTO gcl_windows (session_id, provider, node, eth_n, entry_idx, start_ns, duration_ns, gate_states, flow_refs) VALUES ('s1', 'inet-z3', '0', 1, 0, 0, 300000, 128, NULL)")
+            // 造已规划态：单行 + raw 文件。
+            sqlx::query("INSERT INTO flow_gcl_plan (session_id, provider, status, cycle_ns, algorithm, stale, created_at, windows_json) VALUES ('s1', 'inet-z3', 'ok', 1000000, 'Z3', 0, 'now', '[]')")
                 .execute(&pool).await.unwrap();
-            sqlx::query("INSERT INTO gcl_plan_meta (session_id, provider, status, cycle_ns, algorithm, stale, created_at) VALUES ('s1', 'inet-z3', 'ok', 1000000, 'Z3', 0, 'now')")
-                .execute(&pool).await.unwrap();
-            sqlx::query("INSERT INTO gcl_raw_archive (session_id, provider, par_lines, created_at) VALUES ('s1', 'inet-z3', 'par x y z', 'now')")
-                .execute(&pool).await.unwrap();
+            crate::gcl_raw_store::write_raw(
+                dir.path(),
+                "s1",
+                crate::flow_plan_command::GCL_PROVIDER,
+                "par x y z",
+            )
+            .unwrap();
             let (status, parsed) = post(
                 router,
                 &token,
@@ -1084,15 +1291,22 @@ mod tests {
                     .await
                     .unwrap();
             assert_eq!(count, 0);
-            for table in ["gcl_windows", "gcl_plan_meta", "gcl_raw_archive"] {
-                let left: i64 = sqlx::query_scalar(&format!(
-                    "SELECT COUNT(*) FROM {table} WHERE session_id='s1'"
-                ))
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-                assert_eq!(left, 0, "删流后 {table} 应清空");
-            }
+            let left: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM flow_gcl_plan WHERE session_id='s1'")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(left, 0, "删流后 flow_gcl_plan 应清空");
+            assert!(
+                crate::gcl_raw_store::read_raw(
+                    dir.path(),
+                    "s1",
+                    crate::flow_plan_command::GCL_PROVIDER
+                )
+                .unwrap()
+                .is_none(),
+                "删流后 raw 文件应删除"
+            );
         });
     }
 }

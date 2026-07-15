@@ -488,8 +488,10 @@ fn talker_eth0_plane(
         .and_then(crate::flow_route::link_plane)
 }
 
-/// mid → ned 名（sw{N}/es{N}）映射，`map_and_validate` 的命名单一源（按节点入参顺序计数，
-/// 不可映射类型跳过）。verify pin 重放（KTD4）在 bundle 构建前需要 ned→mid 反向表，从这里取。
+/// mid → ned 名（sw{NN}/es{NN}，两位零填充）映射，`map_and_validate` 的命名单一源（按节点
+/// 入参顺序计数，不可映射类型跳过）。verify pin 重放（KTD4）在 bundle 构建前需要 ned→mid
+/// 反向表，从这里取。零填充是硬约束：INET GateScheduleConfiguratorBase 把 source/destination
+/// 当子串 PatternMatcher（两端隐式 **），"es1" 会命中 es10/es11/…，两位零填充消除前缀歧义。
 pub(crate) fn node_ned_names(nodes: &[VerifyNode]) -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
     let mut sw_seq = 0u32;
@@ -498,11 +500,11 @@ pub(crate) fn node_ned_names(nodes: &[VerifyNode]) -> BTreeMap<String, String> {
         match map_node_type(node.node_type.as_deref()) {
             Some("TsnSwitch") => {
                 sw_seq += 1;
-                out.insert(node.mid.clone(), format!("sw{sw_seq}"));
+                out.insert(node.mid.clone(), format!("sw{sw_seq:02}"));
             }
             Some(_) => {
                 es_seq += 1;
-                out.insert(node.mid.clone(), format!("es{es_seq}"));
+                out.insert(node.mid.clone(), format!("es{es_seq:02}"));
             }
             None => {}
         }
@@ -1671,14 +1673,42 @@ mod tests {
         }
     }
 
-    // GM=es1(mid 1)，sw(mid 0) 连两个 ES。端口升序映射：sw 端口 {2,5}→eth0/eth1。
+    /// 防回归锁（P0）：INET GateScheduleConfiguratorBase 把 source/destination 当子串
+    /// PatternMatcher——"es1" 会同时命中 es1/es10/es11/es12，一条 entry 展开成多条流 →
+    /// Z3 unsat。两位零填充后任一 ned 名不得是另一名字的子串。
+    #[test]
+    fn ned_names_zero_padded_no_prefix_ambiguity() {
+        let mut nodes = vec![node("sw-a", "switch")];
+        for i in 0..12 {
+            nodes.push(node(&format!("m{i}"), "endSystem"));
+        }
+        let names = node_ned_names(&nodes);
+        assert_eq!(names.get("sw-a").map(String::as_str), Some("sw01"));
+        for i in 0..12u32 {
+            assert_eq!(
+                names.get(&format!("m{i}")).map(String::as_str),
+                Some(format!("es{:02}", i + 1).as_str())
+            );
+        }
+        let all: Vec<&String> = names.values().collect();
+        for a in &all {
+            for b in &all {
+                assert!(
+                    a == b || !b.contains(a.as_str()),
+                    "ned 名前缀/子串歧义：{a} 是 {b} 的子串"
+                );
+            }
+        }
+    }
+
+    // GM=es01(mid 1)，sw(mid 0) 连两个 ES。端口升序映射：sw 端口 {2,5}→eth0/eth1。
     fn sample() -> (Vec<VerifyNode>, Vec<VerifyLink>, Vec<SimNodeTiming>) {
         let nodes = vec![
             node("0", "switch"),
             node("1", "endSystem"),
             node("2", "endSystem"),
         ];
-        // sw0 用端口 5 接 es1，端口 2 接 es2（故意乱序，验证升序取下标）。
+        // sw0 用端口 5 接 es01，端口 2 接 es02（故意乱序，验证升序取下标）。
         let links = vec![
             link(0, "0", "1", Some(5), Some(0)),
             link(1, "0", "2", Some(2), Some(0)),
@@ -1721,7 +1751,7 @@ mod tests {
         // sw0 端口 {2,5} 升序 → 2→eth0, 5→eth1。
         assert_eq!(map["0"][&2], 0);
         assert_eq!(map["0"][&5], 1);
-        // es1/es2 各只有端口 0 → eth0。
+        // es01/es02 各只有端口 0 → eth0。
         assert_eq!(map["1"][&0], 0);
         assert_eq!(map["2"][&0], 0);
     }
@@ -1740,10 +1770,10 @@ mod tests {
         )
         .unwrap();
         // node_ned_names 全量映射（U7：命令层据此把逐节点阈值对到对应 series）。
-        // sample：GM mid"1"→es1、switch mid"0"→sw1、mid"2"→es2。
-        assert_eq!(b.node_ned_names.get("0").map(String::as_str), Some("sw1"));
-        assert_eq!(b.node_ned_names.get("1").map(String::as_str), Some("es1"));
-        assert_eq!(b.node_ned_names.get("2").map(String::as_str), Some("es2"));
+        // sample：GM mid"1"→es01、switch mid"0"→sw01、mid"2"→es02。
+        assert_eq!(b.node_ned_names.get("0").map(String::as_str), Some("sw01"));
+        assert_eq!(b.node_ned_names.get("1").map(String::as_str), Some("es01"));
+        assert_eq!(b.node_ned_names.get("2").map(String::as_str), Some("es02"));
         let ini = &b.bundle.omnetpp_ini;
         // gPTP 硬性前提全在。
         assert!(ini.contains("simtime-resolution = fs"));
@@ -1765,26 +1795,29 @@ mod tests {
         );
         assert!(ini.contains("nominalTickLength = 10ns"));
         assert!(ini.contains("**.clock.result-recording-modes = +vector"));
-        // referenceClock 指向 GM 的 ned 名（es1）。
-        assert!(ini.contains("**.referenceClock = \"es1.clock\""), "{ini}");
+        // referenceClock 指向 GM 的 ned 名（es01）。
+        assert!(ini.contains("**.referenceClock = \"es01.clock\""), "{ini}");
         // sw0 master 端口 2 → eth0；slave 端口 5 → eth1。
-        assert!(ini.contains("*.sw1.gptp.masterPorts = [\"eth0\"]"), "{ini}");
-        assert!(ini.contains("*.sw1.gptp.slavePort = \"eth1\""), "{ini}");
+        assert!(
+            ini.contains("*.sw01.gptp.masterPorts = [\"eth0\"]"),
+            "{ini}"
+        );
+        assert!(ini.contains("*.sw01.gptp.slavePort = \"eth1\""), "{ini}");
         // gptpNodeType 按角色：GM=MASTER、有 master+slave=BRIDGE、只有 slave=SLAVE。
         assert!(
-            ini.contains("*.es1.gptp.gptpNodeType = \"MASTER_NODE\""),
+            ini.contains("*.es01.gptp.gptpNodeType = \"MASTER_NODE\""),
             "{ini}"
         );
         assert!(
-            ini.contains("*.sw1.gptp.gptpNodeType = \"BRIDGE_NODE\""),
+            ini.contains("*.sw01.gptp.gptpNodeType = \"BRIDGE_NODE\""),
             "{ini}"
         );
         assert!(
-            ini.contains("*.es2.gptp.gptpNodeType = \"SLAVE_NODE\""),
+            ini.contains("*.es02.gptp.gptpNodeType = \"SLAVE_NODE\""),
             "{ini}"
         );
         // GM 显式空 slavePort 覆盖 TsnDevice 默认（否则 MASTER_NODE 报 slave port 冲突）。
-        assert!(ini.contains("*.es1.gptp.slavePort = \"\""), "{ini}");
+        assert!(ini.contains("*.es01.gptp.slavePort = \"\""), "{ini}");
     }
 
     #[test]
@@ -1801,12 +1834,12 @@ mod tests {
         )
         .unwrap();
         let ned = &b.bundle.network_ned;
-        // sw0 端口5→eth1 接 es1.eth0；端口2→eth0 接 es2.eth0。
-        assert!(ned.contains("sw1.ethg[1] <-->"), "{ned}");
-        assert!(ned.contains("sw1.ethg[0] <-->"), "{ned}");
+        // sw0 端口5→eth1 接 es01.eth0；端口2→eth0 接 es02.eth0。
+        assert!(ned.contains("sw01.ethg[1] <-->"), "{ned}");
+        assert!(ned.contains("sw01.ethg[0] <-->"), "{ned}");
         assert!(ned.contains("allowunconnected"));
         // 真机校正：显式门号必须配门向量大小声明，否则 INET ethg[] size 0 报错。
-        // sw0 用 2 个端口 → ethg[2]；es1/es2 各 1 个端口 → ethg[1]。
+        // sw0 用 2 个端口 → ethg[2]；es01/es02 各 1 个端口 → ethg[1]。
         assert!(ned.contains("ethg[2];"), "sw 应声明门大小 ethg[2]: {ned}");
         assert!(ned.contains("ethg[1];"), "es 应声明门大小 ethg[1]: {ned}");
     }
@@ -1902,8 +1935,8 @@ mod tests {
 
     // R23 golden fixture：timesync 模式 NED + INI 在「抽 mode 重构」前后字节一致。
     // 基线在重构前用 sample() 实跑捕获（见 U6 commit）；此后任何改动改变 timesync 输出即红。
-    const GOLDEN_TIMESYNC_NED: &str = "package tsnagent.generated;\n\nimport inet.networks.base.TsnNetworkBase;\nimport inet.node.ethernet.EthernetLink;\nimport inet.node.tsn.TsnDevice;\nimport inet.node.tsn.TsnSwitch;\n\nnetwork TsnAgentTimesyncNetwork extends TsnNetworkBase\n{\nparameters:\n*.eth[*].bitrate = default(1000Mbps);\nsubmodules:\n        sw1: TsnSwitch {\n            gates:\n                ethg[2];\n        }\n        es1: TsnDevice {\n            gates:\n                ethg[1];\n        }\n        es2: TsnDevice {\n            gates:\n                ethg[1];\n        }\nconnections allowunconnected:\n        sw1.ethg[1] <--> EthernetLink { datarate = 1000Mbps; length = 10m; } <--> es1.ethg[0];\n        sw1.ethg[0] <--> EthernetLink { datarate = 1000Mbps; length = 10m; } <--> es2.ethg[0];\n}\n";
-    const GOLDEN_TIMESYNC_INI: &str = "[General]\nnetwork = tsnagent.generated.TsnAgentTimesyncNetwork\nsim-time-limit = 60s\nsimtime-resolution = fs\nseed-set = 0\ncmdenv-interactive = false\ncmdenv-express-mode = true\n*.*.hasTimeSynchronization = true\n**.transmitter.typename = \"StreamingTransmitter\"\n**.receiver.typename = \"DestreamingReceiver\"\n**.clock.oscillator.typename = \"RandomDriftOscillator\"\n**.clock.oscillator.changeInterval = 50ms\n**.clock.oscillator.initialDriftRate = uniform(-100ppm, 100ppm)\n**.clock.oscillator.driftRateChange = uniform(-0.3ppm, 0.3ppm)\n**.clock.oscillator.driftRateChangeLowerLimit = -100ppm\n**.clock.oscillator.driftRateChangeUpperLimit = 100ppm\n**.clock.oscillator.nominalTickLength = 10ns\n**.referenceClock = \"es1.clock\"\n**.clock.result-recording-modes = +vector\n\n*.es1.gptp.gptpNodeType = \"MASTER_NODE\"\n*.es1.gptp.masterPorts = [\"eth0\"]\n*.es1.gptp.slavePort = \"\"\n*.es1.gptp.syncInterval = 125ms\n*.es1.gptp.pdelayInterval = 1000ms\n*.sw1.gptp.gptpNodeType = \"BRIDGE_NODE\"\n*.sw1.gptp.masterPorts = [\"eth0\"]\n*.sw1.gptp.slavePort = \"eth1\"\n*.es2.gptp.gptpNodeType = \"SLAVE_NODE\"\n*.es2.gptp.masterPorts = []\n*.es2.gptp.slavePort = \"eth0\"\n";
+    const GOLDEN_TIMESYNC_NED: &str = "package tsnagent.generated;\n\nimport inet.networks.base.TsnNetworkBase;\nimport inet.node.ethernet.EthernetLink;\nimport inet.node.tsn.TsnDevice;\nimport inet.node.tsn.TsnSwitch;\n\nnetwork TsnAgentTimesyncNetwork extends TsnNetworkBase\n{\nparameters:\n*.eth[*].bitrate = default(1000Mbps);\nsubmodules:\n        sw01: TsnSwitch {\n            gates:\n                ethg[2];\n        }\n        es01: TsnDevice {\n            gates:\n                ethg[1];\n        }\n        es02: TsnDevice {\n            gates:\n                ethg[1];\n        }\nconnections allowunconnected:\n        sw01.ethg[1] <--> EthernetLink { datarate = 1000Mbps; length = 10m; } <--> es01.ethg[0];\n        sw01.ethg[0] <--> EthernetLink { datarate = 1000Mbps; length = 10m; } <--> es02.ethg[0];\n}\n";
+    const GOLDEN_TIMESYNC_INI: &str = "[General]\nnetwork = tsnagent.generated.TsnAgentTimesyncNetwork\nsim-time-limit = 60s\nsimtime-resolution = fs\nseed-set = 0\ncmdenv-interactive = false\ncmdenv-express-mode = true\n*.*.hasTimeSynchronization = true\n**.transmitter.typename = \"StreamingTransmitter\"\n**.receiver.typename = \"DestreamingReceiver\"\n**.clock.oscillator.typename = \"RandomDriftOscillator\"\n**.clock.oscillator.changeInterval = 50ms\n**.clock.oscillator.initialDriftRate = uniform(-100ppm, 100ppm)\n**.clock.oscillator.driftRateChange = uniform(-0.3ppm, 0.3ppm)\n**.clock.oscillator.driftRateChangeLowerLimit = -100ppm\n**.clock.oscillator.driftRateChangeUpperLimit = 100ppm\n**.clock.oscillator.nominalTickLength = 10ns\n**.referenceClock = \"es01.clock\"\n**.clock.result-recording-modes = +vector\n\n*.es01.gptp.gptpNodeType = \"MASTER_NODE\"\n*.es01.gptp.masterPorts = [\"eth0\"]\n*.es01.gptp.slavePort = \"\"\n*.es01.gptp.syncInterval = 125ms\n*.es01.gptp.pdelayInterval = 1000ms\n*.sw01.gptp.gptpNodeType = \"BRIDGE_NODE\"\n*.sw01.gptp.masterPorts = [\"eth0\"]\n*.sw01.gptp.slavePort = \"eth1\"\n*.es02.gptp.gptpNodeType = \"SLAVE_NODE\"\n*.es02.gptp.masterPorts = []\n*.es02.gptp.slavePort = \"eth0\"\n";
 
     #[test]
     fn golden_timesync_byte_identical() {
@@ -1928,7 +1961,7 @@ mod tests {
         );
     }
 
-    /// 两条流：ST(pcp7) es1→es2、BE(pcp0) es1→es2。
+    /// 两条流：ST(pcp7) es01→es02、BE(pcp0) es01→es02。
     fn flow_streams() -> Vec<FlowStreamSpec> {
         vec![
             spec(0, "BE", 0, "1", "2", 500, 1000, 1000),
@@ -1973,7 +2006,7 @@ mod tests {
     fn flow_pin_mode_writes_gate_params_no_configurator() {
         let (nodes, links, timing) = sample();
         let gcl = vec![GclEntry {
-            node: "0".into(), // sw1
+            node: "0".into(), // sw01
             eth_n: 0,
             gate_index: 1,
             initially_open: true,
@@ -1995,17 +2028,17 @@ mod tests {
         .unwrap();
         let ini = &b.bundle.omnetpp_ini;
         assert!(
-            ini.contains("*.sw1.hasEgressTrafficShaping = true"),
+            ini.contains("*.sw01.hasEgressTrafficShaping = true"),
             "{ini}"
         );
         assert!(
             ini.contains(
-                "*.sw1.eth[0].macLayer.queue.transmissionGate[1].durations = [500000ns, 500000ns]"
+                "*.sw01.eth[0].macLayer.queue.transmissionGate[1].durations = [500000ns, 500000ns]"
             ),
             "{ini}"
         );
         assert!(
-            ini.contains("*.sw1.eth[0].macLayer.queue.transmissionGate[1].offset = 100ns"),
+            ini.contains("*.sw01.eth[0].macLayer.queue.transmissionGate[1].offset = 100ns"),
             "{ini}"
         );
         assert!(
@@ -2015,7 +2048,7 @@ mod tests {
         // 零余量门窗须关隐式保护带，否则包卡窗边界被拒、滑一个门周期（真机 527us→27us）。
         assert!(
             ini.contains(
-                "*.sw1.eth[0].macLayer.queue.transmissionGate[1].enableImplicitGuardBand = false"
+                "*.sw01.eth[0].macLayer.queue.transmissionGate[1].enableImplicitGuardBand = false"
             ),
             "{ini}"
         );
@@ -2071,7 +2104,7 @@ mod tests {
         );
         // 显式路径喂 pathFragments（NED 名）。
         assert!(
-            ini.contains("pathFragments: [[\"es1\", \"sw1\", \"es2\"]]"),
+            ini.contains("pathFragments: [[\"es01\", \"sw01\", \"es02\"]]"),
             "{ini}"
         );
     }
@@ -2095,7 +2128,7 @@ mod tests {
         let ini = &b.bundle.omnetpp_ini;
         // numTrafficClasses = 节点 queue_count（sample 节点为 8），非流类别数——每 PCP 一个门。
         assert!(
-            ini.contains("*.sw1.eth[*].macLayer.queue.numTrafficClasses = 8"),
+            ini.contains("*.sw01.eth[*].macLayer.queue.numTrafficClasses = 8"),
             "{ini}"
         );
         // encoder 两类都在。
@@ -2191,8 +2224,8 @@ mod tests {
 
     // ---------- U4：RC FRER 装配 / 双宿拆分 / 平面钉死 ----------
 
-    /// 双平面 fixture：es1(mid1) 双宿 —A— sw1(mid0) —A— es2(mid2)；—B— sw2(mid3) —B—。
-    /// GM=sw1(mid0)。es1/es2 端口 {0,1}：0→平面 A、1→平面 B（即 talker eth0 落平面 A）。
+    /// 双平面 fixture：es01(mid1) 双宿 —A— sw01(mid0) —A— es02(mid2)；—B— sw02(mid3) —B—。
+    /// GM=sw01(mid0)。es01/es02 端口 {0,1}：0→平面 A、1→平面 B（即 talker eth0 落平面 A）。
     fn dual_plane_sample() -> (Vec<VerifyNode>, Vec<VerifyLink>, Vec<SimNodeTiming>) {
         let nodes = vec![
             node("0", "switch"),
@@ -2224,10 +2257,10 @@ mod tests {
             offset_threshold_ns: None,
         };
         let timing = vec![
-            t("0", vec![0, 1], vec![]), // GM sw1
-            t("1", vec![], vec![0]),    // es1 slave 朝平面 A
-            t("2", vec![], vec![0]),    // es2 slave 朝平面 A
-            t("3", vec![], vec![0]),    // sw2 叶子
+            t("0", vec![0, 1], vec![]), // GM sw01
+            t("1", vec![], vec![0]),    // es01 slave 朝平面 A
+            t("2", vec![], vec![0]),    // es02 slave 朝平面 A
+            t("3", vec![], vec![0]),    // sw02 叶子
         ];
         (nodes, links, timing)
     }
@@ -2291,14 +2324,14 @@ mod tests {
         // ST 单树：平面 A 路径，双宿端点展开为 设备+内嵌桥（spike 契约改型）。
         assert!(
             cfg.contains(
-                "{name: \"st0\", pcp: 7, packetFilter: expr(udp != nullptr && udp.destPort == 1000), source: \"es1\", destination: \"es2\", trees: [[[\"es1\",\"esb1\",\"sw1\",\"esb2\",\"es2\"]]]}"
+                "{name: \"st0\", pcp: 7, packetFilter: expr(udp != nullptr && udp.destPort == 1000), source: \"es01\", destination: \"es02\", trees: [[[\"es01\",\"esb01\",\"sw01\",\"esb02\",\"es02\"]]]}"
             ),
             "{cfg}"
         );
         // RC 双树：A/B 各一棵。
         assert!(
             cfg.contains(
-                "{name: \"rc1\", pcp: 6, packetFilter: expr(udp != nullptr && udp.destPort == 1001), source: \"es1\", destination: \"es2\", trees: [[[\"es1\",\"esb1\",\"sw1\",\"esb2\",\"es2\"]],[[\"es1\",\"esb1\",\"sw2\",\"esb2\",\"es2\"]]]}"
+                "{name: \"rc1\", pcp: 6, packetFilter: expr(udp != nullptr && udp.destPort == 1001), source: \"es01\", destination: \"es02\", trees: [[[\"es01\",\"esb01\",\"sw01\",\"esb02\",\"es02\"]],[[\"es01\",\"esb01\",\"sw02\",\"esb02\",\"es02\"]]]}"
             ),
             "{cfg}"
         );
@@ -2378,47 +2411,47 @@ mod tests {
         // 设备单口 + 内嵌桥（2 库端口 + 1 内联 = ethg[3]）。
         assert!(
             ned.contains(
-                "        es1: TsnDevice {\n            gates:\n                ethg[1];\n        }"
+                "        es01: TsnDevice {\n            gates:\n                ethg[1];\n        }"
             ),
             "{ned}"
         );
         assert!(
             ned.contains(
-                "        esb1: TsnSwitch {\n            gates:\n                ethg[3];\n        }"
+                "        esb01: TsnSwitch {\n            gates:\n                ethg[3];\n        }"
             ),
             "{ned}"
         );
-        assert!(ned.contains("esb2: TsnSwitch"), "{ned}");
-        // 库端口（门号原样）锚在内嵌桥上：es1 端口0→esb1.ethg[0] 接 sw1。
+        assert!(ned.contains("esb02: TsnSwitch"), "{ned}");
+        // 库端口（门号原样）锚在内嵌桥上：es01 端口0→esb01.ethg[0] 接 sw01。
         assert!(
-            ned.contains("        esb1.ethg[0] <--> EthernetLink { datarate = 1000Mbps; length = 10m; } <--> sw1.ethg[0];"),
+            ned.contains("        esb01.ethg[0] <--> EthernetLink { datarate = 1000Mbps; length = 10m; } <--> sw01.ethg[0];"),
             "{ned}"
         );
         // 内联线：设备 eth0 ↔ 桥内联口（=原端口数 2）。
         assert!(
-            ned.contains("        es1.ethg[0] <--> EthernetLink { datarate = 1000Mbps; length = 10m; } <--> esb1.ethg[2];"),
+            ned.contains("        es01.ethg[0] <--> EthernetLink { datarate = 1000Mbps; length = 10m; } <--> esb01.ethg[2];"),
             "{ned}"
         );
         // 非拆分节点零变化：交换机仍直接挂线。
-        assert!(ned.contains("sw1: TsnSwitch"), "{ned}");
+        assert!(ned.contains("sw01: TsnSwitch"), "{ned}");
         // gPTP：设备成叶子（内联口 slave）、内嵌桥 BRIDGE_NODE（原 slave 口朝 GM + 内联口 master）。
         let ini = &b.bundle.omnetpp_ini;
         assert!(
-            ini.contains("*.es1.gptp.gptpNodeType = \"SLAVE_NODE\""),
+            ini.contains("*.es01.gptp.gptpNodeType = \"SLAVE_NODE\""),
             "{ini}"
         );
-        assert!(ini.contains("*.es1.gptp.slavePort = \"eth0\""), "{ini}");
+        assert!(ini.contains("*.es01.gptp.slavePort = \"eth0\""), "{ini}");
         assert!(
-            ini.contains("*.esb1.gptp.gptpNodeType = \"BRIDGE_NODE\""),
+            ini.contains("*.esb01.gptp.gptpNodeType = \"BRIDGE_NODE\""),
             "{ini}"
         );
-        assert!(ini.contains("*.esb1.gptp.slavePort = \"eth0\""), "{ini}");
+        assert!(ini.contains("*.esb01.gptp.slavePort = \"eth0\""), "{ini}");
         assert!(
-            ini.contains("*.esb1.gptp.masterPorts = [\"eth2\"]"),
+            ini.contains("*.esb01.gptp.masterPorts = [\"eth2\"]"),
             "{ini}"
         );
-        // GM 是 sw1（未拆分），referenceClock 不变。
-        assert!(ini.contains("**.referenceClock = \"sw1.clock\""), "{ini}");
+        // GM 是 sw01（未拆分），referenceClock 不变。
+        assert!(ini.contains("**.referenceClock = \"sw01.clock\""), "{ini}");
     }
 
     /// Covers U4⑧（spike 押注⑤/KTD6）前半：无 RC 双平面且 talker eth0（最小库端口）所在
@@ -2426,7 +2459,7 @@ mod tests {
     #[test]
     fn no_rc_dual_plane_talker_eth0_on_plane_a_emits_nothing() {
         let (nodes, links, timing) = dual_plane_sample();
-        // es1 端口 0（→eth0）在平面 A 链路上。
+        // es01 端口 0（→eth0）在平面 A 链路上。
         let streams = vec![FlowStreamSpec {
             pin_links: Some(vec![0, 1]),
             ..spec(0, "ST", 7, "1", "2", 500, 512, 2000)
@@ -2455,7 +2488,7 @@ mod tests {
     #[test]
     fn no_rc_dual_plane_talker_eth0_off_plane_a_emits_pin_kit() {
         let (nodes, mut links, timing) = dual_plane_sample();
-        // 换 es1 端口：平面 A 用端口 5、平面 B 用端口 2 → eth0=端口2=平面 B。
+        // 换 es01 端口：平面 A 用端口 5、平面 B 用端口 2 → eth0=端口2=平面 B。
         links[0].src_port = Some(5); // 1(p5) —A— 0
         links[2].src_port = Some(2); // 1(p2) —B— 3
         // 平面 A 路径 [1,0,2]：talker 出口端口5→eth1；listener 入口端口0→eth0。
@@ -2477,7 +2510,7 @@ mod tests {
         .unwrap();
         let ini = &b.bundle.omnetpp_ini;
         assert!(
-            ini.contains("*.es1.app[0].io.destAddress = \"es2%eth0\""),
+            ini.contains("*.es01.app[0].io.destAddress = \"es02%eth0\""),
             "{ini}"
         );
         assert!(
@@ -2486,7 +2519,7 @@ mod tests {
         );
         assert!(
             ini.contains(
-                "<route hosts='es1' destination='es2%eth0' netmask='255.255.255.255' interface='eth1'/>"
+                "<route hosts='es01' destination='es02%eth0' netmask='255.255.255.255' interface='eth1'/>"
             ),
             "{ini}"
         );
@@ -2690,7 +2723,7 @@ mod tests {
 
     /// Covers R8（U5⑥⑧ ini 面）：混流会话（ST+BE）→ ST 门带 enableImplicitGuardBand=false，
     /// 补集门（0..6）有 initiallyOpen/offset/durations 但**无**该行（保持 INET 默认 true）；
-    /// 无 ST 窗的端口（sw1 eth0）不生成任何 transmissionGate 条目（各门恒开）。
+    /// 无 ST 窗的端口（sw01 eth0）不生成任何 transmissionGate 条目（各门恒开）。
     #[test]
     fn pin_complement_gates_omit_implicit_guard_band() {
         let (nodes, links, timing) = sample();
@@ -2711,13 +2744,13 @@ mod tests {
         // ST 门维持显式关隐式保护带（真机验证关键行，勿回退）。
         assert!(
             ini.contains(
-                "*.sw1.eth[1].macLayer.queue.transmissionGate[7].enableImplicitGuardBand = false"
+                "*.sw01.eth[1].macLayer.queue.transmissionGate[7].enableImplicitGuardBand = false"
             ),
             "{ini}"
         );
         // 补集门 0..6 全在、参数为手算补集，且不带 enableImplicitGuardBand 行。
         for gate in 0..7 {
-            let base = format!("*.sw1.eth[1].macLayer.queue.transmissionGate[{gate}]");
+            let base = format!("*.sw01.eth[1].macLayer.queue.transmissionGate[{gate}]");
             assert!(
                 ini.contains(&format!("{base}.initiallyOpen = true")),
                 "{ini}"
@@ -2842,11 +2875,11 @@ mod tests {
             "{ned}"
         );
         assert!(!ned.contains("hasStatus"), "押注④ hasStatus 不需要：{ned}");
-        // es1(mid1) 是 RC talker 且双宿 → 拆分：库端口 0 锚在 esb1 → src-module=esb1、eth0。
+        // es01(mid1) 是 RC talker 且双宿 → 拆分：库端口 0 锚在 esb01 → src-module=esb01、eth0。
         let ini = &b.bundle.omnetpp_ini;
         assert!(
             ini.contains(
-                "*.scenarioManager.script = xml(\"<script><at t='400000000ns'><disconnect src-module='esb1' src-gate='ethg$o[0]'/></at></script>\")"
+                "*.scenarioManager.script = xml(\"<script><at t='400000000ns'><disconnect src-module='esb01' src-gate='ethg$o[0]'/></at></script>\")"
             ),
             "{ini}"
         );
@@ -2881,7 +2914,7 @@ mod tests {
                 has_rc: true,
                 fault: Some(FaultSpec {
                     src_mid: "1".into(),
-                    src_db_port: 9, // es1 没有库端口 9。
+                    src_db_port: 9, // es01 没有库端口 9。
                     t_break_ns: 400_000_000,
                 }),
                 ..Default::default()

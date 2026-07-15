@@ -110,7 +110,7 @@ export function planSucceeded(result: PlanResult): boolean {
 
 /**
  * 验证按钮闸口径（R5/KTD4）：产出门控表，或流集无 ST 流（`no_gating`，无需门控）均放行。
- * 后端已在 no_gating 时清空 flow_plans，verify 侧对无 ST 流集不再以空 GCL 硬拦（AE5）。
+ * 后端已在 no_gating 时清空门控结果，verify 侧对无 ST 流集不再以空 GCL 硬拦（AE5）。
  */
 export function planAllowsVerify(result: PlanResult): boolean {
   return planSucceeded(result) || result.status === "no_gating";
@@ -335,47 +335,57 @@ export async function invokeGetFlowPathCandidates(
   });
 }
 
-/** paths 列 JSON 的路由段（Rust FlowPaths 序列化为 snake_case：node_path/link_seqs）。 */
+/** paths 列 JSON 的路由段（Rust PathRoute 序列化为 snake_case：node_path/link_seqs）。 */
 interface FlowPathsRouteJson {
   node_path?: unknown;
   link_seqs?: unknown;
 }
 
-/** paths 列解析（容错：非法 JSON/形状 → null，视同未指定）。 */
+/** paths 列解析（KTD12 裸数组凭证）。读兼容三形状同 Rust 口径：①裸数组（现行）
+ * ②旧 {version,origin,routes} 包装 ③更旧 RC {"a":{...},"b":{...}}。
+ * 容错：非法 JSON/形状/空数组 → null，视同未沉淀。 */
 function parseFlowPathsJson(
   paths: string | null,
-): { origin: string; routes: Array<{ nodePath: string[]; linkSeqs: number[] }> } | null {
+): Array<{ nodePath: string[]; linkSeqs: number[] }> | null {
   if (!paths) return null;
   try {
-    const v = JSON.parse(paths) as { origin?: unknown; routes?: unknown };
-    if (typeof v.origin !== "string" || !Array.isArray(v.routes)) return null;
+    const v = JSON.parse(paths) as unknown;
+    let raw: FlowPathsRouteJson[];
+    if (Array.isArray(v)) {
+      raw = v as FlowPathsRouteJson[];
+    } else if (v && typeof v === "object" && Array.isArray((v as { routes?: unknown }).routes)) {
+      raw = (v as { routes: FlowPathsRouteJson[] }).routes;
+    } else if (v && typeof v === "object" && "a" in v && "b" in v) {
+      const legacy = v as { a: FlowPathsRouteJson; b: FlowPathsRouteJson };
+      raw = [legacy.a, legacy.b];
+    } else {
+      return null;
+    }
     const routes: Array<{ nodePath: string[]; linkSeqs: number[] }> = [];
-    for (const r of v.routes as FlowPathsRouteJson[]) {
-      if (!Array.isArray(r.node_path) || !Array.isArray(r.link_seqs)) return null;
+    for (const r of raw) {
+      if (!r || !Array.isArray(r.node_path) || !Array.isArray(r.link_seqs)) return null;
       routes.push({
         nodePath: r.node_path.map((n) => String(n)),
         linkSeqs: r.link_seqs.map((s) => Number(s)),
       });
     }
-    return routes.length > 0 ? { origin: v.origin, routes } : null;
+    return routes.length > 0 ? routes : null;
   } catch {
     return null;
   }
 }
 
-/** 显式指定路径（origin=user）的 link_seqs；未指定/系统凭证/解析失败 → null。 */
+/** 当前路径凭证的 link_seqs（首条 route）；未沉淀/解析失败 → null。 */
 export function parseExplicitPathLinkSeqs(paths: string | null): number[] | null {
-  const parsed = parseFlowPathsJson(paths);
-  if (parsed?.origin !== "user") return null;
-  return parsed.routes[0]?.linkSeqs ?? null;
+  return parseFlowPathsJson(paths)?.[0]?.linkSeqs ?? null;
 }
 
-/** RC 双冗余路径的节点 mid 序列（routes[0]=A、routes[1]=B）；形状不符 → null。
+/** RC 双冗余路径的节点 mid 序列（[0]=A、[1]=B）；形状不符 → null。
  * 弹窗只读展示用（R16：FRER 双路径不可手选）。 */
 export function parseRedundantNodePaths(paths: string | null): [string[], string[]] | null {
-  const parsed = parseFlowPathsJson(paths);
-  if (!parsed || parsed.routes.length < 2) return null;
-  return [parsed.routes[0].nodePath, parsed.routes[1].nodePath];
+  const routes = parseFlowPathsJson(paths);
+  if (!routes || routes.length < 2) return null;
+  return [routes[0].nodePath, routes[1].nodePath];
 }
 
 /** 默认规划写通道 = plan_tas Tauri command（测试可注入替身）。 */

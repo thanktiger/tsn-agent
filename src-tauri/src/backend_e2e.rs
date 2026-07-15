@@ -82,7 +82,7 @@ async fn post(router: axum::Router, token: &SecretToken, uri: &str, body: Value)
     serde_json::from_slice(&bytes).unwrap()
 }
 
-/// 按 build_timesync_sim_bundle 同序派生 ned 名：switch→sw{n}、其余可映射类型→es{n}。
+/// 按 build_timesync_sim_bundle 同序派生 ned 名：switch→sw{nn}、其余可映射类型→es{nn}（两位零填充）。
 fn ned_name_for(nodes: &[Value], target_mid: &str) -> Option<String> {
     let (mut sw, mut es) = (0u32, 0u32);
     for n in nodes {
@@ -91,11 +91,11 @@ fn ned_name_for(nodes: &[Value], target_mid: &str) -> Option<String> {
         let ned = match ty {
             Some("switch") => {
                 sw += 1;
-                format!("sw{sw}")
+                format!("sw{sw:02}")
             }
             Some("endSystem") | Some("server") => {
                 es += 1;
-                format!("es{es}")
+                format!("es{es:02}")
             }
             _ => continue,
         };

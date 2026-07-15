@@ -206,8 +206,8 @@ pub const PROJECT_TEMPLATES_SEED_SQL: &str = r#"
          NULL, 2, 'factory', datetime('now'));
 "#;
 
-/// 流量规划（2026-07-01，flow-tas U2）：录入流表 `flow_streams` + 综合门控表
-/// `flow_plans`。两表 session-scoped（进 SESSION_SCOPED_TABLES 随会话导出/导入），
+/// 流量规划（2026-07-01，flow-tas U2）：录入流表 `flow_streams` + 门控结果单表
+/// `flow_gcl_plan`。两表 session-scoped（进 SESSION_SCOPED_TABLES 随会话导出/导入），
 /// 故与 timesync_* 同口径放进 safety-net schema（**不用** `ensure_*` ——那是 `task`
 /// 这类不导出的表专用：export/import 的临时库只跑 `safety_net_schema_sql()` 建表，
 /// 若 flow 表只由 ensure_* 建，导出库无表、`INSERT ... SELECT` 直接失败）。
@@ -218,19 +218,18 @@ pub const PROJECT_TEMPLATES_SEED_SQL: &str = r#"
 /// `redundant`/`paths` 为 802.1CB 双平面预留槽（R4/R17，本期只留数据槽、不写 FRER 逻辑）。
 /// talker/listener 逻辑上引用 `topology_nodes.mid`，不写跨表 FK（照 timesync 惯例）。
 ///
-/// `flow_plans`（历史形态，2026-07-14 起**停写退役**）：per-(port, gate) 一行、durations
-/// 交替 JSON。写路径已切三张门控新表（下），本表暂留（观察一个版本后物理删除），
-/// 写新表的事务内清残留行防旧管线消费中间态。
-///
-/// 门控明细新表体系（2026-07-14，gcl-window U2，KTD1/KTD2）：
-/// - `gcl_windows` 逐窗一行（展示事实源）：`gate_states` 0-255 位图（bit g = gate g 开）、
-///   `flow_refs` JSON 数组 `[{"seq":N,"source":"derived"|"class"}]`（无关联流 NULL）、
-///   provider 进键（本期恒 'inet-z3'，castup 外部求解器留位）。
-/// - `gcl_plan_meta` 每 (session, provider) 一行：status/cycle_ns/algorithm/stale/created_at；
-///   `stale` 是规划过期标记（KTD14：写手置 1，复位仅发生在规划成功事务内）。
-/// - `gcl_raw_archive` 求解 par 行集存档（KTD4：verify pin 重放的事实源，覆盖式最新一份）；
-///   **有意不进 SESSION_SCOPED_TABLES**（不随会话导出、不入 undo 快照——导入方/撤销后
-///   重新规划即恢复）。
+/// `flow_gcl_plan`（2026-07-15 单表化，取代 2026-07-14 的三表
+/// gcl_windows/gcl_plan_meta/gcl_raw_archive 与更早的 flow_plans）：每 (session, provider)
+/// 一行承载整份门控结果——status/cycle_ns/algorithm/stale/created_at + `windows_json`。
+/// 单表理由：窗口行没有任何行级 SQL 操作（写=全清全写、读=全量、筛选在前端），行粒度
+/// 没被利用，窗口该是 JSON 列；no_gating 零窗口态由行本身承载 status；stale 是单行 UPDATE。
+/// - `windows_json`：窗口数组 `[{node, ethN, entryIdx, startNs, durationNs, gateStates,
+///   flowRefs}]`（字段语义沿三表版不变：gateStates 0-255 位图、flowRefs 为 JSON 数组串或
+///   null）。
+/// - 求解器原文 par 行**出库到文件** `<app数据目录>/gcl-raw/<session_id>-<provider>.par`
+///   （见 `gcl_raw_store`，eval 采集管道先例）：唯一消费者是 verify pin 重放、读频极低，
+///   路径确定性派生不存指针列；不随会话导出、不入 undo 快照——导入方/撤销后重新规划即恢复。
+/// - `stale` 规划过期标记（KTD14：写手置 1，复位仅发生在规划成功事务内）。
 pub const FLOW_DOMAIN_SCHEMA_SQL: &str = r#"
     CREATE TABLE IF NOT EXISTS flow_streams (
         session_id              TEXT    NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
@@ -260,48 +259,15 @@ pub const FLOW_DOMAIN_SCHEMA_SQL: &str = r#"
         PRIMARY KEY (session_id, stream_seq)
     );
 
-    CREATE TABLE IF NOT EXISTS flow_plans (
-        session_id     TEXT    NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-        stream_seq     INTEGER NOT NULL,
-        node           TEXT    NOT NULL,
-        eth_n          INTEGER NOT NULL,
-        gate_index     INTEGER NOT NULL,
-        initially_open INTEGER NOT NULL DEFAULT 1,
-        offset_ns      INTEGER NOT NULL,
-        durations_ns   TEXT    NOT NULL,
-        solver         TEXT    NOT NULL,
-        PRIMARY KEY (session_id, stream_seq, node, eth_n, gate_index)
-    );
-
-    CREATE TABLE IF NOT EXISTS gcl_windows (
-        session_id  TEXT    NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-        provider    TEXT    NOT NULL,
-        node        TEXT    NOT NULL,
-        eth_n       INTEGER NOT NULL,
-        entry_idx   INTEGER NOT NULL,
-        start_ns    INTEGER NOT NULL,
-        duration_ns INTEGER NOT NULL,
-        gate_states INTEGER NOT NULL,
-        flow_refs   TEXT,
-        PRIMARY KEY (session_id, provider, node, eth_n, entry_idx)
-    );
-
-    CREATE TABLE IF NOT EXISTS gcl_plan_meta (
-        session_id TEXT    NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-        provider   TEXT    NOT NULL,
-        status     TEXT    NOT NULL,
-        cycle_ns   INTEGER NOT NULL,
-        algorithm  TEXT    NOT NULL,
-        stale      INTEGER NOT NULL DEFAULT 0,
-        created_at TEXT    NOT NULL,
-        PRIMARY KEY (session_id, provider)
-    );
-
-    CREATE TABLE IF NOT EXISTS gcl_raw_archive (
-        session_id TEXT    NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-        provider   TEXT    NOT NULL,
-        par_lines  TEXT    NOT NULL,
-        created_at TEXT    NOT NULL,
+    CREATE TABLE IF NOT EXISTS flow_gcl_plan (
+        session_id   TEXT    NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        provider     TEXT    NOT NULL,
+        status       TEXT    NOT NULL,
+        cycle_ns     INTEGER NOT NULL,
+        algorithm    TEXT    NOT NULL,
+        stale        INTEGER NOT NULL DEFAULT 0,
+        created_at   TEXT    NOT NULL,
+        windows_json TEXT    NOT NULL,
         PRIMARY KEY (session_id, provider)
     );
 "#;
@@ -860,38 +826,9 @@ pub const SESSION_SCOPED_TABLES: &[(&str, &[&str])] = &[
         ],
     ),
     (
-        "flow_plans",
-        &[
-            "session_id",
-            "stream_seq",
-            "node",
-            "eth_n",
-            "gate_index",
-            "initially_open",
-            "offset_ns",
-            "durations_ns",
-            "solver",
-        ],
-    ),
-    (
-        // 门控明细逐窗行（gcl-window U2）：位图 gate_states + flow_refs JSON。
-        "gcl_windows",
-        &[
-            "session_id",
-            "provider",
-            "node",
-            "eth_n",
-            "entry_idx",
-            "start_ns",
-            "duration_ns",
-            "gate_states",
-            "flow_refs",
-        ],
-    ),
-    (
-        // 门控规划元数据（gcl-window U2）：status/cycle_ns/algorithm/stale/created_at。
-        // gcl_raw_archive 有意不进本清单（不随会话导出，KTD1）。
-        "gcl_plan_meta",
+        // 门控结果单表（2026-07-15）：meta 列 + windows_json（逐窗数组 JSON 列）。
+        // raw par 行是文件（gcl-raw/*.par），有意不随会话导出——导入方重新规划即恢复。
+        "flow_gcl_plan",
         &[
             "session_id",
             "provider",
@@ -900,6 +837,7 @@ pub const SESSION_SCOPED_TABLES: &[(&str, &[&str])] = &[
             "algorithm",
             "stale",
             "created_at",
+            "windows_json",
         ],
     ),
 ];
@@ -1592,19 +1530,47 @@ mod tests {
             vec!["session_id".to_string(), "stream_seq".to_string()]
         );
 
-        let plan_cols = table_columns(&pool, "flow_plans").await;
+        let plan_cols = table_columns(&pool, "flow_gcl_plan").await;
         for c in [
             "session_id",
-            "stream_seq",
-            "node",
-            "eth_n",
-            "gate_index",
-            "initially_open",
-            "offset_ns",
-            "durations_ns",
-            "solver",
+            "provider",
+            "status",
+            "cycle_ns",
+            "algorithm",
+            "stale",
+            "created_at",
+            "windows_json",
         ] {
-            assert!(plan_cols.iter().any(|n| n == c), "flow_plans 缺列 {c}");
+            assert!(plan_cols.iter().any(|n| n == c), "flow_gcl_plan 缺列 {c}");
+        }
+        let plan_pk: Vec<String> = sqlx::query(
+            "SELECT name FROM pragma_table_info('flow_gcl_plan') WHERE pk > 0 ORDER BY pk",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| r.get::<String, _>("name"))
+        .collect();
+        assert_eq!(
+            plan_pk,
+            vec!["session_id".to_string(), "provider".to_string()]
+        );
+        // 单表化后库里不得再有三表/flow_plans（AE5）。
+        for legacy in [
+            "flow_plans",
+            "gcl_windows",
+            "gcl_plan_meta",
+            "gcl_raw_archive",
+        ] {
+            let exists: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name = ?",
+            )
+            .bind(legacy)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(exists, 0, "新库不应有退役表 {legacy}");
         }
 
         // 再跑一遍 safety_net 幂等。
@@ -1627,8 +1593,8 @@ mod tests {
         .await
         .unwrap();
         sqlx::query(
-            "INSERT INTO flow_plans (session_id, stream_seq, node, eth_n, gate_index, offset_ns, durations_ns, solver) \
-             VALUES ('s1', 0, '1', 2, 0, 100, '[500,500]', 'Z3')",
+            "INSERT INTO flow_gcl_plan (session_id, provider, status, cycle_ns, algorithm, stale, created_at, windows_json) \
+             VALUES ('s1', 'inet-z3', 'ok', 1000000, 'Z3', 0, 'now', '[]')",
         )
         .execute(&pool)
         .await
@@ -1645,12 +1611,12 @@ mod tests {
                 .await
                 .unwrap();
         let plans_left: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM flow_plans WHERE session_id = 's1'")
+            sqlx::query_scalar("SELECT COUNT(*) FROM flow_gcl_plan WHERE session_id = 's1'")
                 .fetch_one(&pool)
                 .await
                 .unwrap();
         assert_eq!(streams_left, 0, "删 session 应级联清 flow_streams");
-        assert_eq!(plans_left, 0, "删 session 应级联清 flow_plans");
+        assert_eq!(plans_left, 0, "删 session 应级联清 flow_gcl_plan");
     }
 
     #[test]
@@ -1661,8 +1627,8 @@ mod tests {
                 &["session_id", "stream_seq", "class", "talker", "listener"][..],
             ),
             (
-                "flow_plans",
-                &["session_id", "stream_seq", "node", "eth_n", "gate_index"][..],
+                "flow_gcl_plan",
+                &["session_id", "provider", "status", "stale", "windows_json"][..],
             ),
         ] {
             let cols = SESSION_SCOPED_TABLES

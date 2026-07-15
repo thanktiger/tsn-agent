@@ -417,7 +417,7 @@ pub async fn run_timesync_sim_inner<R: RemoteRunner>(
     )
 }
 
-/// 从 timeChanged series 的 module 路径提取 ned 名：`...Network.sw1.clock` → `sw1`（取 .clock 前一段）。
+/// 从 timeChanged series 的 module 路径提取 ned 名：`...Network.sw01.clock` → `sw01`（取 .clock 前一段）。
 /// pub(crate)：flow 验证的 gPTP 诊断行（U7/R15）复用同一提取口径。
 pub(crate) fn series_ned_name(module: &str) -> Option<&str> {
     let mut parts = module.rsplit('.');
@@ -703,7 +703,7 @@ mod tests {
             caliber: "timesync_simulated".into(),
             status: "converged".into(),
             per_node: vec![PerNodeOffset {
-                mid: "sw2".into(),
+                mid: "sw02".into(),
                 max_offset_ns: 1.0,
                 mean_offset_ns: 0.5,
                 converged: true,
@@ -747,9 +747,9 @@ mod tests {
     #[test]
     fn parse_csv_extracts_timechanged_series() {
         let csv = "run,module,name,vectime,vecvalue\n\
-            r1,TsnAgentTimesyncNetwork.es1.clock,timeChanged:vector,0 1 2,0.0 0.0 0.0\n\
-            r1,TsnAgentTimesyncNetwork.sw1.clock,timeChanged:vector,0 1 2,0.0 0.001 0.002\n\
-            r1,TsnAgentTimesyncNetwork.es1.app,packetSent:vector,0 1,5 6\n";
+            r1,TsnAgentTimesyncNetwork.es01.clock,timeChanged:vector,0 1 2,0.0 0.0 0.0\n\
+            r1,TsnAgentTimesyncNetwork.sw01.clock,timeChanged:vector,0 1 2,0.0 0.001 0.002\n\
+            r1,TsnAgentTimesyncNetwork.es01.app,packetSent:vector,0 1,5 6\n";
         let series = parse_timechanged_csv(csv).unwrap();
         assert_eq!(series.len(), 2, "只取 timeChanged 行");
         assert_eq!(series[0].times, vec![0.0, 1.0, 2.0]);
@@ -762,8 +762,8 @@ mod tests {
             Environment for INET 4.6.0 in directory '/y' is ready.\n\
             run,type,module,name,attrname,attrvalue,vectime,vecvalue\n\
             G-0,runattr,,,configname,General,,\n\
-            G-0,vector,TsnAgentTimesyncNetwork.es1.clock,timeChanged:vector,,,0 1 2,0.0 0.0 0.0\n\
-            G-0,vector,TsnAgentTimesyncNetwork.sw1.clock,timeChanged:vector,,,0 1 2,0.0 0.001 0.002\n";
+            G-0,vector,TsnAgentTimesyncNetwork.es01.clock,timeChanged:vector,,,0 1 2,0.0 0.0 0.0\n\
+            G-0,vector,TsnAgentTimesyncNetwork.sw01.clock,timeChanged:vector,,,0 1 2,0.0 0.001 0.002\n";
         let series = parse_timechanged_csv(csv).unwrap();
         assert_eq!(series.len(), 2);
         assert_eq!(series[1].values, vec![0.0, 0.001, 0.002]);
@@ -780,12 +780,12 @@ mod tests {
     fn steady_state_takes_second_half_and_aligns_gm() {
         // GM 恒 0；node 前半瞬态大、后半稳定在 1ns(=1e-9s)。
         let gm = NodeSeries {
-            module: "es1.clock".into(),
+            module: "es01.clock".into(),
             times: vec![0.0, 1.0, 2.0, 3.0, 4.0],
             values: vec![0.0, 0.0, 0.0, 0.0, 0.0],
         };
         let node = NodeSeries {
-            module: "sw1.clock".into(),
+            module: "sw01.clock".into(),
             times: vec![0.0, 1.0, 2.0, 3.0, 4.0],
             values: vec![1e-3, 5e-4, 1e-9, 1e-9, 1e-9], // 后半程(t>=2) 偏差 1e-9s=1ns
         };
@@ -797,13 +797,13 @@ mod tests {
     #[test]
     fn offset_trajectory_signed_full_and_downsampled() {
         let gm = NodeSeries {
-            module: "es1.clock".into(),
+            module: "es01.clock".into(),
             times: vec![0.0, 1.0, 2.0],
             values: vec![0.0, 0.0, 0.0],
         };
         // 短序列：全保留、带符号（node 落后 GM → 负）。
         let node = NodeSeries {
-            module: "sw1.clock".into(),
+            module: "sw01.clock".into(),
             times: vec![0.0, 1.0, 2.0],
             values: vec![1e-9, -2e-9, 0.0],
         };
@@ -817,12 +817,12 @@ mod tests {
         let n = 1000usize;
         let times: Vec<f64> = (0..n).map(|i| i as f64 * 1e-3).collect();
         let big = NodeSeries {
-            module: "sw1.clock".into(),
+            module: "sw01.clock".into(),
             times: times.clone(),
             values: vec![0.0; n],
         };
         let gm_big = NodeSeries {
-            module: "es1.clock".into(),
+            module: "es01.clock".into(),
             times: times.clone(),
             values: vec![0.0; n],
         };
@@ -871,7 +871,7 @@ mod tests {
             csv: None,
             scavetool_failed: false,
         };
-        let r = classify_and_compute(outcome, "es1", "0", &[], &no_thresholds()).unwrap();
+        let r = classify_and_compute(outcome, "es01", "0", &[], &no_thresholds()).unwrap();
         assert_eq!(r.status, "load_failed");
         assert!(r.per_node.is_empty());
     }
@@ -886,7 +886,7 @@ mod tests {
                 csv: None,
                 scavetool_failed: false,
             },
-            "es1",
+            "es01",
             "0",
             &[],
             &no_thresholds(),
@@ -901,7 +901,7 @@ mod tests {
                 csv: None,
                 scavetool_failed: true,
             },
-            "es1",
+            "es01",
             "0",
             &[],
             &no_thresholds(),
@@ -919,23 +919,23 @@ mod tests {
             csv: Some("not,a,valid,header\n1,2,3,4\n".into()),
             scavetool_failed: false,
         };
-        let r = classify_and_compute(outcome, "es1", "0", &[], &no_thresholds()).unwrap();
+        let r = classify_and_compute(outcome, "es01", "0", &[], &no_thresholds()).unwrap();
         assert_eq!(r.status, "parse_failed");
     }
 
     #[test]
     fn classify_converged_from_csv() {
-        // GM=es1 恒0；sw1 收敛到 1ns。期望 1 slave。gm_ned=es1 精确匹配 module。
+        // GM=es01 恒0；sw01 收敛到 1ns。期望 1 slave。gm_ned=es01 精确匹配 module。
         let csv = "run,module,name,vectime,vecvalue\n\
-            r1,net.es1.clock,timeChanged:vector,0 1 2 3,0 0 0 0\n\
-            r1,net.sw1.clock,timeChanged:vector,0 1 2 3,0.001 0.0005 1e-9 1e-9\n";
+            r1,net.es01.clock,timeChanged:vector,0 1 2 3,0 0 0 0\n\
+            r1,net.sw01.clock,timeChanged:vector,0 1 2 3,0.001 0.0005 1e-9 1e-9\n";
         let outcome = SimRunOutcome {
             exit_code: Some(0),
             output_tail: "".into(),
             csv: Some(csv.into()),
             scavetool_failed: false,
         };
-        let r = classify_and_compute(outcome, "es1", "0", &timing2(), &no_thresholds()).unwrap();
+        let r = classify_and_compute(outcome, "es01", "0", &timing2(), &no_thresholds()).unwrap();
         assert_eq!(r.status, "converged", "{r:?}");
         assert_eq!(r.per_node.len(), 1);
         assert!(r.per_node[0].converged);
@@ -943,17 +943,17 @@ mod tests {
 
     #[test]
     fn classify_marks_large_offset_not_converged() {
-        // sw1 稳态偏差 1ms = 1e6 ns >> 1µs 阈值 → 未收敛（不渲染全绿）。
+        // sw01 稳态偏差 1ms = 1e6 ns >> 1µs 阈值 → 未收敛（不渲染全绿）。
         let csv = "run,module,name,vectime,vecvalue\n\
-            r1,net.es1.clock,timeChanged:vector,0 1 2 3,0 0 0 0\n\
-            r1,net.sw1.clock,timeChanged:vector,0 1 2 3,0.001 0.001 0.001 0.001\n";
+            r1,net.es01.clock,timeChanged:vector,0 1 2 3,0 0 0 0\n\
+            r1,net.sw01.clock,timeChanged:vector,0 1 2 3,0.001 0.001 0.001 0.001\n";
         let outcome = SimRunOutcome {
             exit_code: Some(0),
             output_tail: "".into(),
             csv: Some(csv.into()),
             scavetool_failed: false,
         };
-        let r = classify_and_compute(outcome, "es1", "0", &timing2(), &no_thresholds()).unwrap();
+        let r = classify_and_compute(outcome, "es01", "0", &timing2(), &no_thresholds()).unwrap();
         assert_eq!(r.status, "converged"); // status=有结果；逐节点判收敛
         assert_eq!(r.per_node.len(), 1);
         assert!(!r.per_node[0].converged, "1ms 偏差不应判收敛");
@@ -963,19 +963,19 @@ mod tests {
     #[test]
     fn series_ned_name_extracts_node() {
         assert_eq!(
-            series_ned_name("TsnAgentTimesyncNetwork.sw1.clock"),
-            Some("sw1")
+            series_ned_name("TsnAgentTimesyncNetwork.sw01.clock"),
+            Some("sw01")
         );
-        assert_eq!(series_ned_name("net.es3.clock"), Some("es3"));
-        assert_eq!(series_ned_name("net.sw1.clock.oscillator"), None); // 非 .clock 结尾
+        assert_eq!(series_ned_name("net.es03.clock"), Some("es03"));
+        assert_eq!(series_ned_name("net.sw01.clock.oscillator"), None); // 非 .clock 结尾
     }
 
     #[test]
     fn classify_uses_per_node_offset_threshold_ns() {
-        // sw1 稳态 max=400ns；节点阈值=500ns → within（证明用 500 不是全局 1000，也证明 <500 收敛）。
+        // sw01 稳态 max=400ns；节点阈值=500ns → within（证明用 500 不是全局 1000，也证明 <500 收敛）。
         let csv = "run,module,name,vectime,vecvalue\n\
-            r1,net.es1.clock,timeChanged:vector,0 1 2 3,0 0 0 0\n\
-            r1,net.sw1.clock,timeChanged:vector,0 1 2 3,0.001 0.001 4e-7 4e-7\n";
+            r1,net.es01.clock,timeChanged:vector,0 1 2 3,0 0 0 0\n\
+            r1,net.sw01.clock,timeChanged:vector,0 1 2 3,0.001 0.001 4e-7 4e-7\n";
         let outcome = SimRunOutcome {
             exit_code: Some(0),
             output_tail: "".into(),
@@ -983,23 +983,23 @@ mod tests {
             scavetool_failed: false,
         };
         let th: std::collections::BTreeMap<String, f64> =
-            [("sw1".to_string(), 500.0)].into_iter().collect();
-        let r = classify_and_compute(outcome, "es1", "0", &timing2(), &th).unwrap();
+            [("sw01".to_string(), 500.0)].into_iter().collect();
+        let r = classify_and_compute(outcome, "es01", "0", &timing2(), &th).unwrap();
         assert_eq!(r.per_node.len(), 1);
         assert!(r.per_node[0].converged, "400ns 在 500ns 阈值内应收敛");
         assert_eq!(r.per_node[0].threshold_ns, 500.0);
 
         // 同节点稳态 max=600ns > 500ns 阈值 → 不收敛（若仍用全局 1000 则会误判收敛）。
         let csv2 = "run,module,name,vectime,vecvalue\n\
-            r1,net.es1.clock,timeChanged:vector,0 1 2 3,0 0 0 0\n\
-            r1,net.sw1.clock,timeChanged:vector,0 1 2 3,0.001 0.001 6e-7 6e-7\n";
+            r1,net.es01.clock,timeChanged:vector,0 1 2 3,0 0 0 0\n\
+            r1,net.sw01.clock,timeChanged:vector,0 1 2 3,0.001 0.001 6e-7 6e-7\n";
         let outcome2 = SimRunOutcome {
             exit_code: Some(0),
             output_tail: "".into(),
             csv: Some(csv2.into()),
             scavetool_failed: false,
         };
-        let r2 = classify_and_compute(outcome2, "es1", "0", &timing2(), &th).unwrap();
+        let r2 = classify_and_compute(outcome2, "es01", "0", &timing2(), &th).unwrap();
         assert!(!r2.per_node[0].converged, "600ns 超 500ns 阈值不应收敛");
     }
 
@@ -1007,8 +1007,8 @@ mod tests {
     fn classify_wrong_gm_name_yields_empty() {
         // gm_ned 与 CSV 里任何 module 都不匹配 → 不臆造参考系，判 empty。
         let csv = "run,module,name,vectime,vecvalue\n\
-            r1,net.es1.clock,timeChanged:vector,0 1,0 0\n\
-            r1,net.sw1.clock,timeChanged:vector,0 1,1e-9 1e-9\n";
+            r1,net.es01.clock,timeChanged:vector,0 1,0 0\n\
+            r1,net.sw01.clock,timeChanged:vector,0 1,1e-9 1e-9\n";
         let outcome = SimRunOutcome {
             exit_code: Some(0),
             output_tail: "".into(),
@@ -1119,11 +1119,11 @@ mod tests {
         .await;
         assert_eq!(parsed["ok"], true, "set_gm 应成功：{parsed}");
 
-        // GM=0→ned 名 sw1；1→sw2；2→sw3。canned CSV：GM 恒 0，sw2/sw3 收敛到 1ns。
+        // GM=0→ned 名 sw01；1→sw02；2→sw03。canned CSV：GM 恒 0，sw02/sw03 收敛到 1ns。
         let csv = "run,module,name,vectime,vecvalue\n\
-            r1,net.sw1.clock,timeChanged:vector,0 1 2 3,0 0 0 0\n\
-            r1,net.sw2.clock,timeChanged:vector,0 1 2 3,0.001 0.0005 1e-9 1e-9\n\
-            r1,net.sw3.clock,timeChanged:vector,0 1 2 3,0.001 0.0005 1e-9 1e-9\n"
+            r1,net.sw01.clock,timeChanged:vector,0 1 2 3,0 0 0 0\n\
+            r1,net.sw02.clock,timeChanged:vector,0 1 2 3,0.001 0.0005 1e-9 1e-9\n\
+            r1,net.sw03.clock,timeChanged:vector,0 1 2 3,0.001 0.0005 1e-9 1e-9\n"
             .to_string();
         let mock = MockRunner {
             csv,
@@ -1143,7 +1143,7 @@ mod tests {
             .await
             .unwrap();
 
-        // 软仿结果：2 个 slave（sw2/sw3）全收敛。
+        // 软仿结果：2 个 slave（sw02/sw03）全收敛。
         assert_eq!(result.status, "converged", "{result:?}");
         assert_eq!(result.caliber, "timesync_simulated");
         assert_eq!(result.per_node.len(), 2);
@@ -1163,7 +1163,7 @@ mod tests {
         assert!(ini.contains("driftRate = 50ppm"));
         assert!(ini.contains("sim-time-limit = 2.5s"));
         assert!(ini.contains("simtime-resolution = fs"));
-        assert!(ini.contains("**.referenceClock = \"sw1.clock\""));
+        assert!(ini.contains("**.referenceClock = \"sw01.clock\""));
     }
 
     /// stale-tree 闸：set_gm 后改拓扑（加链路使时钟树漂移）→ 软仿触发时 verify 重跑 fail → 拒绝。
