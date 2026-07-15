@@ -568,7 +568,12 @@ pub(crate) fn build_forwarding_tables(
         ) else {
             return Err(internal_err(seq, "端点端口无法映射到 ethN"));
         };
-        let ned_of = |mid: &str| ned_names.get(mid).cloned().unwrap_or_else(|| mid.to_string());
+        let ned_of = |mid: &str| {
+            ned_names
+                .get(mid)
+                .cloned()
+                .unwrap_or_else(|| mid.to_string())
+        };
         let talker_addr = format!("{}%eth{t_eth}", ned_of(talker));
         let listener_addr = format!("{}%eth{l_eth}", ned_of(listener));
 
@@ -1771,7 +1776,15 @@ pub fn build_flow_tas_sim_bundle(
 
     let gm_ned = &mapped[gm_mid].ned_name;
     let omnetpp_ini = build_flow_tas_ini(
-        &mapped, &port_eth, gm_ned, timing, overrides, streams, schedule, &splits, links,
+        &mapped,
+        &port_eth,
+        gm_ned,
+        timing,
+        overrides,
+        streams,
+        schedule,
+        &splits,
+        links,
         &forwarding,
     );
 
@@ -2231,8 +2244,7 @@ mod tests {
     fn pin_pure_stbe_emits_forwarding_table() {
         let (nodes, links, timing) = sample();
         // 1→2 经 sw0：link_seqs [0,1]，node_path [1,0,2]。
-        let r =
-            crate::flow_route::build_route_from_link_seqs(&[0, 1], "1", "2", &links).unwrap();
+        let r = crate::flow_route::build_route_from_link_seqs(&[0, 1], "1", "2", &links).unwrap();
         let routes = vec![(0i64, r.clone()), (1i64, r)]; // BE(seq0)+ST(seq1) 同路 → 去重
         let b = build_flow_tas_sim_bundle(
             &nodes,
@@ -2264,8 +2276,7 @@ mod tests {
     #[test]
     fn pin_with_rc_omits_forwarding_table() {
         let (nodes, links, timing) = dual_plane_sample();
-        let r =
-            crate::flow_route::build_route_from_link_seqs(&[0, 1], "1", "2", &links).unwrap();
+        let r = crate::flow_route::build_route_from_link_seqs(&[0, 1], "1", "2", &links).unwrap();
         let b = build_flow_tas_sim_bundle(
             &nodes,
             &links,
@@ -2287,7 +2298,10 @@ mod tests {
             !ini.contains("*.macForwardingTableConfigurator.typename = \"\""),
             "{ini}"
         );
-        assert!(ini.contains("*.*.hasStreamRedundancy = true"), "FRER 段仍在：{ini}");
+        assert!(
+            ini.contains("*.*.hasStreamRedundancy = true"),
+            "FRER 段仍在：{ini}"
+        );
     }
 
     /// Synth 模式：转发钉死段不出现（规划 bundle 零影响）。
@@ -2465,8 +2479,6 @@ mod tests {
 
     // ---------- U4：RC FRER 装配 / 双宿拆分 / 平面钉死 ----------
 
-    /// 双平面 fixture：es01(mid1) 双宿 —A— sw01(mid0) —A— es02(mid2)；—B— sw02(mid3) —B—。
-    /// GM=sw01(mid0)。es01/es02 端口 {0,1}：0→平面 A、1→平面 B（即 talker eth0 落平面 A）。
     // ---------- U1（KTD13）：静态转发表构造 ----------
 
     /// 无 plane 键的单平面链路（转发表构造与平面无关，derive 用 plane=None 全链路）。
@@ -2520,7 +2532,7 @@ mod tests {
             &vec![("es01%eth0".to_string(), 0), ("es02%eth0".to_string(), 1)]
         );
         // talker/listener 不进表。
-        assert!(fwd.get("es01").is_none() && fwd.get("es02").is_none());
+        assert!(!fwd.contains_key("es01") && !fwd.contains_key("es02"));
     }
 
     /// 绕路流（三角拓扑）：中间交换机 s2 出现；直连口交换机 s1 的正向条目指向绕路端口（eth2）
@@ -2603,13 +2615,20 @@ mod tests {
         let ned = node_ned_names(&nodes);
         let detour = route_via(&[0, 3, 4, 2], "t", "l", &links); // s1 出口 eth2
         let shortest = route_via(&[0, 1, 2], "t", "l", &links); // s1 出口 eth1
-        let err =
-            build_forwarding_tables(&[(0, detour), (1, shortest)], &links, &port_eth, &ned)
-                .unwrap_err();
+        let err = build_forwarding_tables(&[(0, detour), (1, shortest)], &links, &port_eth, &ned)
+            .unwrap_err();
         assert_eq!(err.code, "FORWARDING_CONFLICT");
-        assert!(err.message_zh.contains("流 0") && err.message_zh.contains("流 1"), "{}", err.message_zh);
+        assert!(
+            err.message_zh.contains("流 0") && err.message_zh.contains("流 1"),
+            "{}",
+            err.message_zh
+        );
         assert!(err.message_zh.contains("sw01"), "{}", err.message_zh);
-        assert!(err.message_zh.contains("同侧"), "含消解引导：{}", err.message_zh);
+        assert!(
+            err.message_zh.contains("同侧"),
+            "含消解引导：{}",
+            err.message_zh
+        );
     }
 
     /// 反向冲突：同 talker、不同 listener、共享首跳后路径分叉 → 汇合交换机 s 的反向键
@@ -2636,14 +2655,19 @@ mod tests {
         let ned = node_ned_names(&nodes);
         let flow_a = route_via(&[0, 1, 2], "t", "l1", &links); // t-s1-s-l1，s 反向经 link1
         let flow_b = route_via(&[0, 3, 4, 5], "t", "l2", &links); // t-s1-s2-s-l2，s 反向经 link4
-        let err =
-            build_forwarding_tables(&[(0, flow_a), (1, flow_b)], &links, &port_eth, &ned)
-                .unwrap_err();
+        let err = build_forwarding_tables(&[(0, flow_a), (1, flow_b)], &links, &port_eth, &ned)
+            .unwrap_err();
         assert_eq!(err.code, "FORWARDING_CONFLICT", "{}", err.message_zh);
         // 冲突在汇合交换机 s（=sw03，命名顺序 s1,s2,s）对目的 talker（es01）。
-        assert!(err.message_zh.contains("es01%eth0"), "反向键锚 talker：{}", err.message_zh);
+        assert!(
+            err.message_zh.contains("es01%eth0"),
+            "反向键锚 talker：{}",
+            err.message_zh
+        );
     }
 
+    /// 双平面 fixture：es01(mid1) 双宿 —A— sw01(mid0) —A— es02(mid2)；—B— sw02(mid3) —B—。
+    /// GM=sw01(mid0)。es01/es02 端口 {0,1}：0→平面 A、1→平面 B（即 talker eth0 落平面 A）。
     fn dual_plane_sample() -> (Vec<VerifyNode>, Vec<VerifyLink>, Vec<SimNodeTiming>) {
         let nodes = vec![
             node("0", "switch"),
