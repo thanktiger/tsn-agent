@@ -1766,8 +1766,8 @@ pub fn build_flow_tas_sim_bundle(
     // 互补关窗（U5/KTD5，仅 pin）：会话存在 BE/RC 流才从 ST 门表推导补集条目追加进 pin 集；
     // 纯 ST 会话补集恒空、ini 位级不变。BE/RC 存在性从全流集判定（verify 传入全流集；
     // has_rc 兼看 overrides——与帧开销的会话级口径同源）。推导失败（占满/容不下 MTU 帧）响亮返错。
-    // KTD13 静态转发表（仅 pin && 无 RC）：从路径凭证算逐交换机双向条目，跨流冲突/歧义
-    // 响亮 Err。含 RC 会话（FRER 单写入者，KTD3）由调用方传空 routes → 空表 → ini 零改动。
+    // KTD13 静态转发表（仅 pin && 无 RC）：从路径凭证算逐交换机正向（forward-only，dest=listener）
+    // 条目，跨流冲突/歧义响亮 Err。含 RC 会话（FRER 单写入者，KTD3）由调用方传空 routes → 空表 → ini 零改动。
     let forwarding: BTreeMap<String, Vec<(String, usize)>> = match &schedule {
         FlowTasSchedule::Pin(_, routes) => {
             let frer = streams.iter().any(|s| s.class == "RC");

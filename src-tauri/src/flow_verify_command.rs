@@ -1458,6 +1458,7 @@ mod tests {
                 !ini.contains("*.macForwardingTableConfigurator.typename = \"\""),
                 "{ini}"
             );
+            assert!(!ini.contains("GlobalArp"), "含 RC 不发 GlobalArp：{ini}");
         });
     }
 
