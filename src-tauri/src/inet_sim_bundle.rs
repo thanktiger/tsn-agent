@@ -520,15 +520,16 @@ fn route_listener_eth(
     endpoint_eth(last, listener, port_eth)
 }
 
-/// KTD13：把每条 ST/BE 流的路径凭证翻译成逐交换机静态 L2 转发条目（双向全覆盖）。
+/// KTD13：把每条 ST/BE 流的路径凭证翻译成逐交换机静态 L2 转发条目（forward-only）。
 /// 返回 `交换机 ned 名 → Vec<(目的地址 "ned%ethN", 出口 ethN)>`（(ned,dest) 键有序 → Vec 天然
-/// 按 dest 排序，确定性）。正向：沿 `route.egress`（除 talker）每交换机 hop → 去 listener 走该 hop
-/// 出口，目的地址锚 listener 末链入口端口；反向：沿 `node_path` 反走，每中间交换机取指向 talker
-/// 侧端口 → 去 talker，目的地址锚 talker 首链出口端口。地址用 `%ethN` 消双宿端系统裸名 MAC 解析
-/// 歧义（spike pin_dest 实证）。跨流冲突（同交换机同目的不同出口）静态 MAC 转发不分流、物理不可
-/// 满足 → 响亮 `FORWARDING_CONFLICT`（点名两流 + 交换机 + 消解引导，文案照 flow_route 先例）；同
-/// 键同出口去重。终端口/反向端口从 `link_seqs` + `port_eth` 同源取（凭证已过复验，映射失败属内部
-/// 不变量破坏，`FORWARDING_INTERNAL` 直接 Err）。
+/// 按 dest 排序，确定性）。每条流沿 `route.egress`（除 talker）每交换机 hop → 去 listener 走该 hop
+/// 出口，目的地址锚 listener 末链入口端口（`route_listener_eth`，与 destAddress `%ethN` 同源，消
+/// 双宿端系统裸名 MAC 解析歧义）。**不写反向（dest=talker）条目**：返回方向的覆盖由返回那条流自己
+/// 的正向条目提供；反向在含环拓扑致伪冲突，纯 talker 的 ARP 单播由 pin bundle 的 GlobalArp 消除、
+/// 非靠反向条目。跨流冲突（两流发往同一 listener 在共享交换机要求不同出口）静态 MAC 转发不分流、
+/// 物理不可满足 → 响亮 `FORWARDING_CONFLICT`（点名两流 + 交换机 + 消解引导，文案照 flow_route 先例）；
+/// 同键同出口去重。终端口从 `link_seqs` + `port_eth` 同源取（凭证已过复验，映射失败属内部不变量
+/// 破坏，`FORWARDING_INTERNAL` 直接 Err）。
 pub(crate) fn build_forwarding_tables(
     routes: &[(i64, Route)],
     links: &[VerifyLink],
@@ -537,8 +538,6 @@ pub(crate) fn build_forwarding_tables(
     switch_mids: &std::collections::BTreeSet<String>,
 ) -> Result<BTreeMap<String, Vec<(String, usize)>>, VerifyError> {
     let by_seq: BTreeMap<i64, &VerifyLink> = links.iter().map(|l| (l.link_seq, l)).collect();
-    let node_eth_on_link =
-        |link: &VerifyLink, node: &str| -> Option<usize> { endpoint_eth(link, node, port_eth) };
     let internal_err = |seq: i64, what: &str| VerifyError {
         code: "FORWARDING_INTERNAL".to_string(),
         message_zh: format!("流 {seq} 转发表构造内部不变量破坏：{what}（凭证应已过复验）。"),
@@ -575,12 +574,9 @@ pub(crate) fn build_forwarding_tables(
         }
         let talker = &r.node_path[0];
         let listener = &r.node_path[r.node_path.len() - 1];
-        // 目的地址锚：talker 首跳出口 ethN=egress 首项（R12 已锚 ethN），listener 末链入口端口
-        // 经 route_listener_eth（destAddress %ethN 同源）。凭证已过复验，映射失败属内部不变量破坏。
-        let (Some(t_eth), Some(l_eth)) = (
-            r.egress.first().map(|(_, k)| *k),
-            route_listener_eth(r, &by_seq, port_eth),
-        ) else {
+        // 目的地址锚：listener 末链入口端口经 route_listener_eth（destAddress %ethN 同源，消双宿
+        // 裸名歧义）。凭证已过复验，映射失败属内部不变量破坏。
+        let Some(l_eth) = route_listener_eth(r, &by_seq, port_eth) else {
             return Err(internal_err(seq, "端点端口无法映射到 ethN"));
         };
         let ned_of = |mid: &str| {
@@ -589,7 +585,6 @@ pub(crate) fn build_forwarding_tables(
                 .cloned()
                 .unwrap_or_else(|| mid.to_string())
         };
-        let talker_addr = format!("{}%eth{t_eth}", ned_of(talker));
         let listener_addr = format!("{}%eth{l_eth}", ned_of(listener));
 
         // 正向：egress 除 talker 每交换机 hop → 去 listener（走该 hop 的 egress 端口）。
@@ -609,30 +604,6 @@ pub(crate) fn build_forwarding_tables(
                 return Err(internal_err(seq, "交换机无 ned 名"));
             };
             push(&mut acc, sw_ned, listener_addr.clone(), *eg, seq)?;
-        }
-
-        // 反向：node_path 中间交换机取指向 talker 侧端口（link_seqs[i-1]）→ 去 talker。
-        for i in 1..r.node_path.len() - 1 {
-            let sw_mid = &r.node_path[i];
-            if !switch_mids.contains(sw_mid) {
-                return Err(internal_err(
-                    seq,
-                    "路径中间转发节点非交换机，无 macTable 可钉",
-                ));
-            }
-            let Some(sw_ned) = ned_names.get(sw_mid) else {
-                return Err(internal_err(seq, "交换机无 ned 名"));
-            };
-            let Some(&back_seq) = r.link_seqs.get(i - 1) else {
-                continue;
-            };
-            let Some(back_link) = by_seq.get(&back_seq) else {
-                return Err(internal_err(seq, "路径链路已不存在"));
-            };
-            let Some(back_eth) = node_eth_on_link(back_link, sw_mid) else {
-                return Err(internal_err(seq, "交换机反向端口无法映射到 ethN"));
-            };
-            push(&mut acc, sw_ned, talker_addr.clone(), back_eth, seq)?;
         }
     }
 
@@ -1630,11 +1601,14 @@ fn build_flow_tas_ini(
     }
 
     // --- 静态 L2 转发钉死（KTD13，is_pin && !frer）---
-    // 关自动配置器（否则整体覆盖 forwardingTable）+ 逐交换机 forwardingTable + 拉大 agingTime
-    // （默认 120s 会淘汰静态条目，RC 守卫加大 count 时理论越界）。行序由 BTreeMap 保证确定性。
-    // 与 pin_kit（L3 出口平面选择）互补：那锚 talker L3 出口平面，这钉每跳 L2 转发。
+    // 关自动配置器（否则整体覆盖 forwardingTable）+ 显式 GlobalArp + 逐交换机 forwardingTable +
+    // 拉大 agingTime（默认 120s 会淘汰静态条目，RC 守卫加大 count 时理论越界）。行序由 BTreeMap
+    // 保证确定性。与 pin_kit（L3 出口平面选择）互补：那锚 talker L3 出口平面，这钉每跳 L2 转发。
     if is_pin && !frer && !forwarding.is_empty() {
         ini.push_str("*.macForwardingTableConfigurator.typename = \"\"\n");
+        // GlobalArp：全网 init 解析 IP→MAC、零 ARP 帧上线 → forward-only 只钉 dest=listener，纯
+        // talker（无正向覆盖的目的）也无单播 ARP-reply 命中缺条目泛洪（学习随静态表禁用，环拓扑成风暴）。
+        ini.push_str("**.arp.typename = \"GlobalArp\"\n");
         for (sw, entries) in forwarding {
             let items = entries
                 .iter()
@@ -2296,7 +2270,8 @@ mod tests {
 
     // ---------- U2（KTD13）：ini 发射转发钉死段 ----------
 
-    /// Pin + 纯 ST/BE + 非空 routes：ini 含关配置器行、逐交换机 forwardingTable 行、agingTime 行。
+    /// Pin + 纯 ST/BE + 非空 routes：ini 含关配置器行、GlobalArp 行、逐交换机 forwardingTable
+    /// 行（forward-only：仅 dest=listener）、agingTime 行。
     #[test]
     fn pin_pure_stbe_emits_forwarding_table() {
         let (nodes, links, timing) = sample();
@@ -2320,9 +2295,15 @@ mod tests {
             ini.contains("*.macForwardingTableConfigurator.typename = \"\""),
             "{ini}"
         );
+        // GlobalArp：坐实零 ARP 帧（forward-only 纯 talker 防泛洪护栏）。
+        assert!(
+            ini.contains("**.arp.typename = \"GlobalArp\""),
+            "pin 段须显式 GlobalArp：{ini}"
+        );
+        // forward-only：sw01 只余去 listener(es02) 的正向条目，无 dest=talker(es01) 反向项。
         assert!(
             ini.contains(
-                "*.sw01.macTable.forwardingTable = [{address: \"es01%eth0\", interface: \"eth1\"}, {address: \"es02%eth0\", interface: \"eth0\"}]"
+                "*.sw01.macTable.forwardingTable = [{address: \"es02%eth0\", interface: \"eth0\"}]"
             ),
             "{ini}"
         );
@@ -2377,6 +2358,7 @@ mod tests {
             !ini.contains("*.macForwardingTableConfigurator.typename = \"\""),
             "{ini}"
         );
+        assert!(!ini.contains("GlobalArp"), "含 RC 不发 GlobalArp：{ini}");
         assert!(
             ini.contains("*.*.hasStreamRedundancy = true"),
             "FRER 段仍在：{ini}"
@@ -2400,6 +2382,7 @@ mod tests {
         )
         .unwrap();
         assert!(!b.bundle.omnetpp_ini.contains("forwardingTable"));
+        assert!(!b.bundle.omnetpp_ini.contains("GlobalArp"));
     }
 
     /// synth 模式：Z3 配置器 + configuration 数组（含 +58B 开销、ST pcp7、pathFragments）。
@@ -2590,10 +2573,10 @@ mod tests {
             .collect()
     }
 
-    /// 直路 t—s1—s2—l：沿途每交换机含正反两条目，出口 ethN 与 links 一致，地址带 %ethN。
-    /// 兼验反向条目正确性（listener 侧交换机含去 talker 条目，地址 talker%ethN）。
+    /// 直路 t—s1—s2—l（forward-only）：沿途每交换机只含去 listener 的正向条目，出口 ethN 与
+    /// links 一致，地址带 %ethN；无 dest=talker 反向条目。
     #[test]
-    fn forwarding_linear_bidirectional_entries() {
+    fn forwarding_linear_forward_only_entries() {
         let nodes = vec![
             node("t", "endSystem"),
             node("l", "endSystem"),
@@ -2610,14 +2593,14 @@ mod tests {
         let r = route_via(&[0, 1, 2], "t", "l", &links);
         let fwd =
             build_forwarding_tables(&[(0, r)], &links, &port_eth, &ned, &sw_set(&nodes)).unwrap();
-        // t=es01, l=es02, s1=sw01, s2=sw02。
+        // t=es01, l=es02, s1=sw01, s2=sw02。仅去 listener(es02) 正向条目、无 es01 反向。
         assert_eq!(
             fwd.get("sw01").unwrap(),
-            &vec![("es01%eth0".to_string(), 0), ("es02%eth0".to_string(), 1)]
+            &vec![("es02%eth0".to_string(), 1)]
         );
         assert_eq!(
             fwd.get("sw02").unwrap(),
-            &vec![("es01%eth0".to_string(), 0), ("es02%eth0".to_string(), 1)]
+            &vec![("es02%eth0".to_string(), 1)]
         );
         // talker/listener 不进表。
         assert!(!fwd.contains_key("es01") && !fwd.contains_key("es02"));
@@ -2647,24 +2630,23 @@ mod tests {
         let r = route_via(&[0, 3, 4, 2], "t", "l", &links);
         let fwd =
             build_forwarding_tables(&[(0, r)], &links, &port_eth, &ned, &sw_set(&nodes)).unwrap();
-        // 沿途每交换机（含中间 s2）都含正反两条目，锁死双向完整性（漏条目 → 泛洪风暴）。
-        // 正向去 listener=es02%eth0：s1 走绕路口 eth2（非直连 eth1）、s2 走 eth1、s3 走 eth1。
-        // 反向去 talker=es01%eth0：s1 走 eth0、s2 走 eth0、s3 走绕路来向口 eth2。
+        // forward-only：沿途每交换机只含去 listener=es02%eth0 的正向条目（无 dest=talker 反向）。
+        // s1 走绕路口 eth2（非直连 eth1）、s2 走 eth1、s3 走 eth1。
         assert_eq!(
             fwd.get("sw01").unwrap(),
-            &vec![("es01%eth0".to_string(), 0), ("es02%eth0".to_string(), 2)]
+            &vec![("es02%eth0".to_string(), 2)]
         );
         assert_eq!(
             fwd.get("sw02").unwrap(),
-            &vec![("es01%eth0".to_string(), 0), ("es02%eth0".to_string(), 1)]
+            &vec![("es02%eth0".to_string(), 1)]
         );
         assert_eq!(
             fwd.get("sw03").unwrap(),
-            &vec![("es01%eth0".to_string(), 2), ("es02%eth0".to_string(), 1)]
+            &vec![("es02%eth0".to_string(), 1)]
         );
     }
 
-    /// 两流同 (sw, 目的地址) 同出口（同路径）→ 去重为一条（每交换机仍恰 2 条目）。
+    /// 两流同 (sw, 目的地址) 同出口（同路径）→ 去重为一条（forward-only 每交换机恰 1 条目）。
     #[test]
     fn forwarding_dedup_same_egress() {
         let nodes = vec![
@@ -2690,8 +2672,8 @@ mod tests {
             &sw_set(&nodes),
         )
         .unwrap();
-        assert_eq!(fwd.get("sw01").unwrap().len(), 2, "去重后每交换机 2 条目");
-        assert_eq!(fwd.get("sw02").unwrap().len(), 2);
+        assert_eq!(fwd.get("sw01").unwrap().len(), 1, "去重后每交换机 1 条目");
+        assert_eq!(fwd.get("sw02").unwrap().len(), 1);
     }
 
     /// 主用例冲突：同 talker/listener 的绕路流（seq0）+ 最短路流（seq1）→ 正向分叉交换机 s1
@@ -2738,10 +2720,11 @@ mod tests {
         );
     }
 
-    /// 反向冲突：同 talker、不同 listener、共享首跳后路径分叉 → 汇合交换机 s 的反向键
-    /// (s, talker%ethN) 冲突（两流从不同邻居到达 s，指向 talker 的端口不同）。
+    /// 本 session fix 核心回归：同 talker、不同 listener、经环拓扑不同路径汇合于交换机 s。
+    /// 旧代码反向条目在 s 对 dest=talker 伪冲突（挡住合法配置）；forward-only 只钉各自 listener
+    /// → 无冲突，汇合交换机对两个不同 listener 各持一条正向条目。
     #[test]
-    fn forwarding_reverse_fork_conflict() {
+    fn forwarding_shared_talker_ring_no_false_conflict() {
         let nodes = vec![
             node("t", "endSystem"),
             node("l1", "endSystem"),
@@ -2755,27 +2738,38 @@ mod tests {
             plink(1, "s1", 1, "s", 0),  // flow A: s1→s 直连
             plink(2, "s", 1, "l1", 0),  // flow A 终
             plink(3, "s1", 2, "s2", 0), // flow B: s1→s2
-            plink(4, "s2", 1, "s", 2),  // flow B: s2→s
+            plink(4, "s2", 1, "s", 2),  // flow B: s2→s（环：s1-s2-s-s1）
             plink(5, "s", 3, "l2", 0),  // flow B 终
         ];
         let port_eth = build_port_eth_map(&links);
         let ned = node_ned_names(&nodes);
-        let flow_a = route_via(&[0, 1, 2], "t", "l1", &links); // t-s1-s-l1，s 反向经 link1
-        let flow_b = route_via(&[0, 3, 4, 5], "t", "l2", &links); // t-s1-s2-s-l2，s 反向经 link4
-        let err = build_forwarding_tables(
+        let flow_a = route_via(&[0, 1, 2], "t", "l1", &links); // t-s1-s-l1
+        let flow_b = route_via(&[0, 3, 4, 5], "t", "l2", &links); // t-s1-s2-s-l2
+        // forward-only：无伪冲突（旧代码在此对 dest=es01 反向冲突而失败）。
+        let fwd = build_forwarding_tables(
             &[(0, flow_a), (1, flow_b)],
             &links,
             &port_eth,
             &ned,
             &sw_set(&nodes),
         )
-        .unwrap_err();
-        assert_eq!(err.code, "FORWARDING_CONFLICT", "{}", err.message_zh);
-        // 冲突在汇合交换机 s（=sw03，命名顺序 s1,s2,s）对目的 talker（es01）。
-        assert!(
-            err.message_zh.contains("es01%eth0"),
-            "反向键锚 talker：{}",
-            err.message_zh
+        .unwrap();
+        // t=es01, l1=es02, l2=es03；s1=sw01, s2=sw02, s=sw03。
+        // sw01：去 l1(es02) 经 eth1、去 l2(es03) 经 eth2（不同 dest 共存）。
+        assert_eq!(
+            fwd.get("sw01").unwrap(),
+            &vec![("es02%eth0".to_string(), 1), ("es03%eth0".to_string(), 2)]
+        );
+        // sw02：只 flow B 经过，去 l2(es03) 经 eth1。
+        assert_eq!(
+            fwd.get("sw02").unwrap(),
+            &vec![("es03%eth0".to_string(), 1)]
+        );
+        // 汇合交换机 sw03：去 l1(es02) 经 eth1、去 l2(es03) 经 eth3——两不同 listener 各一条，
+        // 不再对 dest=talker 伪冲突（fix 核心）。
+        assert_eq!(
+            fwd.get("sw03").unwrap(),
+            &vec![("es02%eth0".to_string(), 1), ("es03%eth0".to_string(), 3)]
         );
     }
 
