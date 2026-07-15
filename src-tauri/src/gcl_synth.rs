@@ -297,14 +297,27 @@ pub(crate) fn match_flows_to_st_windows(
             }
             continue;
         };
+        // 真机形态（2026-07-15 首跑实证）：synth dump 只给**交换机**排门，talker/ES 出口
+        // 无 transmissionGate 行 → ST 窗集合里没有 ES 端口。前缀无窗跳跳过，锚定钉在
+        // 路径上**首个有窗的跳**，锚定时刻累加被跳过跳的串行化时长（传播/处理忽略，
+        // 与 KTD5 锚定口径一致；重叠判据对 ns 级误差有天然容差）。
+        let Some(first_active) = s
+            .egress
+            .iter()
+            .position(|(n, e)| st_open.get(&(n.clone(), *e)).is_some_and(|v| !v.is_empty()))
+        else {
+            // 全路径无任何 ST 窗：无可挂靠（不臆造引用）。
+            continue;
+        };
+        let prefix_tx = first_active as u64 * s.tx_ns;
         let mut hits: std::collections::BTreeSet<(usize, usize)> = Default::default();
         let mut degraded = false;
         let instances = (cycle_ns / s.period_ns).max(1);
         'instances: for k in 0..instances {
-            let t0 = (offset + k * s.period_ns) % cycle_ns;
+            let t0 = (offset + k * s.period_ns + prefix_tx) % cycle_ns;
             let t1 = t0 + s.tx_ns;
-            // ① 首跳：发送时段与 ST 窗有重叠即命中。
-            let first = &s.egress[0];
+            // ① 首个有窗跳：到达时段与 ST 窗有重叠即命中。
+            let first = &s.egress[first_active];
             let ivs0 = st_open
                 .get(&(first.0.clone(), first.1))
                 .map(Vec::as_slice)
@@ -316,10 +329,10 @@ pub(crate) fn match_flows_to_st_windows(
                 degraded = true;
                 break 'instances;
             };
-            hits.insert((0, h0));
+            hits.insert((first_active, h0));
             let mut prev_start = ivs0[h0].0;
             // ② 下游跳：窗长指纹 + 时序晚于上一跳命中窗，取最早候选。
-            for (hop, (node, eth)) in s.egress.iter().enumerate().skip(1) {
+            for (hop, (node, eth)) in s.egress.iter().enumerate().skip(first_active + 1) {
                 let ivs = st_open
                     .get(&(node.clone(), *eth))
                     .map(Vec::as_slice)
@@ -671,5 +684,52 @@ par TsnAgentFlowTasNetwork.sw01.eth[1].macLayer.queue.transmissionGate[1] durati
                 "{node} eth{eth} 窗 {idx}"
             );
         }
+    }
+
+    /// 真机形态锁（2026-07-15 全灰甘特 bug）：synth dump 只有交换机门、talker/ES 出口
+    /// 无窗——匹配须跳过前缀无窗跳、锚定首个有窗跳（时刻累加被跳过跳的串行化），
+    /// 而不是首跳零命中整链丢引用。
+    #[test]
+    fn match_skips_windowless_talker_hop_real_dump_shape() {
+        let tx = 4560u64;
+        let streams = vec![FlowMatchStream {
+            stream_seq: 0,
+            period_ns: 500_000,
+            tx_ns: tx,
+            offset_ns: Some(10_000),
+            // 两跳：ES 出口（synth dump 无门）→ SW 出口（有窗）。
+            egress: vec![("es".into(), 0), ("sw".into(), 1)],
+        }];
+        let mut st_open: BTreeMap<(String, usize), Vec<(u64, u64)>> = BTreeMap::new();
+        // SW 窗与「到达时刻 = offset + 1×tx」零余量对齐（Z3 形态），两实例。
+        st_open.insert(
+            ("sw".into(), 1),
+            vec![
+                (10_000 + tx, 10_000 + 2 * tx),
+                (510_000 + tx, 510_000 + 2 * tx),
+            ],
+        );
+        let out = match_flows_to_st_windows(&streams, &st_open, 1_000_000);
+        // 两实例窗口均命中 derived；ES 端口不产生引用。
+        let sw0 = out.get(&("sw".into(), 1, 0)).expect("实例1 窗有引用");
+        assert_eq!(sw0[0].source, "derived");
+        let sw1 = out.get(&("sw".into(), 1, 1)).expect("实例2 窗有引用");
+        assert_eq!(sw1[0].source, "derived");
+        assert!(!out.keys().any(|(n, _, _)| n == "es"), "无窗端口不挂引用");
+    }
+
+    /// 全路径无任何 ST 窗：不臆造引用（保持无引用而非 panic/降级噪音）。
+    #[test]
+    fn match_no_windows_anywhere_yields_no_refs() {
+        let streams = vec![FlowMatchStream {
+            stream_seq: 0,
+            period_ns: 500_000,
+            tx_ns: 4560,
+            offset_ns: Some(0),
+            egress: vec![("es".into(), 0)],
+        }];
+        let st_open: BTreeMap<(String, usize), Vec<(u64, u64)>> = BTreeMap::new();
+        let out = match_flows_to_st_windows(&streams, &st_open, 1_000_000);
+        assert!(out.is_empty());
     }
 }
