@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TSN 门控规划结果数据格式 v1（castup 求解器对接规范）</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 880px; margin: 0 auto; padding: 32px 24px 64px; color: #1f2933; line-height: 1.75; }
+  h1 { font-size: 1.6em; border-bottom: 2px solid #2563eb; padding-bottom: 10px; }
+  h2 { font-size: 1.25em; margin-top: 2em; border-left: 4px solid #2563eb; padding-left: 10px; }
+  table { border-collapse: collapse; width: 100%; margin: 14px 0; font-size: 0.93em; }
+  th, td { border: 1px solid #d3dce6; padding: 7px 10px; text-align: left; vertical-align: top; }
+  th { background: #f0f4f8; }
+  code { background: #f0f4f8; padding: 1px 5px; border-radius: 3px; font-family: "SF Mono", Consolas, monospace; font-size: 0.9em; }
+  pre { background: #1e293b; color: #e2e8f0; padding: 14px 16px; border-radius: 6px; overflow-x: auto; font-size: 0.88em; line-height: 1.5; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .meta { background: #f0f4f8; border-radius: 6px; padding: 12px 18px; font-size: 0.92em; }
+  .meta li { margin: 2px 0; }
+  strong { color: #0f172a; }
+  ol li, ul li { margin: 4px 0; }
+  table { display: block; overflow-x: auto; }
+  @media (prefers-color-scheme: dark) {
+    body { background: #0f172a; color: #cbd5e1; }
+    h1 { border-bottom-color: #3b82f6; }
+    h2 { border-left-color: #3b82f6; }
+    th { background: #1e293b; }
+    th, td { border-color: #334155; }
+    code { background: #1e293b; color: #e2e8f0; }
+    .meta { background: #1e293b; }
+    strong { color: #f1f5f9; }
+    h1 small { color: #94a3b8 !important; }
+  }
+</style>
+</head>
+<body>
+
+<h1>TSN 门控规划结果数据格式 v1<br><small style="font-size:0.6em;color:#52606d;">castup 求解器对接规范</small></h1>
+
+<div class="meta"><ul>
+<li><strong>交付方</strong>：HIBridge Agent 项目组</li>
+<li><strong>版本</strong>：v1（2026-07-15）</li>
+<li><strong>演进约定</strong>：<strong>向后兼容新增</strong>——v1 之后只加不改不删（新增列、新增 JSON 键）；破坏性变更升 v2 并另立文档</li>
+<li><strong>适用范围</strong>：castup 调度规划求解器与 HIBridge Agent 的门控结果对接。castup 按本格式返回规划结果，由 HIBridge Agent 侧 adapter 写入本地存储（以 provider 字段区分来源，与内置求解器结果共存）</li>
+</ul></div>
+
+<h2>1. 总则</h2>
+<ul>
+<li><strong>单位</strong>：一切时间量为 <strong>ns 整数</strong>；展示层才格式化为 μs。castup 返回若内部使用其它单位，须在返回体中自行换算为 ns。</li>
+<li><strong>provider</strong>：每份结果带 provider 字符串标识产出方。HIBridge Agent 内置求解器恒为 <code>inet-z3</code>；castup 侧建议 <code>castup-&lt;algorithm&gt;</code> 形式。同一工程不同 provider 的结果共存、互不覆盖。</li>
+<li><strong>门控周期（超周期）</strong>：单周期制，全部窗口在 <code>[0, cycle_ns)</code> 内表达。</li>
+</ul>
+
+<h2>2. 规划结果主体（每（工程, provider）一份）</h2>
+<p>一份完整规划结果 = 若干 meta 字段 + 一个逐窗数组。castup 返回填<strong>单份</strong>：</p>
+<table>
+<tr><th>字段</th><th>类型</th><th>语义</th></tr>
+<tr><td>session_id</td><td>string</td><td>工程 id</td></tr>
+<tr><td>provider</td><td>string</td><td>求解器标识（与 session_id 共同构成唯一键）</td></tr>
+<tr><td>status</td><td>string</td><td><code>ok</code>（有效规划）/ <code>no_gating</code>（流集为纯 BE/RC 无需门控，windows_json 为 <code>[]</code>）。失败态不产出结果（接收方保留上一次有效规划）</td></tr>
+<tr><td>cycle_ns</td><td>integer</td><td>门控周期（超周期），ns</td></tr>
+<tr><td>algorithm</td><td>string</td><td>算法标识（castup 填自己的 algorithm 名，如 <code>castup-smt</code>）</td></tr>
+<tr><td>created_at</td><td>string</td><td>生成时间</td></tr>
+<tr><td>windows_json</td><td>JSON 数组</td><td>逐窗数组（第 3 节）</td></tr>
+</table>
+
+<h2>3. windows_json：逐窗数组</h2>
+<p>每个「窗口」= 某端口八个队列门状态保持不变的一个连续时间段。数组元素（camelCase 键）：</p>
+<table>
+<tr><th>键</th><th>类型</th><th>语义</th></tr>
+<tr><td>node</td><td>string</td><td>节点 mid（HIBridge Agent 拓扑中的节点标识）</td></tr>
+<tr><td>ethN</td><td>number</td><td>端口号（ethN，界面展示为 G{n}）</td></tr>
+<tr><td>entryIdx</td><td>number</td><td>窗口序号（同端口内 0 起，按 startNs 升序）</td></tr>
+<tr><td>startNs</td><td>number</td><td>窗口起点（ns，相对周期 0 点）</td></tr>
+<tr><td>durationNs</td><td>number</td><td>窗口时长（ns）；<strong>同端口全部窗口须首尾相接且总和 = cycle_ns</strong></td></tr>
+<tr><td>gateStates</td><td>number</td><td><strong>q0–q7 位图</strong>（0–255）：bit g = 1 表示 gate g 开。固定 8 位；节点实际队列数 &lt; 8 时，超出实际队列数的位按<strong>恒开（1）</strong>编码</td></tr>
+<tr><td>flowRefs</td><td>string | null</td><td>JSON 数组<strong>串</strong> <code>[{"seq": &lt;流序号&gt;, "source": "solver"}]</code>，该窗口放行的流；无关联流（空窗）为 null</td></tr>
+</table>
+<p><code>flowRefs.source</code> 取值语义：<code>solver</code> = 求解器直接给出（<strong>castup 用这个</strong>）；<code>derived</code> / <code>class</code> 为 HIBridge Agent 内置链路的回算/降级标记，castup 无需使用。</p>
+<p>示例：</p>
+<pre><code>[
+  { "node": "0", "ethN": 1, "entryIdx": 0, "startNs": 0, "durationNs": 4560,
+    "gateStates": 128, "flowRefs": "[{\"seq\":0,\"source\":\"solver\"}]" },
+  { "node": "0", "ethN": 1, "entryIdx": 1, "startNs": 4560, "durationNs": 995440,
+    "gateStates": 127, "flowRefs": null }
+]</code></pre>
+
+<h2>4. 原始输出存档（raw）</h2>
+<p>求解器原始输出会作为纯文本文件存档一份（覆盖式，仅保留最新）：<strong>castup 建议直接存原始响应 JSON 文本</strong>。用途是解析可重放的保险——展示字段变更时不必重跑求解。该存档不随工程导出。</p>
+
+<h2>5. 流路径约束（输入侧，castup 求解时必须消费）</h2>
+<p>流表的 <code>paths</code> 字段是路径凭证，JSON 形状为<strong>裸数组</strong>：</p>
+<pre><code>[ { "node_path": ["4", "0", "2", "6"], "link_seqs": [0, 8, 14] } ]</code></pre>
+<ul>
+<li><strong>语义</strong>：有效凭证即<strong>必须按此路径排程</strong>——用户指定的绕路在拓扑不变时稳定沿用，求解器不可改 route。</li>
+<li><strong>条数</strong>：ST / BE 流恒 1 条；RC 流恒 2 条（<code>[0]</code> = A 平面、<code>[1]</code> = B 平面，802.1CB FRER 不相交双路径）。</li>
+<li><strong><code>null</code> / 缺失</strong>：该流未沉淀凭证（历史存量），求解器可按唯一最短路处理（等长多路径在录入期已被拒绝或已由用户消歧）。</li>
+<li><code>node_path</code> 为节点 mid 序列（含首尾端系统）；<code>link_seqs</code> 为拓扑链路序号序列。</li>
+</ul>
+
+<h2>6. castup 返回的最小要求（checklist）</h2>
+<ol>
+<li>每端口完整窗口序列（首尾相接、总和 = cycle_ns）+ 八位门状态位图 + 逐窗放行流列表（source=<code>solver</code>）——填进 <code>windows_json</code></li>
+<li>规划级 meta：status / cycle_ns / algorithm</li>
+<li>全部时间量为 ns 整数</li>
+<li>有效路径凭证与 RC 双路径必须遵守，不可改 route</li>
+</ol>
+
+</body>
+</html>
