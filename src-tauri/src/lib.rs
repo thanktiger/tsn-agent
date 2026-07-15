@@ -10,6 +10,7 @@ mod flow_sidecar_routes;
 mod flow_verify;
 mod flow_verify_command;
 mod flow_verify_types;
+mod flow_verify_verdict;
 mod gcl_raw_store;
 mod gcl_synth;
 mod hardware_api;
