@@ -2,10 +2,11 @@
 //! GCL 空：有 ST 流 → `no_plan` 硬拦；无 ST 流 → 放行门全恒开跑（R5/KTD4）。
 //! pin 只认 ST-pcp（gate 7）门条目，存量旧全类条目忽略（G2.4 防互补关窗双写同门）。
 //!
-//! 镜像 `run_timesync_sim_inner`（KTD1 可测内核 + 注入 `RemoteRunner`）：读 `flow_plans` 的 pin
-//! GCL → 喂 U6 pin 模式 bundle（写死 transmissionGate、禁配置器）→ 现有 `run_sim_fetch_csv`
-//! **零改**（KTD1）跑 + 取 per-packet 向量 CSV → flow `classify`。诚实边界（KTD7）：空/短结果
-//! 绝不渲染绿（R16）。**pin 校验的是 plan 落库那张 GCL**——不 pin 则 verify 可能得另一组合法解。
+//! 镜像 `run_timesync_sim_inner`（KTD1 可测内核 + 注入 `RemoteRunner`）：重放 `gcl_raw_archive`
+//! 的 par 行（KTD4，同一解析器两次跑同一输入）得 pin GCL → 喂 U6 pin 模式 bundle（写死
+//! transmissionGate、禁配置器）→ 现有 `run_sim_fetch_csv` **零改**（KTD1）跑 + 取 per-packet
+//! 向量 CSV → flow `classify`。诚实边界（KTD7）：空/短结果绝不渲染绿（R16）。
+//! **pin 校验的是 plan 存档那份求解结果**——不 pin 则 verify 可能得另一组合法解。
 //!
 //! 向量名（U1 spike 钉死）：时延 `packetLifeTime:vector`、抖动 `packetJitter:vector`（均落
 //! `.vec`、现 scavetool 路径可取）。**丢包判据（U10 收口 plan Open Question）**：INET
@@ -28,7 +29,6 @@
 //! `parse_timechanged_csv` 生成 gPTP 收敛诊断（只报告不参与任何 verdict）。
 
 use serde::Serialize;
-use sqlx::Row;
 use std::collections::{BTreeMap, HashSet};
 
 use crate::inet_remote::{RemoteError, RemoteRunner, SimRunOutcome};
@@ -155,32 +155,33 @@ impl VerifyTasResult {
     }
 }
 
-/// 读 pin 的 GCL（flow_plans，KTD2b 共用 GclEntry）。
+/// 读 pin 的 GCL：重放 raw_archive par 行（KTD4）——同一解析器
+/// （`flow_plan_command::parse_gcl_from_sca`）两次跑同一输入，输出 GclEntry 直接进现管线。
+/// 空 durations 恒态门被解析器滤掉（不进 pin，补集关窗由 complement_gcl 生成，G2.4 语义保持）。
+/// 无存档行 / 重放为空 → 空 vec（调用方按 has_st 判 no_plan）。solver 取 gcl_plan_meta 的
+/// algorithm（缺行回退 Z3——只用于区分补集门标识，非 COMPLEMENT_SOLVER 即可）。
 async fn load_gcl(
     pool: &sqlx::Pool<sqlx::Sqlite>,
     session_id: &str,
+    ned_to_mid: &BTreeMap<String, String>,
 ) -> Result<Vec<GclEntry>, String> {
-    let rows = sqlx::query(
-        "SELECT node, eth_n, gate_index, initially_open, offset_ns, durations_ns, solver \
-         FROM flow_plans WHERE session_id = ? ORDER BY node, eth_n, gate_index",
+    let row: Option<(String, Option<String>)> = sqlx::query_as(
+        "SELECT a.par_lines, m.algorithm FROM gcl_raw_archive a \
+         LEFT JOIN gcl_plan_meta m ON m.session_id = a.session_id AND m.provider = a.provider \
+         WHERE a.session_id = ? AND a.provider = ?",
     )
     .bind(session_id)
-    .fetch_all(pool)
+    .bind(crate::flow_plan_command::GCL_PROVIDER)
+    .fetch_optional(pool)
     .await
-    .map_err(|e| format!("读 flow_plans 失败：{e}"))?;
-    Ok(rows
-        .iter()
-        .map(|r| GclEntry {
-            node: r.get("node"),
-            eth_n: r.get::<i64, _>("eth_n") as usize,
-            gate_index: r.get::<i64, _>("gate_index") as usize,
-            initially_open: r.get::<i64, _>("initially_open") != 0,
-            offset_ns: r.get::<i64, _>("offset_ns") as u64,
-            durations_ns: serde_json::from_str(&r.get::<String, _>("durations_ns"))
-                .unwrap_or_default(),
-            solver: r.get("solver"),
-        })
-        .collect())
+    .map_err(|e| format!("读 gcl_raw_archive 失败：{e}"))?;
+    let Some((par_lines, algorithm)) = row else {
+        return Ok(vec![]);
+    };
+    let solver = algorithm.unwrap_or_else(|| "Z3".to_string());
+    Ok(crate::flow_plan_command::parse_gcl_from_sca(
+        &par_lines, ned_to_mid, &solver,
+    ))
 }
 
 /// CSV-R 一行向量（module + name + 数值样本）。
@@ -618,12 +619,19 @@ pub async fn verify_tas_inner<R: RemoteRunner>(
         }
     }
 
+    let (nodes, links) = load_topology(pool, session_id).await?;
+
     // R5/KTD4：GCL 空只在存在 ST 流时硬拦（ST 要求先规划）；无 ST 流放行——门全恒开跑。
-    // 无 ST 流时存量 flow_plans（删光 ST 后的残留 GCL）一律不消费：pin 零门条目、
-    // 补集不生成，与「门全恒开」口径一致。
+    // 无 ST 流时存量 raw_archive（删光 ST 后的残留存档）一律不消费：pin 零门条目、
+    // 补集不生成，与「门全恒开」口径一致。ned↔mid 映射与 bundle 构建同源
+    // （`node_ned_names` 命名单一源），重放解析按它把 sca 的 ned 名折回 mid。
     let has_st = db_streams.iter().any(|s| s.class == "ST");
     let gcl = if has_st {
-        load_gcl(pool, session_id).await?
+        let ned_to_mid: BTreeMap<String, String> = crate::inet_sim_bundle::node_ned_names(&nodes)
+            .into_iter()
+            .map(|(mid, ned)| (ned, mid))
+            .collect();
+        load_gcl(pool, session_id, &ned_to_mid).await?
     } else {
         vec![]
     };
@@ -634,14 +642,12 @@ pub async fn verify_tas_inner<R: RemoteRunner>(
             None,
         ));
     }
-    // G2.4/KTD4：pin 只认 ST-pcp 门条目——存量 flow_plans 里旧全类条目（gate0/gate6 等）
+    // G2.4/KTD4：pin 只认 ST-pcp 门条目——重放结果里的非 ST 门（gate0/gate6 等被调度门）
     // 忽略，防与后续互补关窗双写同门。ST pcp 单一源：flow_verify::ST_PCP。
     let gcl: Vec<GclEntry> = gcl
         .into_iter()
         .filter(|g| g.gate_index == crate::flow_verify::ST_PCP as usize)
         .collect();
-
-    let (nodes, links) = load_topology(pool, session_id).await?;
 
     // 路径推导（KTD6）：预存 paths 仅凭证——RC 一律重跑 derive_redundant_routes + 不相交断言
     // （拓扑在录流后被改动时以重推导为准；断言失败响亮报错不装配）。ST/BE 双平面锁平面 A、
@@ -1136,9 +1142,31 @@ mod tests {
         }
         sqlx::query("INSERT INTO flow_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener, max_latency_us) VALUES ('s1', 0, 'ST', 7, 500, 512, 3, '1', '2', 400)")
             .execute(pool).await.unwrap();
-        // pin GCL 一条（sw1=mid0, eth1, gate7=ST 门）。
-        sqlx::query("INSERT INTO flow_plans (session_id, stream_seq, node, eth_n, gate_index, initially_open, offset_ns, durations_ns, solver) VALUES ('s1', 0, '0', 1, 7, 1, 0, '[300000,700000]', 'Z3')")
-            .execute(pool).await.unwrap();
+        // pin GCL 一条（sw1=mid0, eth1, gate7=ST 门）——重放事实源是 raw_archive par 行（KTD4）。
+        seed_gcl_archive(pool, &gate_par_lines("sw1", 1, 7, "[300us, 700us]")).await;
+    }
+
+    /// 拼一条门的 par 行三件套（initiallyOpen true / offset 0s / durations），
+    /// 与真机 param-recording `.sca` 同形——verify pin 重放（KTD4）的测试事实源。
+    fn gate_par_lines(ned: &str, eth: usize, gate: usize, durations: &str) -> String {
+        let m = format!("N.{ned}.eth[{eth}].macLayer.queue.transmissionGate[{gate}]");
+        format!(
+            "par {m} initiallyOpen true\npar {m} offset 0s\npar {m} durations \"{durations}\"\n"
+        )
+    }
+
+    /// 写/追加 raw_archive par 行（模拟 plan 落库的存档；重复调用追加行，供多门夹具）。
+    async fn seed_gcl_archive(pool: &sqlx::Pool<sqlx::Sqlite>, par_lines: &str) {
+        sqlx::query(
+            "INSERT INTO gcl_raw_archive (session_id, provider, par_lines, created_at) \
+             VALUES ('s1', ?, ?, 'now') \
+             ON CONFLICT(session_id, provider) DO UPDATE SET par_lines = par_lines || excluded.par_lines",
+        )
+        .bind(crate::flow_plan_command::GCL_PROVIDER)
+        .bind(par_lines)
+        .execute(pool)
+        .await
+        .unwrap();
     }
 
     fn header() -> String {
@@ -1267,12 +1295,12 @@ mod tests {
         });
     }
 
-    /// 未规划（flow_plans 空）且存在 ST 流 → no_plan（U3④：ST 才要求 GCL）。
+    /// 未规划（raw_archive 无行）且存在 ST 流 → no_plan（U3④：ST 才要求 GCL）。
     #[test]
     fn verify_without_plan_is_no_plan() {
         tauri::async_runtime::block_on(async {
             let pool = fresh_pool().await;
-            // 只 seed 拓扑 + 流，不写 flow_plans。
+            // 只 seed 拓扑 + 流，不写 raw_archive。
             for (mid, ty, ord) in [
                 ("0", "switch", 0),
                 ("1", "endSystem", 1),
@@ -1296,19 +1324,74 @@ mod tests {
         });
     }
 
-    /// Covers AE5（U3③，R5/R13 前半）：纯 BE 流集、flow_plans 空 → 不再 no_plan，
+    /// KTD4 pin 重放等价：raw_archive 里混杂 门参数行 + 空 durations 恒态门行 +
+    /// initialProductionOffset 行 → load_gcl 输出与直接 parse 同文本逐字段相等；
+    /// 空 durations 门被滤掉（恒态门不进 pin）；solver 取 meta.algorithm。
+    #[test]
+    fn load_gcl_replays_archive_par_lines_equivalently() {
+        tauri::async_runtime::block_on(async {
+            let pool = fresh_pool().await;
+            let mut par = gate_par_lines("sw1", 1, 7, "[300us, 700us]");
+            par.push_str(&gate_par_lines("sw1", 1, 0, "[]")); // 恒态门（空 durations）。
+            par.push_str("par N.es1.app[0].source initialProductionOffset 4.2e-05\n");
+            seed_gcl_archive(&pool, &par).await;
+            sqlx::query("INSERT INTO gcl_plan_meta (session_id, provider, status, cycle_ns, algorithm, stale, created_at) VALUES ('s1', ?, 'ok', 1000000, 'Eager', 0, 'now')")
+                .bind(crate::flow_plan_command::GCL_PROVIDER)
+                .execute(&pool).await.unwrap();
+
+            let mut ned_to_mid = BTreeMap::new();
+            ned_to_mid.insert("sw1".to_string(), "0".to_string());
+            let got = load_gcl(&pool, "s1", &ned_to_mid).await.unwrap();
+            let expected = crate::flow_plan_command::parse_gcl_from_sca(&par, &ned_to_mid, "Eager");
+            assert_eq!(got, expected, "重放=同一解析器两次跑同一输入");
+            assert_eq!(got.len(), 1, "空 durations 恒态门不进 pin：{got:?}");
+            assert_eq!(got[0].node, "0", "ned→mid 折回");
+            assert_eq!(got[0].gate_index, 7);
+            assert_eq!(got[0].durations_ns, vec![300_000, 700_000]);
+            assert_eq!(got[0].solver, "Eager", "solver 取 meta.algorithm");
+        });
+    }
+
+    /// raw_archive 有行但重放为空（只有偏移行/恒态门行）且有 ST 流 → no_plan（口径与
+    /// 无存档行一致）。
+    #[test]
+    fn verify_no_plan_when_archive_replay_is_empty() {
+        tauri::async_runtime::block_on(async {
+            let pool = fresh_pool().await;
+            seed(&pool).await;
+            sqlx::query("DELETE FROM gcl_raw_archive WHERE session_id='s1'")
+                .execute(&pool)
+                .await
+                .unwrap();
+            let mut par = gate_par_lines("sw1", 1, 0, "[]"); // 仅恒态门（重放滤空）。
+            par.push_str("par N.es1.app[0].source initialProductionOffset 4.2e-05\n");
+            seed_gcl_archive(&pool, &par).await;
+            let r = verify_tas_inner(
+                &pool,
+                "s1",
+                &MockRunner {
+                    outcome: outcome(None),
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(r.status, "no_plan", "{r:?}");
+        });
+    }
+
+    /// Covers AE5（U3③，R5/R13 前半）：纯 BE 流集、raw_archive 空 → 不再 no_plan，
     /// 放行跑软仿（门全恒开）。
     #[test]
     fn verify_pure_be_without_gcl_runs() {
         tauri::async_runtime::block_on(async {
             let pool = fresh_pool().await;
             seed(&pool).await;
-            // 换成纯 BE 流集 + 清掉 GCL。
+            // 换成纯 BE 流集 + 清掉 GCL 存档。
             sqlx::query("DELETE FROM flow_streams WHERE session_id='s1'")
                 .execute(&pool)
                 .await
                 .unwrap();
-            sqlx::query("DELETE FROM flow_plans WHERE session_id='s1'")
+            sqlx::query("DELETE FROM gcl_raw_archive WHERE session_id='s1'")
                 .execute(&pool)
                 .await
                 .unwrap();
@@ -1332,14 +1415,14 @@ mod tests {
         });
     }
 
-    /// 删光 ST 后存量 GCL 不消费：seed 的 gate7 flow_plans 残留 + 纯 BE 流集 → 提交的
+    /// 删光 ST 后存量 GCL 不消费：seed 的 gate7 raw_archive 残留 + 纯 BE 流集 → 提交的
     /// pin ini 无任何 transmissionGate 行（零门条目、补集不接管存量），验证正常跑。
     #[test]
     fn stale_gcl_ignored_when_no_st_streams() {
         tauri::async_runtime::block_on(async {
             let pool = fresh_pool().await;
-            seed(&pool).await; // 带 gate7 flow_plans 存量。
-            // 删光 ST，只留 BE（不清 flow_plans——模拟删流后残留）。
+            seed(&pool).await; // 带 gate7 raw_archive 存量。
+            // 删光 ST，只留 BE（不清 raw_archive——模拟删流后残留）。
             sqlx::query("DELETE FROM flow_streams WHERE session_id='s1'")
                 .execute(&pool)
                 .await
@@ -1364,15 +1447,14 @@ mod tests {
         });
     }
 
-    /// Covers G2.4（U3⑤）：存量 flow_plans 混有 gate0（旧全类条目）→ pin 段只出 gate7，
+    /// Covers G2.4（U3⑤）：raw_archive 混有 gate0 被调度门（非 ST 门）→ pin 段只出 gate7，
     /// gate0 的 transmissionGate 行不得出现（互补关窗接管前提）。
     #[test]
     fn verify_pin_filters_non_st_gate_entries() {
         tauri::async_runtime::block_on(async {
             let pool = fresh_pool().await;
-            seed(&pool).await; // 已含 gate7 条目。
-            sqlx::query("INSERT INTO flow_plans (session_id, stream_seq, node, eth_n, gate_index, initially_open, offset_ns, durations_ns, solver) VALUES ('s1', 0, '0', 1, 0, 1, 0, '[500000,500000]', 'Z3')")
-                .execute(&pool).await.unwrap();
+            seed(&pool).await; // 已含 gate7 par 行。
+            seed_gcl_archive(&pool, &gate_par_lines("sw1", 1, 0, "[500us, 500us]")).await;
             let csv = format!(
                 "{}TsnAgentFlowTasNetwork.es2.app[0].sink,packetLifeTime:vector,0 0 0,0.0001 0.00012 0.00011\nTsnAgentFlowTasNetwork.es2.app[0].sink,packetJitter:vector,0 0 0,0.0000002 0.0000003 0.0000001\n",
                 header()
@@ -1591,15 +1673,15 @@ mod tests {
         }
     }
 
-    /// R18/R19 CI 接缝：一条 ST 流 record → plan_tas_inner 写 flow_plans → verify_tas_inner 读回
-    /// pin 判决。证 plan→verify 经 flow_plans 的接缝（durations JSON 往返、node=mid、stream_seq=0）。
+    /// R18/R19 CI 接缝：一条 ST 流 record → plan_tas_inner 写 raw_archive → verify_tas_inner
+    /// 重放读回 pin 判决。证 plan→verify 经 raw_archive 的接缝（par 行重放、node=mid，KTD4）。
     #[test]
     fn e2e_plan_then_verify_pipeline() {
         tauri::async_runtime::block_on(async {
             let pool = fresh_pool().await;
             seed(&pool).await;
-            // 清掉 seed 写的 flow_plans——让 plan_tas 自己综合落库（真接缝）。
-            sqlx::query("DELETE FROM flow_plans WHERE session_id='s1'")
+            // 清掉 seed 写的 raw_archive——让 plan_tas 自己综合落库（真接缝）。
+            sqlx::query("DELETE FROM gcl_raw_archive WHERE session_id='s1'")
                 .execute(&pool)
                 .await
                 .unwrap();
@@ -1615,7 +1697,7 @@ mod tests {
             assert_eq!(pr.status, "ok", "{pr:?}");
             assert_eq!(pr.gate_count, 1);
 
-            // flow_plans 落库（plan 写的）→ verify 读回 pin。
+            // raw_archive 落库（plan 写的）→ verify 重放读回 pin。
             let csv = format!(
                 "{}TsnAgentFlowTasNetwork.es2.app[0].sink,packetLifeTime:vector,0 0 0,0.0001 0.00012 0.00011\nTsnAgentFlowTasNetwork.es2.app[0].sink,packetJitter:vector,0 0 0,0.0000002 0.0000003 0.0000001\n",
                 header()
@@ -1901,8 +1983,7 @@ mod tests {
                 .unwrap();
             sqlx::query("INSERT INTO flow_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener, max_latency_us) VALUES ('s1', 1, 'ST', 7, 1000, 512, 10000, '1', '2', 800)")
                 .execute(&pool).await.unwrap();
-            sqlx::query("INSERT INTO flow_plans (session_id, stream_seq, node, eth_n, gate_index, initially_open, offset_ns, durations_ns, solver) VALUES ('s1', 1, '0', 1, 7, 1, 0, '[300000,700000]', 'Z3')")
-                .execute(&pool).await.unwrap();
+            seed_gcl_archive(&pool, &gate_par_lines("sw1", 1, 7, "[300us, 700us]")).await;
             let runner = ScriptedRunner::new(vec![
                 Ok(outcome(None)),
                 Ok(outcome(None)),
@@ -1933,8 +2014,7 @@ mod tests {
             // 加 ST 流（平面 A：es1→es2）+ 其 GCL（有 ST 无 GCL 会 no_plan 早退）。
             sqlx::query("INSERT INTO flow_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener, max_latency_us) VALUES ('s1', 1, 'ST', 7, 500, 512, 2000, '1', '2', 400)")
                 .execute(&pool).await.unwrap();
-            sqlx::query("INSERT INTO flow_plans (session_id, stream_seq, node, eth_n, gate_index, initially_open, offset_ns, durations_ns, solver) VALUES ('s1', 0, '0', 1, 7, 1, 0, '[300000,700000]', 'Z3')")
-                .execute(&pool).await.unwrap();
+            seed_gcl_archive(&pool, &gate_par_lines("sw1", 1, 7, "[300us, 700us]")).await;
             let runner = ScriptedRunner::new(vec![
                 Ok(outcome(None)),
                 Ok(outcome(None)),
@@ -2275,8 +2355,7 @@ mod tests {
             .execute(pool).await.unwrap();
         sqlx::query("INSERT INTO flow_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener) VALUES ('s1', 2, 'BE', 0, 500, 512, 2000, '1', '2')")
             .execute(pool).await.unwrap();
-        sqlx::query("INSERT INTO flow_plans (session_id, stream_seq, node, eth_n, gate_index, initially_open, offset_ns, durations_ns, solver) VALUES ('s1', 1, '0', 1, 7, 1, 0, '[300000,700000]', 'Z3')")
-            .execute(pool).await.unwrap();
+        seed_gcl_archive(pool, &gate_par_lines("sw1", 1, 7, "[300us, 700us]")).await;
     }
 
     /// 三个 sink（es2.app[0]=RC、app[1]=ST、app[2]=BE）全健康的 CSV；ST sink 抖动可注坏样本。
@@ -2379,7 +2458,7 @@ mod tests {
                 .execute(&pool)
                 .await
                 .unwrap();
-            sqlx::query("DELETE FROM flow_plans WHERE session_id='s1'")
+            sqlx::query("DELETE FROM gcl_raw_archive WHERE session_id='s1'")
                 .execute(&pool)
                 .await
                 .unwrap();
@@ -2437,8 +2516,7 @@ mod tests {
             seed_dual_plane_rc(&pool, RC_PATHS).await;
             sqlx::query("INSERT INTO flow_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener, max_latency_us) VALUES ('s1', 1, 'ST', 7, 500, 512, 2000, '1', '2', 400)")
                 .execute(&pool).await.unwrap();
-            sqlx::query("INSERT INTO flow_plans (session_id, stream_seq, node, eth_n, gate_index, initially_open, offset_ns, durations_ns, solver) VALUES ('s1', 1, '0', 1, 7, 1, 0, '[300000,700000]', 'Z3')")
-                .execute(&pool).await.unwrap();
+            seed_gcl_archive(&pool, &gate_par_lines("sw1", 1, 7, "[300us, 700us]")).await;
             let mut healthy = healthy_csv("TsnAgentFlowTasNetwork.es2.app[0].sink", 2001);
             let st = healthy_csv("TsnAgentFlowTasNetwork.es2.app[1].sink", 2001);
             healthy.push_str(st.strip_prefix(&header()).unwrap());
@@ -2665,15 +2743,16 @@ mod tests {
             }
         }
 
-        async fn flow_plans_count(pool: &sqlx::Pool<sqlx::Sqlite>) -> i64 {
-            sqlx::query_scalar("SELECT COUNT(*) FROM flow_plans WHERE session_id='s1'")
+        /// plan 产物落库的验证锚点：raw_archive 行数（verify pin 重放的事实源，KTD4）。
+        async fn gcl_archive_count(pool: &sqlx::Pool<sqlx::Sqlite>) -> i64 {
+            sqlx::query_scalar("SELECT COUNT(*) FROM gcl_raw_archive WHERE session_id='s1'")
                 .fetch_one(pool)
                 .await
                 .unwrap()
         }
 
-        async fn clear_flow_plans(pool: &sqlx::Pool<sqlx::Sqlite>) {
-            sqlx::query("DELETE FROM flow_plans WHERE session_id='s1'")
+        async fn clear_gcl_archive(pool: &sqlx::Pool<sqlx::Sqlite>) {
+            sqlx::query("DELETE FROM gcl_raw_archive WHERE session_id='s1'")
                 .execute(pool)
                 .await
                 .unwrap();
@@ -2686,7 +2765,7 @@ mod tests {
             tauri::async_runtime::block_on(async {
                 let pool = fresh_pool().await;
                 seed(&pool).await;
-                clear_flow_plans(&pool).await; // 真管线：GCL 由 plan 落库。
+                clear_gcl_archive(&pool).await; // 真管线：GCL 由 plan 落库。
                 let plan = plan_gate7();
                 let pr = crate::flow_plan_command::plan_tas_inner(&pool, "s1", &plan, "http://x")
                     .await
@@ -2695,7 +2774,7 @@ mod tests {
                 let synth = plan.ini.lock().unwrap().clone().expect("ST 应进 Z3");
                 assert_eq!(synth.matches("UdpSourceApp").count(), 1, "{synth}");
                 assert!(synth.contains("pcp: 7"), "{synth}");
-                assert_eq!(flow_plans_count(&pool).await, 1, "plan 产物=GCL 落库");
+                assert_eq!(gcl_archive_count(&pool).await, 1, "plan 产物=GCL 落库");
 
                 let mut csv = healthy_csv("TsnAgentFlowTasNetwork.es2.app[0].sink", 3);
                 csv.push_str(clock_csv_rows_gm_es1());
@@ -2731,7 +2810,7 @@ mod tests {
                 seed(&pool).await;
                 sqlx::query("INSERT INTO flow_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener) VALUES ('s1', 1, 'BE', 0, 500, 512, 3, '1', '2')")
                     .execute(&pool).await.unwrap();
-                clear_flow_plans(&pool).await;
+                clear_gcl_archive(&pool).await;
                 let plan = plan_gate7();
                 let pr = crate::flow_plan_command::plan_tas_inner(&pool, "s1", &plan, "http://x")
                     .await
@@ -2744,7 +2823,7 @@ mod tests {
                     "只有 ST 进 Z3：{synth}"
                 );
                 assert!(!synth.contains("pcp: 0"), "BE 不得进 synth bundle：{synth}");
-                assert_eq!(flow_plans_count(&pool).await, 1);
+                assert_eq!(gcl_archive_count(&pool).await, 1);
 
                 // ST=app[0]、BE=app[1]（specs 按 stream_seq 序）。
                 let mut csv = healthy_csv("TsnAgentFlowTasNetwork.es2.app[0].sink", 3);
@@ -2787,7 +2866,7 @@ mod tests {
                     "只有 ST 进 Z3：{synth}"
                 );
                 assert!(!synth.contains("pcp: 6"), "RC 不得进 synth bundle：{synth}");
-                assert_eq!(flow_plans_count(&pool).await, 1);
+                assert_eq!(gcl_archive_count(&pool).await, 1);
 
                 // RC=app[0]、ST=app[1]。
                 let mut csv = healthy_csv("TsnAgentFlowTasNetwork.es2.app[0].sink", 2001);
@@ -2830,7 +2909,7 @@ mod tests {
             tauri::async_runtime::block_on(async {
                 let pool = fresh_pool().await;
                 seed_mixed_three_classes(&pool).await; // RC0+ST1+BE2 + 手工 GCL。
-                clear_flow_plans(&pool).await; // 真管线：GCL 由 plan 落库。
+                clear_gcl_archive(&pool).await; // 真管线：GCL 由 plan 落库。
                 let plan = plan_gate7();
                 let pr = crate::flow_plan_command::plan_tas_inner(&pool, "s1", &plan, "http://x")
                     .await
@@ -2844,7 +2923,7 @@ mod tests {
                 );
                 assert!(!synth.contains("pcp: 6"), "{synth}");
                 assert!(!synth.contains("pcp: 0"), "{synth}");
-                assert_eq!(flow_plans_count(&pool).await, 1);
+                assert_eq!(gcl_archive_count(&pool).await, 1);
 
                 let csv = mixed_csv(false);
                 let runner = ScriptedRunner::new(vec![
@@ -2888,16 +2967,15 @@ mod tests {
             tauri::async_runtime::block_on(async {
                 let pool = fresh_pool().await;
                 seed_dual_plane_rc(&pool, RC_PATHS).await;
-                // 存量旧 GCL（上一轮 ST 规划残留）——no_gating 应清掉，verify 不得 pin 它。
-                sqlx::query("INSERT INTO flow_plans (session_id, stream_seq, node, eth_n, gate_index, initially_open, offset_ns, durations_ns, solver) VALUES ('s1', 0, '0', 1, 7, 1, 0, '[300000,700000]', 'Z3')")
-                    .execute(&pool).await.unwrap();
+                // 存量旧 GCL 存档（上一轮 ST 规划残留）——no_gating 应清掉，verify 不得 pin 它。
+                seed_gcl_archive(&pool, &gate_par_lines("sw1", 1, 7, "[300us, 700us]")).await;
                 let plan = plan_gate7();
                 let pr = crate::flow_plan_command::plan_tas_inner(&pool, "s1", &plan, "http://x")
                     .await
                     .unwrap();
                 assert_eq!(pr.status, "no_gating", "{pr:?}");
                 assert!(plan.ini.lock().unwrap().is_none(), "无 ST 不进 Z3");
-                assert_eq!(flow_plans_count(&pool).await, 0, "no_gating 清表");
+                assert_eq!(gcl_archive_count(&pool).await, 0, "no_gating 清表");
 
                 let mut csv = healthy_csv("TsnAgentFlowTasNetwork.es2.app[0].sink", 2001);
                 csv.push_str(clock_csv_rows());
@@ -2955,7 +3033,7 @@ mod tests {
                     .unwrap();
                 assert_eq!(pr.status, "no_gating", "{pr:?}");
                 assert!(plan.ini.lock().unwrap().is_none(), "无 ST 不进 Z3");
-                assert_eq!(flow_plans_count(&pool).await, 0, "no_gating 清掉存量 GCL");
+                assert_eq!(gcl_archive_count(&pool).await, 0, "no_gating 清掉存量 GCL");
 
                 let mut csv = healthy_csv("TsnAgentFlowTasNetwork.es2.app[0].sink", 3);
                 csv.push_str(clock_csv_rows_gm_es1());

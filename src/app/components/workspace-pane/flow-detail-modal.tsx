@@ -1,7 +1,11 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
+  type GetFlowPathCandidatesResult,
+  invokeGetFlowPathCandidates,
   invokeUpdateFlowStream,
   type ListFlowStreamRow,
+  parseExplicitPathLinkSeqs,
+  parseRedundantNodePaths,
   type UpdateFlowStreamRequest,
 } from "./flow-sim";
 
@@ -10,6 +14,14 @@ export interface FlowDetailModalProps {
   sessionId: string;
   onClose: () => void;
   onSaved: (didChangePlanningFields: boolean) => void;
+  /** 候选路径读通道（R16 路径下拉；测试可注入替身）。 */
+  getPathCandidates?: (
+    sessionId: string,
+    talker: string,
+    listener: string,
+  ) => Promise<GetFlowPathCandidatesResult>;
+  /** 画布路径预览联动（R16）：下拉选中变化时回调 linkSeqs；null=系统自动/关弹窗清除。 */
+  onPreviewPath?: (linkSeqs: number[] | null) => void;
 }
 
 /** 表单状态（对应可编辑字段，参考规范图三分组）。 */
@@ -70,26 +82,95 @@ function classBadgeColor(cls: string): string {
   }
 }
 
+/** 路径选择值："auto"=系统自动 / "current"=当前显式指定（不在候选中，可能已失效）/
+ * `c{idx}`=候选下标。 */
+type PathSelection = "auto" | "current" | `c${number}`;
+
+/** 候选查询态。 */
+type CandidatesState =
+  | { status: "loading" }
+  | { status: "error" }
+  | { status: "loaded"; result: GetFlowPathCandidatesResult };
+
+/** 路径选项文本：显示名 join "→"，超 40 字符省略（title 给完整文案）。 */
+export function pathOptionLabel(names: string[]): { label: string; full: string } {
+  const full = names.join("→");
+  return { label: full.length > 40 ? `${full.slice(0, 40)}…` : full, full };
+}
+
 /**
  * 流量详情弹窗（U8 → 参考规范图重构）：编辑单流参数，保存后触发 onSaved 回调并关闭。
- * 字段按 数据帧规范 / 流量规范 / 网络需求 三分组；设备级标识默认值由后端推导返回，
+ * 字段按 路径 / 数据帧规范 / 流量规范 / 网络需求 分组；设备级标识默认值由后端推导返回，
  * 保存后落库。stream === null 时不渲染（不出 DOM）。
  * 结构照 timesync-tree-modal 先例：backdrop 用 <button>，内容区用 <section role="dialog">。
  */
-export function FlowDetailModal({ stream, sessionId, onClose, onSaved }: FlowDetailModalProps) {
+export function FlowDetailModal({
+  stream,
+  sessionId,
+  onClose,
+  onSaved,
+  getPathCandidates = invokeGetFlowPathCandidates,
+  onPreviewPath,
+}: FlowDetailModalProps) {
   const [form, setForm] = useState<FormState | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  // stream 变更时重置表单状态；stream 清空时擦除旧表单（避免弹窗再开时闪旧值）。
+  // R16 路径下拉状态：候选查询 + 当前选中 + 打开时的初始选中（diff 判是否带路径变更）。
+  const [candidates, setCandidates] = useState<CandidatesState>({ status: "loading" });
+  const [pathSelection, setPathSelection] = useState<PathSelection>("auto");
+  const initialSelectionRef = useRef<PathSelection>("auto");
+  // onPreviewPath 经 ref 消费，避免回调身份变化触发副作用重跑。
+  const previewRef = useRef(onPreviewPath);
+  previewRef.current = onPreviewPath;
+
+  // stream 变更时重置表单状态；stream 清空时擦除旧表单（避免弹窗再开时闪旧值）+ 清预览。
   useEffect(() => {
     if (stream) {
       setForm(initialFormFromStream(stream));
       setErrorMessage(null);
     } else {
       setForm(null);
+      previewRef.current?.(null);
     }
   }, [stream]);
+
+  // R16：打开弹窗拉候选（仅 ST/BE；RC 只读展示不拉）；载入后按 stream.paths 定位初始选中。
+  const streamSeq = stream?.streamSeq;
+  const streamClass = stream?.class;
+  const talker = stream?.talker;
+  const listener = stream?.listener;
+  const streamPaths = stream?.paths ?? null;
+  useEffect(() => {
+    setCandidates({ status: "loading" });
+    setPathSelection("auto");
+    initialSelectionRef.current = "auto";
+    if (streamSeq === undefined || streamClass === "RC" || !talker || !listener) return;
+    let cancelled = false;
+    getPathCandidates(sessionId, talker, listener)
+      .then((result) => {
+        if (cancelled) return;
+        setCandidates({ status: "loaded", result });
+        const explicit = parseExplicitPathLinkSeqs(streamPaths);
+        let initial: PathSelection = "auto";
+        if (explicit) {
+          const idx = result.candidates.findIndex(
+            (c) =>
+              c.linkSeqs.length === explicit.length &&
+              c.linkSeqs.every((s, i) => s === explicit[i]),
+          );
+          initial = idx >= 0 ? (`c${idx}` as PathSelection) : "current";
+        }
+        setPathSelection(initial);
+        initialSelectionRef.current = initial;
+      })
+      .catch(() => {
+        if (!cancelled) setCandidates({ status: "error" });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [streamSeq, streamClass, talker, listener, streamPaths, sessionId, getPathCandidates]);
 
   // ESC 键关闭弹窗。
   useEffect(() => {
@@ -108,17 +189,25 @@ export function FlowDetailModal({ stream, sessionId, onClose, onSaved }: FlowDet
       ? stream.nodePath.join(" → ")
       : `${stream.talker} → ${stream.listener}`;
 
+  /** 下拉选中变化：更新选中 + 画布预览联动（auto → null；候选 → 其 linkSeqs；
+   * current → 库里显式 linkSeqs）。 */
+  function handlePathSelect(value: PathSelection) {
+    setPathSelection(value);
+    if (value === "auto") {
+      previewRef.current?.(null);
+    } else if (value === "current") {
+      previewRef.current?.(parseExplicitPathLinkSeqs(streamPaths));
+    } else if (candidates.status === "loaded") {
+      const idx = Number(value.slice(1));
+      previewRef.current?.(candidates.result.candidates[idx]?.linkSeqs ?? null);
+    }
+  }
+
   async function handleSave() {
     if (!stream || !form) return;
     setIsSaving(true);
     setErrorMessage(null);
     try {
-      const didChangePlanningFields =
-        form.periodUs !== stream.periodUs ||
-        form.frameBytes !== stream.frameBytes ||
-        form.count !== stream.count ||
-        form.maxLatencyUs !== stream.maxLatencyUs;
-
       const request: UpdateFlowStreamRequest = {
         sessionId,
         streamSeq: stream.streamSeq,
@@ -140,8 +229,22 @@ export function FlowDetailModal({ stream, sessionId, onClose, onSaved }: FlowDet
         l4Protocol: form.l4Protocol || null,
       };
 
-      await invokeUpdateFlowStream(request);
-      onSaved(didChangePlanningFields);
+      // R16 路径三态：选中≠打开时初值才带变更——候选 → pathLinkSeqs；
+      // 改回系统自动且原来有显式 → clearPath；未动不带。
+      const sel = pathSelection;
+      if (sel !== initialSelectionRef.current) {
+        if (sel === "auto") {
+          request.clearPath = true;
+        } else if (sel.startsWith("c") && candidates.status === "loaded") {
+          const linkSeqs = candidates.result.candidates[Number(sel.slice(1))]?.linkSeqs;
+          if (linkSeqs) request.pathLinkSeqs = linkSeqs;
+        }
+      }
+
+      // didChange 吃服务端判定（KTD14：与置 stale 同源，前端不再自行 diff）。
+      const result = await invokeUpdateFlowStream(request);
+      previewRef.current?.(null);
+      onSaved(result.planningFieldsChanged);
       onClose();
     } catch (e) {
       setErrorMessage(String(e));
@@ -187,6 +290,47 @@ export function FlowDetailModal({ stream, sessionId, onClose, onSaved }: FlowDet
 
         {/* 节点路径 chip */}
         <div className="flow-detail-path mono">{nodePathText}</div>
+
+        {/* R16 路径区：ST/BE 候选下拉（默认系统自动）；RC 只读展示双冗余路径。 */}
+        <h4 className="flow-detail-section-title">路径</h4>
+        {stream.class === "RC" ? (
+          <RcPathReadonly paths={stream.paths} />
+        ) : (
+          <div className="flow-detail-grid">
+            <label>
+              指定路径
+              <select
+                value={pathSelection}
+                onChange={(e) => handlePathSelect(e.target.value as PathSelection)}
+                disabled={isSaving || candidates.status === "loading"}
+              >
+                <option value="auto">系统自动（最短路）</option>
+                {pathSelection === "current" && (
+                  <option value="current" title="当前库内显式指定，不在候选列表中">
+                    当前指定路径（可能已失效）
+                  </option>
+                )}
+                {candidates.status === "loaded" &&
+                  candidates.result.candidates.map((c, idx) => {
+                    const { label, full } = pathOptionLabel(c.nodePathNames);
+                    return (
+                      <option key={c.linkSeqs.join("-")} value={`c${idx}`} title={full}>
+                        {label}
+                      </option>
+                    );
+                  })}
+                {candidates.status === "loaded" && candidates.result.truncated && (
+                  <option disabled value="__truncated">
+                    还有未列出路径
+                  </option>
+                )}
+              </select>
+            </label>
+            {candidates.status === "error" && (
+              <p className="flow-detail-modal-hint">候选路径加载失败，仍可按系统自动保存。</p>
+            )}
+          </div>
+        )}
 
         <div className="flow-detail-grid">
           <label>
@@ -406,6 +550,18 @@ export function FlowDetailModal({ stream, sessionId, onClose, onSaved }: FlowDet
           </button>
         </div>
       </section>
+    </div>
+  );
+}
+
+/** RC 路径只读区（R16）：展示 A/B 双冗余路径文本 + 不可手选说明。 */
+function RcPathReadonly({ paths }: { paths: string | null }) {
+  const routes = parseRedundantNodePaths(paths);
+  return (
+    <div className="flow-detail-rc-paths">
+      <div className="mono">路径A：{routes ? routes[0].join("→") : "—"}</div>
+      <div className="mono">路径B：{routes ? routes[1].join("→") : "—"}</div>
+      <p className="flow-detail-modal-hint">FRER 双路径由算法保证不相交，不可手选。</p>
     </div>
   );
 }

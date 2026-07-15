@@ -1192,6 +1192,58 @@ mod tests {
         (status, serde_json::from_slice(&bytes).unwrap())
     }
 
+    /// KTD14 拓扑写手：apply_operations 含 link_add/link_delete → 同事务置
+    /// gcl_plan_meta.stale；纯节点 op 不置位。
+    #[test]
+    fn apply_operations_link_ops_mark_gcl_stale() {
+        tauri::async_runtime::block_on(async {
+            let (pool, buf) = test_state().await;
+            sqlx::query("INSERT INTO sessions (id, title, created_at, updated_at, payload) VALUES ('s1','t','now','now','{}')")
+                .execute(&pool).await.unwrap();
+            sqlx::query("INSERT INTO gcl_plan_meta (session_id, provider, status, cycle_ns, algorithm, stale, created_at) VALUES ('s1', 'inet-z3', 'ok', 1000000, 'Z3', 0, 'now')")
+                .execute(&pool).await.unwrap();
+            let (router, token) = build_test_router_with_pool(pool.clone(), buf.clone()).await;
+            let read_stale = |pool: sqlx::Pool<sqlx::Sqlite>| async move {
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT stale FROM gcl_plan_meta WHERE session_id='s1'",
+                )
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+            };
+
+            // 纯节点 op：不置位。
+            let (status, parsed) = apply_ops(
+                router.clone(),
+                &token,
+                "s1",
+                serde_json::json!([
+                    { "op": "node_add", "mid": "0", "x": 0.0, "y": 0.0, "insertOrder": 0 },
+                    { "op": "node_add", "mid": "1", "x": 1.0, "y": 0.0, "insertOrder": 1 },
+                ]),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(parsed["ok"], true, "{parsed:?}");
+            assert_eq!(read_stale(pool.clone()).await, 0, "纯节点 op 不置 stale");
+
+            // link_add：置位。
+            let (status, parsed) = apply_ops(
+                router.clone(),
+                &token,
+                "s1",
+                serde_json::json!([
+                    { "op": "link_add", "linkSeq": 0, "srcNode": "0", "dstNode": "1",
+                      "srcPort": 0, "dstPort": 0, "stylesJson": "{}" },
+                ]),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(parsed["ok"], true, "{parsed:?}");
+            assert_eq!(read_stale(pool.clone()).await, 1, "增删链路须置 stale");
+        });
+    }
+
     /// U4: 有 pre-image 时 undo 盖回三表 + push 一条 mutation；响应 undone=true，
     /// 且盖回后 inspect 返回的拓扑 == 撤销前快照态。
     #[test]

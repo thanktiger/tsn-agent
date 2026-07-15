@@ -127,7 +127,8 @@ pub(crate) const COMPLEMENT_SOLVER: &str = "complement";
 /// INET PeriodicGate 语义：t=0 时排程已前进 offset，即 state(t) = seq((t + offset) mod cycle)，
 /// 故序列坐标 p 的开窗落在绝对时间 (p - offset) mod cycle。durations 空 → 恒 initiallyOpen；
 /// durations 总和 ≠ 门控周期 → 响亮 Err（无法按 1ms 周期取补）。
-fn gcl_open_intervals(g: &GclEntry) -> Result<Vec<(u64, u64)>, VerifyError> {
+/// pub(crate)：门控位图合成（flow_plan_command U2）复用同一区间展开，绝不各算一份。
+pub(crate) fn gcl_open_intervals(g: &GclEntry) -> Result<Vec<(u64, u64)>, VerifyError> {
     if g.durations_ns.is_empty() {
         return Ok(if g.initially_open {
             vec![(0, GATE_CYCLE_NS)]
@@ -487,6 +488,28 @@ fn talker_eth0_plane(
         .and_then(crate::flow_route::link_plane)
 }
 
+/// mid → ned 名（sw{N}/es{N}）映射，`map_and_validate` 的命名单一源（按节点入参顺序计数，
+/// 不可映射类型跳过）。verify pin 重放（KTD4）在 bundle 构建前需要 ned→mid 反向表，从这里取。
+pub(crate) fn node_ned_names(nodes: &[VerifyNode]) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    let mut sw_seq = 0u32;
+    let mut es_seq = 0u32;
+    for node in nodes {
+        match map_node_type(node.node_type.as_deref()) {
+            Some("TsnSwitch") => {
+                sw_seq += 1;
+                out.insert(node.mid.clone(), format!("sw{sw_seq}"));
+            }
+            Some(_) => {
+                es_seq += 1;
+                out.insert(node.mid.clone(), format!("es{es_seq}"));
+            }
+            None => {}
+        }
+    }
+    out
+}
+
 /// 节点类型映射（sw{N}/es{N}）+ GM 存在性 + 链路端口列非 NULL 校验。timesync/flow 共享
 /// 同一脚手架前置（U6）。错误集非空即返回，不产 NED。
 fn map_and_validate<'a>(
@@ -496,28 +519,15 @@ fn map_and_validate<'a>(
 ) -> Result<BTreeMap<&'a str, MappedNode>, Vec<VerifyError>> {
     let mut errors: Vec<VerifyError> = Vec::new();
     let mut mapped: BTreeMap<&str, MappedNode> = BTreeMap::new();
-    let mut sw_seq = 0u32;
-    let mut es_seq = 0u32;
+    let ned_names = node_ned_names(nodes);
 
     for node in nodes {
         match map_node_type(node.node_type.as_deref()) {
-            Some("TsnSwitch") => {
-                sw_seq += 1;
-                mapped.insert(
-                    node.mid.as_str(),
-                    MappedNode {
-                        ned_name: format!("sw{sw_seq}"),
-                        ned_type: "TsnSwitch",
-                        queue_count: node.queue_count,
-                    },
-                );
-            }
             Some(ned_type) => {
-                es_seq += 1;
                 mapped.insert(
                     node.mid.as_str(),
                     MappedNode {
-                        ned_name: format!("es{es_seq}"),
+                        ned_name: ned_names[node.mid.as_str()].clone(),
                         ned_type,
                         queue_count: node.queue_count,
                     },

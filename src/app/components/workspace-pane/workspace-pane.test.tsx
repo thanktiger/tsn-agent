@@ -163,6 +163,7 @@ import type {
 } from "../../../sessions/topology-snapshot";
 import type { FlowRouteEntry } from "./flow-sim";
 import {
+  applyFlowEdgeDecoration,
   buildTimesyncPropagationPlan,
   classifyTimesyncEdge,
   decorateFlowHighlightEdges,
@@ -1825,5 +1826,30 @@ describe("decorateFlowHighlightEdges（U6 纯函数）", () => {
       [5, { streamSeq: 5, linkIds: ["link-0"], planeBLinkIds: null }],
     ]);
     expect(() => decorateFlowHighlightEdges(edges, 5, map)).not.toThrow();
+  });
+});
+
+describe("applyFlowEdgeDecoration（R16 路径预览优先级）", () => {
+  function makeEdges(ids: string[]) {
+    return ids.map((id) => ({ id, source: "a", target: "b" }));
+  }
+  const map = new Map<number, FlowRouteEntry>([
+    [1, { streamSeq: 1, linkIds: ["link-0"], planeBLinkIds: null }],
+  ]);
+
+  it("previewLinkSeqs 非 null 时覆盖 selectedFlowSeq 高亮", () => {
+    const edges = makeEdges(["link-0", "link-1", "link-2"]);
+    const result = applyFlowEdgeDecoration(edges, 1, map, [1, 2]);
+    // 预览路径 link-1/link-2 高亮；选中流的 link-0 被覆盖为 dimmed。
+    expect(result[0].className).toContain("flow-dimmed");
+    expect(result[1].className).toContain("flow-highlighted");
+    expect(result[2].className).toContain("flow-highlighted");
+  });
+
+  it("previewLinkSeqs 为 null 时回落选中流高亮", () => {
+    const edges = makeEdges(["link-0", "link-1"]);
+    const result = applyFlowEdgeDecoration(edges, 1, map, null);
+    expect(result[0].className).toContain("flow-highlighted");
+    expect(result[1].className).toContain("flow-dimmed");
   });
 });

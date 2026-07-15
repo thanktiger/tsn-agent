@@ -196,3 +196,53 @@ def test_execute_run_gcs_old_runs_each_time(monkeypatch):
         time.sleep(0.02)
     assert len(remaining) == 2, remaining  # 只留最近 2 个
     assert os.path.basename(job.run_dir) in remaining  # 刚跑的（最新）必保留
+
+
+def test_plan_sca_grep_pattern_extracts_all_replay_line_classes():
+    """PLAN_SCA_GREP_PATTERN（重放行类契约）：门参数 + 每流偏移 + 配置器时延参数
+    三类都命中，无关行不命中。用真 grep 验证（与 _execute_plan 同一模式字符串）。"""
+    import shlex as _shlex
+    import subprocess as _sp
+
+    mixed_sca = (
+        "version 3\n"
+        'par N.sw1.eth[1].macLayer.queue.transmissionGate[7] initiallyOpen true\n'
+        "par N.sw1.eth[1].macLayer.queue.transmissionGate[7] offset 0s\n"
+        'par N.sw1.eth[1].macLayer.queue.transmissionGate[7] durations "[300us, 700us]"\n'
+        "par N.es0.app[0].source initialProductionOffset 4.2e-05\n"
+        "par N.gateScheduleConfigurator processingDelay 2us\n"
+        "par N.sw1.eth[1].macLayer.queue.queue[0] packetCapacity 100\n"
+        "scalar N.sw1 someMetric 42\n"
+    )
+    out = _sp.run(
+        f"grep -hE {_shlex.quote(runner.PLAN_SCA_GREP_PATTERN)}",
+        shell=True,
+        input=mixed_sca,
+        capture_output=True,
+        text=True,
+    ).stdout
+    lines = out.strip().splitlines()
+    assert len(lines) == 5, lines
+    assert sum("transmissionGate" in l for l in lines) == 3
+    assert sum("initialProductionOffset" in l for l in lines) == 1
+    assert sum("processingDelay" in l for l in lines) == 1
+    assert not any("packetCapacity" in l or "someMetric" in l for l in lines)
+
+
+def test_plan_sca_grep_pattern_backward_compat_no_offset_lines():
+    """旧 .sca（无偏移行，如格式变化/旧 INET）：仍回门参数行，不因缺行类而空手。"""
+    import shlex as _shlex
+    import subprocess as _sp
+
+    gates_only = (
+        "par N.sw1.eth[1].macLayer.queue.transmissionGate[0] initiallyOpen true\n"
+        "par N.sw1.eth[1].macLayer.queue.transmissionGate[0] offset 0s\n"
+    )
+    out = _sp.run(
+        f"grep -hE {_shlex.quote(runner.PLAN_SCA_GREP_PATTERN)}",
+        shell=True,
+        input=gates_only,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert len(out.strip().splitlines()) == 2

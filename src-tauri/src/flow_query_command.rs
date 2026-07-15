@@ -1,12 +1,12 @@
-//! `get_flow_plan`（U1，面板重设计）：只读门控表明细查询。
+//! 流量规划只读查询（面板 + 门控详情弹窗）。
 //!
 //! 对齐 `topology_query_command`/`timesync_query_command` 的读写分离惯例——`plan_tas` 综合写库
 //! 归 `flow_plan_command`，只读明细查询在此。直接 sqlx in-process 读 main pool（不走 sidecar）。
 //!
-//! 取 `flow_plans` **仅 ST-pcp 门（gate7）**（与 verify pin 的 G2.4 过滤同源，`flow_verify::ST_PCP`
-//! 单一源——legacy gate0/gate6 残留行不进图/表/solver）+ `topology_nodes.name` 显示名映射 +
-//! 流集类别计数。前端三态（KTD1）全由此数据推导：entries 非空 → 已规划；entries 空且
-//! stCount==0 且流集非空 → 无需门控；否则 → 未规划。
+//! U4（2026-07-14 门控明细表）：`get_gcl_detail` 单查询读新表体系（`gcl_windows` +
+//! `gcl_plan_meta` + 流集嵌入，KTD8）——弹窗三页签 / 概览八卡 / 简版时序图同源。
+//! 旧 `get_flow_plan` 保持对外形状不变（R12 过渡）：内部改由新表投影出旧 `FlowPlanEntry`
+//! 形状（U9 前端切 `get_gcl_detail` 后投影可删），`flow_plans` 不再被本模块读取。
 
 use serde::Serialize;
 use sqlx::Row;
@@ -38,78 +38,90 @@ pub struct FlowPlanDetail {
     pub entries: Vec<FlowPlanEntry>,
 }
 
-/// 只读查询内核：flow_plans 的 ST-pcp 门行 + topology_nodes.name 显示名映射 + 类别计数。
+/// 只读查询内核（R12 简版概览同源）：改由 `get_gcl_detail_inner` 读新表后投影出旧
+/// `FlowPlanDetail` 形状——对外契约不变（前端简版概览已消费它，U9 前不动前端）。
 pub async fn get_flow_plan_inner(
     pool: &sqlx::Pool<sqlx::Sqlite>,
     session_id: &str,
 ) -> Result<FlowPlanDetail, String> {
+    let detail = get_gcl_detail_inner(pool, session_id).await?;
+    Ok(project_flow_plan_detail(&detail))
+}
+
+/// 新表窗口行 → 旧 `FlowPlanEntry` 形状（R12 过渡投影，U9 前端切 `get_gcl_detail` 后可删）：
+/// 按 (node, ethN) 分组（行序即库序 entry_idx 升序），bit7（ST 门）状态交替合并成 durations，
+/// `initially_open`=首窗 bit7 状态、`offset_ns`=0。等价判据：`gclOpenIntervals` 语义还原的
+/// 开窗区间与窗口行 bit7=1 区间一致（见单测）。solver 取 meta.algorithm（无窗口行时 None，
+/// 与旧路径「无行无 solver」口径一致）。
+pub fn project_flow_plan_detail(detail: &GclDetail) -> FlowPlanDetail {
     let (mut st_count, mut rc_count, mut be_count) = (0i64, 0i64, 0i64);
-    let count_rows = sqlx::query(
-        "SELECT class, COUNT(*) AS n FROM flow_streams WHERE session_id = ? GROUP BY class",
-    )
-    .bind(session_id)
-    .fetch_all(pool)
-    .await
-    .map_err(|e| format!("读 flow_streams 计数失败：{e}"))?;
-    for r in &count_rows {
-        let class: String = r.get("class");
-        let n: i64 = r.get("n");
-        match class.as_str() {
-            "ST" => st_count = n,
-            "RC" => rc_count = n,
-            "BE" => be_count = n,
+    for s in &detail.streams {
+        match s.class.as_str() {
+            "ST" => st_count += 1,
+            "RC" => rc_count += 1,
+            "BE" => be_count += 1,
             _ => {}
         }
     }
 
-    // G2.4/KTD4：只取 ST-pcp 门（gate7），与 verify pin 过滤同源（`flow_verify::ST_PCP`）——
-    // 存量 gate0/gate6 旧全类条目忽略，不进图/表/solver。
-    let rows = sqlx::query(
-        "SELECT p.node, n.name AS node_name, p.eth_n, p.gate_index, p.initially_open, p.offset_ns, p.durations_ns, p.solver \
-         FROM flow_plans p \
-         LEFT JOIN topology_nodes n ON n.session_id = p.session_id AND n.mid = p.node \
-         WHERE p.session_id = ? AND p.gate_index = ? ORDER BY p.node, p.eth_n, p.gate_index",
-    )
-    .bind(session_id)
-    .bind(crate::flow_verify::ST_PCP)
-    .fetch_all(pool)
-    .await
-    .map_err(|e| format!("读 flow_plans 失败：{e}"))?;
+    let mut entries: Vec<FlowPlanEntry> = Vec::new();
+    let windows = &detail.windows;
+    let mut i = 0;
+    while i < windows.len() {
+        let (node, eth_n) = (windows[i].node.clone(), windows[i].eth_n);
+        let mut j = i;
+        while j < windows.len() && windows[j].node == node && windows[j].eth_n == eth_n {
+            j += 1;
+        }
+        let group = &windows[i..j];
+        let st_open = |w: &GclWindowDto| w.gate_states & 0x80 != 0;
+        let initially_open = st_open(&group[0]);
+        let mut durations_ns: Vec<u64> = Vec::new();
+        let mut cur_state = initially_open;
+        let mut cur_dur: u64 = 0;
+        for w in group {
+            let open = st_open(w);
+            let dur = w.duration_ns.max(0) as u64;
+            if open == cur_state {
+                cur_dur += dur;
+            } else {
+                durations_ns.push(cur_dur);
+                cur_state = open;
+                cur_dur = dur;
+            }
+        }
+        durations_ns.push(cur_dur);
+        entries.push(FlowPlanEntry {
+            node_name: group[0].node_name.clone(),
+            node,
+            eth_n,
+            gate_index: crate::flow_verify::ST_PCP,
+            initially_open,
+            offset_ns: 0,
+            durations_ns,
+        });
+        i = j;
+    }
 
-    // 求解器出处：任取一行即可（同一 plan 全行同 solver）。
-    let solver: Option<String> = rows.first().map(|r| r.get::<String, _>("solver"));
-    // durations_ns 本读面解析成 Vec<u64>（时序图/占空比要算）；另一读面 flow_sidecar_routes
-    // inspect 回原始 JSON 字符串（agent 只读透传，不算）——两面类型分叉，消费端不同，勿强行统一。
-    // JSON 解析失败跳行（不臆造恒开门；损坏行不进图/表/solver）。
-    let entries = rows
-        .iter()
-        .filter_map(|r| {
-            let durs: String = r.get("durations_ns");
-            let durations_ns: Vec<u64> = serde_json::from_str(&durs).ok()?;
-            let node: String = r.get("node");
-            let name: Option<String> = r.get("node_name");
-            Some(FlowPlanEntry {
-                node_name: name
-                    .filter(|n| !n.is_empty())
-                    .unwrap_or_else(|| node.clone()),
-                node,
-                eth_n: r.get("eth_n"),
-                gate_index: r.get("gate_index"),
-                initially_open: r.get::<i64, _>("initially_open") != 0,
-                offset_ns: r.get("offset_ns"),
-                durations_ns,
-            })
-        })
-        .collect();
+    let cycle_ns = detail
+        .meta
+        .as_ref()
+        .map(|m| m.cycle_ns.max(0) as u64)
+        .unwrap_or(crate::inet_sim_bundle::GATE_CYCLE_NS);
+    let solver = if entries.is_empty() {
+        None
+    } else {
+        detail.meta.as_ref().map(|m| m.algorithm.clone())
+    };
 
-    Ok(FlowPlanDetail {
-        cycle_ns: crate::inet_sim_bundle::GATE_CYCLE_NS,
+    FlowPlanDetail {
+        cycle_ns,
         solver,
         st_count,
         rc_count,
         be_count,
         entries,
-    })
+    }
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -126,6 +138,133 @@ pub async fn get_flow_plan(
 ) -> Result<FlowPlanDetail, String> {
     let pool = store.pool(&app).await?;
     get_flow_plan_inner(pool, &request.session_id).await
+}
+
+// ── get_gcl_detail（U4，KTD8 单查询读面）────────────────────────────────────
+
+/// 窗口关联流引用（`gcl_windows.flow_refs` JSON 元素，对齐 flow_plan_command::FlowRef）：
+/// source=derived（实例锚定/窗长指纹命中）| class（类级降级）。
+#[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq)]
+pub struct FlowRefDto {
+    pub seq: i64,
+    pub source: String,
+}
+
+/// 逐窗行（弹窗三页签/概览八卡/简版时序图共用）。`node`=mid、`node_name`=显示名（缺名回退
+/// mid）；`gate_states` 0-255 位图（bit g = gate g 开）；`flow_refs` JSON 解析失败按 None
+/// （不臆造关联，窗口本身照常返回）。
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct GclWindowDto {
+    pub node: String,
+    pub node_name: String,
+    pub eth_n: i64,
+    pub entry_idx: i64,
+    pub start_ns: i64,
+    pub duration_ns: i64,
+    pub gate_states: u8,
+    pub flow_refs: Option<Vec<FlowRefDto>>,
+}
+
+/// 规划级元数据投影（`gcl_plan_meta` 单行）。stale=需重新规划（KTD14）。
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct GclMetaDto {
+    pub status: String,
+    pub cycle_ns: i64,
+    pub algorithm: String,
+    pub stale: bool,
+}
+
+/// 门控详情（KTD8：display model 一次查询的数据源）：窗口行 + meta（None=从未规划，
+/// AE6 空态判据）+ 流集嵌入（弹窗要流名/路径/周期/时延约束，复用 `list_flow_streams_inner`）。
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct GclDetail {
+    pub windows: Vec<GclWindowDto>,
+    pub meta: Option<GclMetaDto>,
+    pub streams: Vec<ListFlowStreamRow>,
+}
+
+/// 只读查询内核（AE5 单查询 DoD）：`gcl_windows`（LEFT JOIN 显示名）+ `gcl_plan_meta` +
+/// 流集，provider 恒 `flow_plan_command::GCL_PROVIDER`（本期唯一 provider，R6）。
+pub async fn get_gcl_detail_inner(
+    pool: &sqlx::Pool<sqlx::Sqlite>,
+    session_id: &str,
+) -> Result<GclDetail, String> {
+    let rows = sqlx::query(
+        "SELECT w.node, n.name AS node_name, w.eth_n, w.entry_idx, w.start_ns, w.duration_ns, w.gate_states, w.flow_refs \
+         FROM gcl_windows w \
+         LEFT JOIN topology_nodes n ON n.session_id = w.session_id AND n.mid = w.node \
+         WHERE w.session_id = ? AND w.provider = ? \
+         ORDER BY w.node, w.eth_n, w.entry_idx",
+    )
+    .bind(session_id)
+    .bind(crate::flow_plan_command::GCL_PROVIDER)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("读 gcl_windows 失败：{e}"))?;
+
+    let windows = rows
+        .iter()
+        .map(|r| {
+            let node: String = r.get("node");
+            let name: Option<String> = r.get("node_name");
+            let refs_json: Option<String> = r.get("flow_refs");
+            GclWindowDto {
+                node_name: name
+                    .filter(|n| !n.is_empty())
+                    .unwrap_or_else(|| node.clone()),
+                node,
+                eth_n: r.get("eth_n"),
+                entry_idx: r.get("entry_idx"),
+                start_ns: r.get("start_ns"),
+                duration_ns: r.get("duration_ns"),
+                gate_states: (r.get::<i64, _>("gate_states") & 0xFF) as u8,
+                flow_refs: refs_json.and_then(|s| serde_json::from_str::<Vec<FlowRefDto>>(&s).ok()),
+            }
+        })
+        .collect();
+
+    let meta = sqlx::query(
+        "SELECT status, cycle_ns, algorithm, stale FROM gcl_plan_meta \
+         WHERE session_id = ? AND provider = ?",
+    )
+    .bind(session_id)
+    .bind(crate::flow_plan_command::GCL_PROVIDER)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| format!("读 gcl_plan_meta 失败：{e}"))?
+    .map(|r| GclMetaDto {
+        status: r.get("status"),
+        cycle_ns: r.get("cycle_ns"),
+        algorithm: r.get("algorithm"),
+        stale: r.get::<i64, _>("stale") != 0,
+    });
+
+    let streams = list_flow_streams_inner(pool, session_id).await?.streams;
+
+    Ok(GclDetail {
+        windows,
+        meta,
+        streams,
+    })
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetGclDetailRequest {
+    pub session_id: String,
+}
+
+#[tauri::command]
+pub async fn get_gcl_detail(
+    app: tauri::AppHandle,
+    store: tauri::State<'_, crate::session_store::SessionStore>,
+    request: GetGclDetailRequest,
+) -> Result<GclDetail, String> {
+    let pool = store.pool(&app).await?;
+    get_gcl_detail_inner(pool, &request.session_id).await
 }
 
 // ---------- 设备级流标识默认值（录入时落库，boss 定规则） ----------
@@ -186,6 +325,9 @@ pub struct ListFlowStreamRow {
     pub dst_l4_port: Option<i64>,
     pub l4_protocol: Option<String>,
     pub node_path: Vec<String>,
+    /// paths 列原文（KTD12 统一 JSON 形状；NULL=系统推导）。弹窗解析 origin=user 的
+    /// link_seqs 匹配候选选中项；RC 只读展示双路径。
+    pub paths: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -211,7 +353,7 @@ pub async fn list_flow_streams_inner(
         "SELECT stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener, \
                 max_latency_us, redundant, src_mac, dst_mac, vlan_id, \
                 earliest_send_offset_ns, latest_send_offset_ns, \
-                name, jitter_ns, src_ip, dst_ip, src_l4_port, dst_l4_port, l4_protocol \
+                name, jitter_ns, src_ip, dst_ip, src_l4_port, dst_l4_port, l4_protocol, paths \
          FROM flow_streams WHERE session_id = ? ORDER BY stream_seq",
     )
     .bind(session_id)
@@ -255,9 +397,15 @@ pub async fn list_flow_streams_inner(
                     listener: &listener,
                     plane,
                 };
-                crate::flow_route::derive_route(&req, &nodes, &links)
-                    .map(|route| route.node_path)
-                    .unwrap_or_default()
+                // KTD11 统一出口：显式指定优先（失效则空路径，前端回退 talker → listener）。
+                crate::flow_route::resolve_flow_path(
+                    r.get::<Option<String>, _>("paths").as_deref(),
+                    &req,
+                    &nodes,
+                    &links,
+                )
+                .map(|route| route.node_path)
+                .unwrap_or_default()
             }
             .iter()
             .map(|mid| display_name(mid))
@@ -305,6 +453,7 @@ pub async fn list_flow_streams_inner(
                 l4_protocol: r
                     .get::<Option<String>, _>("l4_protocol")
                     .or_else(|| Some(DEFAULT_L4_PROTOCOL.to_string())),
+                paths: r.get("paths"),
                 class,
                 talker,
                 listener,
@@ -351,8 +500,7 @@ pub struct GetFlowRouteMapResult {
 
 /// 只读内核：为 session 内所有流推导路由，双平面感知。
 /// - RC：`derive_redundant_routes` → A/B 两路；
-/// - ST/BE + 双平面：`derive_route(plane=Some("A"))`；
-/// - ST/BE + 单平面：`derive_route(plane=None)`；
+/// - ST/BE：`resolve_flow_path`（显式指定优先；双平面锁 A、单平面全链路）；
 /// - 路由失败跳过（不返回 entry，不 panic）。
 pub async fn get_flow_route_map_inner(
     pool: &sqlx::Pool<sqlx::Sqlite>,
@@ -368,7 +516,7 @@ pub async fn get_flow_route_map_inner(
         .any(|l| crate::flow_route::link_plane(l).is_some());
 
     let stream_rows = sqlx::query(
-        "SELECT stream_seq, class, talker, listener \
+        "SELECT stream_seq, class, talker, listener, paths \
          FROM flow_streams WHERE session_id = ? ORDER BY stream_seq",
     )
     .bind(session_id)
@@ -405,8 +553,14 @@ pub async fn get_flow_route_map_inner(
                 listener: &listener,
                 plane,
             };
-            // 路由失败 → 跳过，不 panic。
-            if let Ok(route) = crate::flow_route::derive_route(&req, &nodes, &links) {
+            // KTD11 统一出口（显式指定优先）；路由失败/PATH_STALE → 跳过高亮，不 panic
+            // （详情弹窗与规划路径各自响亮报错，画布高亮只做尽力展示）。
+            if let Ok(route) = crate::flow_route::resolve_flow_path(
+                r.get::<Option<String>, _>("paths").as_deref(),
+                &req,
+                &nodes,
+                &links,
+            ) {
                 let link_ids = route
                     .link_seqs
                     .iter()
@@ -432,6 +586,96 @@ pub async fn get_flow_route_map(
 ) -> Result<GetFlowRouteMapResult, String> {
     let pool = store.pool(&app).await?;
     get_flow_route_map_inner(pool, &request.session_id).await
+}
+
+// ── get_flow_path_candidates（U10b，弹窗路径下拉）─────────────────────────────
+
+/// 候选枚举上限（R16：上限打满时 truncated=true，弹窗提示「还有未列出路径」）。
+const FLOW_PATH_CANDIDATE_LIMIT: usize = 8;
+
+/// 单条候选路径：`node_path` mid 序列、`node_path_names` 同序显示名（缺名回退 mid）、
+/// `link_seqs` 回传 update_flow_stream 的 path_link_seqs。
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct FlowPathCandidate {
+    pub node_path: Vec<String>,
+    pub node_path_names: Vec<String>,
+    pub link_seqs: Vec<i64>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetFlowPathCandidatesRequest {
+    pub session_id: String,
+    pub talker: String,
+    pub listener: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct GetFlowPathCandidatesResult {
+    pub candidates: Vec<FlowPathCandidate>,
+    pub truncated: bool,
+}
+
+/// 只读内核：枚举 talker→listener 的候选简单路径（上限 8、按跳数/link_seq 有序）。
+/// plane 语义照 plan_tas：双平面锁 A、单平面全链路（ST/BE 口径；RC 不经此出口）。
+pub async fn get_flow_path_candidates_inner(
+    pool: &sqlx::Pool<sqlx::Sqlite>,
+    session_id: &str,
+    talker: &str,
+    listener: &str,
+) -> Result<GetFlowPathCandidatesResult, String> {
+    let (nodes, links) = crate::flow_verify::load_route_topology(pool, session_id)
+        .await
+        .map_err(|e| format!("读拓扑失败：{e}"))?;
+    let dual_plane = links
+        .iter()
+        .any(|l| crate::flow_route::link_plane(l).is_some());
+    let plane = if dual_plane { Some("A") } else { None };
+    let req = crate::flow_route::RouteRequest {
+        talker,
+        listener,
+        plane,
+    };
+    let (routes, truncated) =
+        crate::flow_route::enumerate_candidate_paths(&req, &links, FLOW_PATH_CANDIDATE_LIMIT);
+    let display_name = |mid: &str| -> String {
+        nodes
+            .iter()
+            .find(|n| n.mid == mid)
+            .and_then(|n| n.name.clone())
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| mid.to_string())
+    };
+    let candidates = routes
+        .into_iter()
+        .map(|r| FlowPathCandidate {
+            node_path_names: r.node_path.iter().map(|m| display_name(m)).collect(),
+            node_path: r.node_path,
+            link_seqs: r.link_seqs,
+        })
+        .collect();
+    Ok(GetFlowPathCandidatesResult {
+        candidates,
+        truncated,
+    })
+}
+
+#[tauri::command]
+pub async fn get_flow_path_candidates(
+    app: tauri::AppHandle,
+    store: tauri::State<'_, crate::session_store::SessionStore>,
+    request: GetFlowPathCandidatesRequest,
+) -> Result<GetFlowPathCandidatesResult, String> {
+    let pool = store.pool(&app).await?;
+    get_flow_path_candidates_inner(
+        pool,
+        &request.session_id,
+        &request.talker,
+        &request.listener,
+    )
+    .await
 }
 
 // ── update_flow_stream（U7）──────────────────────────────────────────────────
@@ -466,17 +710,36 @@ pub struct UpdateFlowStreamRequest {
     pub dst_l4_port: Option<i64>,
     #[serde(default)]
     pub l4_protocol: Option<String>,
+    /// R16 路径变更三态：`path_link_seqs`（弹窗候选回传，link_seq 序列）或
+    /// `path_node_refs`（agent 节点引用序列）二选一设置显式路径；`clear_path=true`
+    /// 改回系统自动（paths 置 NULL）；全缺省 = 路径不变。RC 流拒绝路径变更。
+    #[serde(default)]
+    pub path_link_seqs: Option<Vec<i64>>,
+    #[serde(default)]
+    pub path_node_refs: Option<Vec<String>>,
+    #[serde(default)]
+    pub clear_path: bool,
+}
+
+/// 流更新结果：`planning_fields_changed` = 规划字段（period/frame/count/max_latency）或
+/// 路径有实际变更（KTD14 服务端判定，弹窗与 agent 通道同源；置 stale 与此同值）。
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateFlowStreamResult {
+    pub planning_fields_changed: bool,
 }
 
 /// 写前验证 + 快照 + UPDATE 内核（可注入 pool 供单测）。
 pub async fn update_flow_stream_inner(
     pool: &sqlx::Pool<sqlx::Sqlite>,
     req: &UpdateFlowStreamRequest,
-) -> Result<(), String> {
-    // 1. 读不可变字段（class/pcp 决定 verify_flow 路径，talker/listener 决定节点存在性检查）。
+) -> Result<UpdateFlowStreamResult, String> {
+    // 1. 读不可变字段（class/pcp 决定 verify_flow 路径，talker/listener 决定节点存在性检查）
+    // 与规划字段旧值（KTD14 服务端 diff）。
     let row = sqlx::query(
         "SELECT class, pcp, talker, listener, src_ip, dst_ip, src_l4_port, dst_l4_port, \
-         l4_protocol, redundant, paths FROM flow_streams WHERE session_id = ? AND stream_seq = ?",
+         l4_protocol, redundant, paths, period_us, frame_bytes, count, max_latency_us \
+         FROM flow_streams WHERE session_id = ? AND stream_seq = ?",
     )
     .bind(&req.session_id)
     .bind(req.stream_seq)
@@ -503,6 +766,60 @@ pub async fn update_flow_stream_inner(
         redundant: row.get("redundant"),
         paths: row.get("paths"),
     };
+
+    // 2b. R16 路径变更三态：set（link_seqs 或节点引用）/ clear / 不变。
+    // RC 拒绝（双路径系统推导）。set 时解析+校验并把新 paths 带进 verify_flow。
+    let class: String = row.get("class");
+    let path_change: Option<Option<String>> = if req.clear_path {
+        if req.path_link_seqs.is_some() || req.path_node_refs.is_some() {
+            return Err("clear_path 与指定路径参数不能同时使用。".to_string());
+        }
+        Some(None) // 改回系统自动
+    } else if req.path_link_seqs.is_some() || req.path_node_refs.is_some() {
+        if class == "RC" {
+            return Err("RC 流的双冗余路径由系统推导（保证不相交），不支持手动指定。".to_string());
+        }
+        let (nodes, links) = crate::flow_verify::load_route_topology(pool, &req.session_id)
+            .await
+            .map_err(|e| format!("读拓扑失败：{e}"))?;
+        let route = if let Some(seqs) = &req.path_link_seqs {
+            crate::flow_route::build_route_from_link_seqs(
+                seqs,
+                &stream_input.talker,
+                &stream_input.listener,
+                &links,
+            )
+        } else {
+            crate::flow_route::route_from_node_refs(
+                req.path_node_refs.as_deref().unwrap_or(&[]),
+                &stream_input.talker,
+                &stream_input.listener,
+                &nodes,
+                &links,
+            )
+        };
+        match route {
+            Ok(r) => Some(Some(crate::flow_route::explicit_paths_json(&r))),
+            Err(errors) => {
+                let msgs: Vec<String> = errors.iter().map(|e| e.message_zh.clone()).collect();
+                return Err(format!("路径校验不通过：{}", msgs.join("；")));
+            }
+        }
+    } else {
+        None // 路径不变
+    };
+    let mut stream_input = stream_input;
+    if let Some(new_paths) = &path_change {
+        stream_input.paths = new_paths.clone();
+    }
+
+    // 2c. KTD14 规划字段变更判定（服务端 diff，弹窗/agent 双通道同源）：
+    // period/frame/count/max_latency 任一与旧值不同，或有路径变更 → 置 stale。
+    let planning_fields_changed = req.period_us != row.get::<i64, _>("period_us")
+        || req.frame_bytes != row.get::<i64, _>("frame_bytes")
+        || req.count != row.get::<i64, _>("count")
+        || req.max_latency_us != row.get::<Option<i64>, _>("max_latency_us")
+        || path_change.is_some();
 
     // 3. 结构校验（class/pcp 不变，重跑以防节点已删或周期越界）。
     let errors = crate::flow_verify::verify_flow(pool, &req.session_id, &stream_input)
@@ -563,10 +880,28 @@ pub async fn update_flow_stream_inner(
         return Err(format!("stream_seq={} 不存在", req.stream_seq));
     }
 
+    // 7b. R16 路径变更单独写（需支持写 NULL 改回系统自动，不能进 COALESCE 主句）。
+    if let Some(new_paths) = &path_change {
+        sqlx::query("UPDATE flow_streams SET paths=? WHERE session_id=? AND stream_seq=?")
+            .bind(new_paths)
+            .bind(&req.session_id)
+            .bind(req.stream_seq)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| format!("更新路径失败：{e}"))?;
+    }
+
+    // 7c. KTD14：规划字段变更 → 同事务置 gcl_plan_meta.stale（无行 no-op）。
+    if planning_fields_changed {
+        crate::flow_plan_command::mark_gcl_stale(&mut *tx, &req.session_id).await?;
+    }
+
     // 8. 提交。
     tx.commit().await.map_err(|e| format!("提交失败：{e}"))?;
 
-    Ok(())
+    Ok(UpdateFlowStreamResult {
+        planning_fields_changed,
+    })
 }
 
 #[tauri::command]
@@ -574,7 +909,7 @@ pub async fn update_flow_stream(
     app: tauri::AppHandle,
     store: tauri::State<'_, crate::session_store::SessionStore>,
     request: UpdateFlowStreamRequest,
-) -> Result<(), String> {
+) -> Result<UpdateFlowStreamResult, String> {
     let pool = store.pool(&app).await?;
     update_flow_stream_inner(pool, &request).await
 }
@@ -631,20 +966,42 @@ mod tests {
             .bind(seq).bind(class).bind(pcp).execute(pool).await.unwrap();
     }
 
-    /// 直插一条 flow_plans 门条目（gate_index 可控，用于门过滤/损坏行测试）。
-    async fn add_plan(
+    /// 直插一条 gcl_windows 逐窗行（provider=inet-z3，U4 新表读面测试）。
+    #[allow(clippy::too_many_arguments)]
+    async fn add_gcl_window(
         pool: &sqlx::Pool<sqlx::Sqlite>,
         node: &str,
         eth_n: i64,
-        gate_index: i64,
-        durs: &str,
+        entry_idx: i64,
+        start_ns: i64,
+        duration_ns: i64,
+        gate_states: i64,
+        flow_refs: Option<&str>,
     ) {
-        sqlx::query("INSERT INTO flow_plans (session_id, stream_seq, node, eth_n, gate_index, initially_open, offset_ns, durations_ns, solver) VALUES ('s1', 0, ?, ?, ?, 1, 0, ?, 'Z3')")
-            .bind(node).bind(eth_n).bind(gate_index).bind(durs)
-            .execute(pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO gcl_windows (session_id, provider, node, eth_n, entry_idx, start_ns, duration_ns, gate_states, flow_refs) \
+             VALUES ('s1', 'inet-z3', ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(node).bind(eth_n).bind(entry_idx).bind(start_ns).bind(duration_ns)
+        .bind(gate_states).bind(flow_refs)
+        .execute(pool).await.unwrap();
     }
 
-    /// U1①：有 GCL 会话 → 返回全行 + 显示名映射（有名用名/缺名回退 mid）+ 类别计数 + 周期。
+    /// 直插 gcl_plan_meta 单行。
+    async fn add_gcl_meta(pool: &sqlx::Pool<sqlx::Sqlite>, status: &str, stale: i64) {
+        sqlx::query(
+            "INSERT INTO gcl_plan_meta (session_id, provider, status, cycle_ns, algorithm, stale, created_at) \
+             VALUES ('s1', 'inet-z3', ?, 1000000, 'Z3', ?, 'now')",
+        )
+        .bind(status)
+        .bind(stale)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// U4（R12 投影）：新表窗口行 → 旧 FlowPlanEntry 形状（显示名映射/缺名回退 mid、
+    /// 类别计数、cycle 取 meta、solver 取 meta.algorithm、bit7 交替合并 durations）。
     #[test]
     fn get_flow_plan_returns_entries_names_and_counts() {
         tauri::async_runtime::block_on(async {
@@ -659,8 +1016,13 @@ mod tests {
             .unwrap();
             add_stream(&pool, 0, "ST", 7).await;
             add_stream(&pool, 1, "BE", 0).await;
-            add_plan(&pool, "0", 1, 7, "[4560,995440]").await;
-            add_plan(&pool, "2", 0, 7, "[300000,700000]").await;
+            add_gcl_meta(&pool, "ok", 0).await;
+            // sw1 eth1：ST 开窗 [0,4560) + 关窗 [4560,1ms) ≙ 旧 durations [4560,995440]。
+            add_gcl_window(&pool, "0", 1, 0, 0, 4_560, 0x80, None).await;
+            add_gcl_window(&pool, "0", 1, 1, 4_560, 995_440, 0x7F, None).await;
+            // es2 eth0：关窗开头 [0,300000) + 开窗 [300000,1ms) ≙ initiallyOpen=false。
+            add_gcl_window(&pool, "2", 0, 0, 0, 300_000, 0x7F, None).await;
+            add_gcl_window(&pool, "2", 0, 1, 300_000, 700_000, 0x80, None).await;
             let d = get_flow_plan_inner(&pool, "s1").await.unwrap();
             assert_eq!(d.cycle_ns, 1_000_000);
             assert_eq!(d.solver.as_deref(), Some("Z3"));
@@ -674,8 +1036,10 @@ mod tests {
             assert!(g0.initially_open);
             assert_eq!(g0.offset_ns, 0);
             assert_eq!(g0.durations_ns, vec![4_560, 995_440]);
-            // 缺名节点回退 mid。
+            // 缺名节点回退 mid；首窗 bit7 关 → initiallyOpen=false。
             assert_eq!(d.entries[1].node_name, "2");
+            assert!(!d.entries[1].initially_open);
+            assert_eq!(d.entries[1].durations_ns, vec![300_000, 700_000]);
         });
     }
 
@@ -707,42 +1071,95 @@ mod tests {
         });
     }
 
-    /// 读侧门过滤（与 verify pin G2.4 同源）：混门 flow_plans（gate0/gate6/gate7）→ 仅 gate7
-    /// 返回，legacy 全类残留行不进图/表/solver。
+    /// R12 投影：同 bit7 状态的相邻窗合并成一段 duration（0x80/0xFF 均为 ST 开）。
     #[test]
-    fn get_flow_plan_filters_non_st_gate_rows() {
+    fn get_flow_plan_merges_consecutive_same_state_windows() {
         tauri::async_runtime::block_on(async {
             let pool = fresh_pool().await;
             seed_linear(&pool).await;
             add_stream(&pool, 0, "ST", 7).await;
-            add_plan(&pool, "0", 1, 0, "[500000,500000]").await; // legacy gate0
-            add_plan(&pool, "0", 1, 6, "[400000,600000]").await; // legacy gate6
-            add_plan(&pool, "0", 1, 7, "[300000,700000]").await; // ST gate7
+            add_gcl_meta(&pool, "ok", 0).await;
+            add_gcl_window(&pool, "0", 1, 0, 0, 4_560, 0x80, None).await;
+            add_gcl_window(&pool, "0", 1, 1, 4_560, 1_000, 0xFF, None).await; // 仍 bit7 开 → 并段
+            add_gcl_window(&pool, "0", 1, 2, 5_560, 994_440, 0x7F, None).await;
             let d = get_flow_plan_inner(&pool, "s1").await.unwrap();
-            assert_eq!(d.entries.len(), 1, "只应返回 gate7：{:?}", d.entries);
-            assert_eq!(d.entries[0].gate_index, 7);
-            assert_eq!(d.entries[0].durations_ns, vec![300_000, 700_000]);
+            assert_eq!(d.entries.len(), 1);
+            assert!(d.entries[0].initially_open);
+            assert_eq!(d.entries[0].durations_ns, vec![5_560, 994_440]);
         });
     }
 
-    /// durations_ns JSON 解析失败跳行（不臆造恒开门）：损坏行不返回，有效 gate7 行照常返回。
+    /// R12 等价性（U2 落库前旧路径 vs 新表投影）：以带 offset/回绕的旧 GclEntry 为源，
+    /// 按其开窗区间合成逐窗行落新表 → 投影后 `gcl_open_intervals` 还原的开窗区间与旧路径相同。
     #[test]
-    fn get_flow_plan_skips_rows_with_corrupt_durations() {
+    fn get_flow_plan_projection_open_intervals_equivalent_to_legacy() {
         tauri::async_runtime::block_on(async {
-            let pool = fresh_pool().await;
-            seed_linear(&pool).await;
-            add_stream(&pool, 0, "ST", 7).await;
-            add_plan(&pool, "0", 1, 7, "not-json").await; // 损坏行 → 跳过
-            add_plan(&pool, "2", 0, 7, "[300000,700000]").await; // 有效行
-            let d = get_flow_plan_inner(&pool, "s1").await.unwrap();
-            assert_eq!(
-                d.entries.len(),
-                1,
-                "损坏 durations 行应跳过：{:?}",
-                d.entries
-            );
-            assert_eq!(d.entries[0].node, "2");
-            assert_eq!(d.entries[0].durations_ns, vec![300_000, 700_000]);
+            for (initially_open, offset_ns, durations) in [
+                (true, 29_470u64, vec![4_560u64, 995_440]), // 普通 offset
+                (true, 2_000, vec![4_560, 995_440]),        // 开窗回绕拆尾段+头段
+                (false, 0, vec![300_000, 4_560, 695_440]),  // initiallyOpen=false 多段
+            ] {
+                let legacy = crate::inet_sim_bundle::GclEntry {
+                    node: "0".into(),
+                    eth_n: 1,
+                    gate_index: 7,
+                    initially_open,
+                    offset_ns,
+                    durations_ns: durations,
+                    solver: "Z3".into(),
+                };
+                let mut expected = crate::inet_sim_bundle::gcl_open_intervals(&legacy).unwrap();
+                expected.sort_unstable();
+
+                // 开窗区间 → 切分点 → 逐窗行（bit7 开/关交替，覆盖全周期）。
+                let cycle = crate::inet_sim_bundle::GATE_CYCLE_NS;
+                let mut cuts: Vec<u64> = vec![0, cycle];
+                for &(a, b) in &expected {
+                    cuts.push(a);
+                    cuts.push(b);
+                }
+                cuts.sort_unstable();
+                cuts.dedup();
+                let pool = fresh_pool().await;
+                seed_linear(&pool).await;
+                add_stream(&pool, 0, "ST", 7).await;
+                add_gcl_meta(&pool, "ok", 0).await;
+                for (idx, w) in cuts.windows(2).enumerate() {
+                    let (s, e) = (w[0], w[1]);
+                    let open = expected.iter().any(|&(a, b)| a <= s && e <= b);
+                    let bits = if open { 0x80 } else { 0x7F };
+                    add_gcl_window(
+                        &pool,
+                        "0",
+                        1,
+                        idx as i64,
+                        s as i64,
+                        (e - s) as i64,
+                        bits,
+                        None,
+                    )
+                    .await;
+                }
+
+                let d = get_flow_plan_inner(&pool, "s1").await.unwrap();
+                assert_eq!(d.entries.len(), 1);
+                let p = &d.entries[0];
+                let projected = crate::inet_sim_bundle::GclEntry {
+                    node: p.node.clone(),
+                    eth_n: p.eth_n as usize,
+                    gate_index: p.gate_index as usize,
+                    initially_open: p.initially_open,
+                    offset_ns: p.offset_ns as u64,
+                    durations_ns: p.durations_ns.clone(),
+                    solver: "Z3".into(),
+                };
+                let mut actual = crate::inet_sim_bundle::gcl_open_intervals(&projected).unwrap();
+                actual.sort_unstable();
+                assert_eq!(
+                    actual, expected,
+                    "投影后开窗区间应与旧路径一致（源 offset={offset_ns}）"
+                );
+            }
         });
     }
 
@@ -777,6 +1194,129 @@ mod tests {
         assert_eq!(e["initiallyOpen"], true);
         assert_eq!(e["offsetNs"], 29_470);
         assert_eq!(e["durationsNs"][0], 4_560);
+    }
+
+    // ── get_gcl_detail 测试（U4）────────────────────────────────────────────
+
+    /// U4①：端到端——窗口行（显示名映射 + flow_refs 解析）+ meta + 流集嵌入一次返回（AE5）。
+    #[test]
+    fn get_gcl_detail_returns_windows_meta_and_streams() {
+        tauri::async_runtime::block_on(async {
+            let pool = fresh_pool().await;
+            seed_linear(&pool).await;
+            sqlx::query(
+                "UPDATE topology_nodes SET name='核心交换机' WHERE session_id='s1' AND mid='0'",
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+            add_stream(&pool, 0, "ST", 7).await;
+            add_gcl_meta(&pool, "ok", 1).await;
+            add_gcl_window(
+                &pool,
+                "0",
+                1,
+                0,
+                0,
+                4_560,
+                0x80,
+                Some(r#"[{"seq":0,"source":"derived"}]"#),
+            )
+            .await;
+            add_gcl_window(&pool, "0", 1, 1, 4_560, 995_440, 0x7F, None).await;
+            let d = get_gcl_detail_inner(&pool, "s1").await.unwrap();
+            assert_eq!(d.windows.len(), 2);
+            let w0 = &d.windows[0];
+            assert_eq!(w0.node, "0");
+            assert_eq!(w0.node_name, "核心交换机");
+            assert_eq!((w0.eth_n, w0.entry_idx), (1, 0));
+            assert_eq!((w0.start_ns, w0.duration_ns), (0, 4_560));
+            assert_eq!(w0.gate_states, 0x80);
+            assert_eq!(
+                w0.flow_refs,
+                Some(vec![FlowRefDto {
+                    seq: 0,
+                    source: "derived".into()
+                }])
+            );
+            assert!(d.windows[1].flow_refs.is_none());
+            let meta = d.meta.expect("应有 meta");
+            assert_eq!(meta.status, "ok");
+            assert_eq!(meta.cycle_ns, 1_000_000);
+            assert_eq!(meta.algorithm, "Z3");
+            assert!(meta.stale);
+            // 流集嵌入（复用 list_flow_streams_inner，含流名默认值与路径）。
+            assert_eq!(d.streams.len(), 1);
+            assert_eq!(d.streams[0].name.as_deref(), Some("ST流0"));
+        });
+    }
+
+    /// U4②：flow_refs JSON 损坏 → 该窗 flow_refs=None（不臆造关联），窗口本身照常返回。
+    #[test]
+    fn get_gcl_detail_corrupt_flow_refs_becomes_none() {
+        tauri::async_runtime::block_on(async {
+            let pool = fresh_pool().await;
+            seed_linear(&pool).await;
+            add_gcl_meta(&pool, "ok", 0).await;
+            add_gcl_window(&pool, "0", 1, 0, 0, 4_560, 0x80, Some("not-json")).await;
+            let d = get_gcl_detail_inner(&pool, "s1").await.unwrap();
+            assert_eq!(d.windows.len(), 1);
+            assert!(d.windows[0].flow_refs.is_none());
+        });
+    }
+
+    /// U4③：无 meta 行（老工程/从未规划）→ meta=None、windows=[]（AE6 空态判据）。
+    #[test]
+    fn get_gcl_detail_no_meta_row_means_never_planned() {
+        tauri::async_runtime::block_on(async {
+            let pool = fresh_pool().await;
+            seed_linear(&pool).await;
+            add_stream(&pool, 0, "ST", 7).await;
+            let d = get_gcl_detail_inner(&pool, "s1").await.unwrap();
+            assert!(d.meta.is_none());
+            assert!(d.windows.is_empty());
+            assert_eq!(d.streams.len(), 1);
+        });
+    }
+
+    /// U4④：serde camelCase 契约（前端 GclDetail DTO 镜像依赖字段名）。
+    #[test]
+    fn gcl_detail_serializes_camel_case() {
+        let detail = GclDetail {
+            windows: vec![GclWindowDto {
+                node: "0".into(),
+                node_name: "sw1".into(),
+                eth_n: 1,
+                entry_idx: 0,
+                start_ns: 100,
+                duration_ns: 4_560,
+                gate_states: 0x80,
+                flow_refs: Some(vec![FlowRefDto {
+                    seq: 3,
+                    source: "class".into(),
+                }]),
+            }],
+            meta: Some(GclMetaDto {
+                status: "ok".into(),
+                cycle_ns: 1_000_000,
+                algorithm: "Z3".into(),
+                stale: false,
+            }),
+            streams: vec![],
+        };
+        let v = serde_json::to_value(&detail).unwrap();
+        let w = &v["windows"][0];
+        assert_eq!(w["nodeName"], "sw1");
+        assert_eq!(w["ethN"], 1);
+        assert_eq!(w["entryIdx"], 0);
+        assert_eq!(w["startNs"], 100);
+        assert_eq!(w["durationNs"], 4_560);
+        assert_eq!(w["gateStates"], 128);
+        assert_eq!(w["flowRefs"][0]["seq"], 3);
+        assert_eq!(w["flowRefs"][0]["source"], "class");
+        assert_eq!(v["meta"]["cycleNs"], 1_000_000);
+        assert_eq!(v["meta"]["stale"], false);
+        assert!(v["streams"].is_array());
     }
 
     // ── list_flow_streams 测试 ──────────────────────────────────────────────
@@ -918,6 +1458,7 @@ mod tests {
             dst_l4_port: None,
             l4_protocol: None,
             node_path: vec!["ES-1".into(), "SW-0".into(), "ES-2".into()],
+            paths: None,
         };
         let v = serde_json::to_value(&row).unwrap();
         assert_eq!(v["streamSeq"], 0);
@@ -1149,6 +1690,9 @@ mod tests {
             src_l4_port: None,
             dst_l4_port: None,
             l4_protocol: None,
+            path_link_seqs: None,
+            path_node_refs: None,
+            clear_path: false,
         }
     }
 
@@ -1297,6 +1841,144 @@ mod tests {
             .await
             .unwrap();
             assert_eq!(count, 1, "应有 flow domain 快照");
+        });
+    }
+
+    async fn read_stale(pool: &sqlx::Pool<sqlx::Sqlite>) -> i64 {
+        sqlx::query_scalar("SELECT stale FROM gcl_plan_meta WHERE session_id='s1'")
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    /// KTD14①：非规划字段（名称/MAC）变更 → planning_fields_changed=false、stale 不置位。
+    #[test]
+    fn update_non_planning_field_does_not_mark_stale() {
+        tauri::async_runtime::block_on(async {
+            let pool = fresh_pool().await;
+            seed_linear(&pool).await;
+            add_stream(&pool, 0, "ST", 7).await;
+            add_gcl_meta(&pool, "ok", 0).await;
+            let req = UpdateFlowStreamRequest {
+                name: Some("改名".to_string()),
+                src_mac: Some("00:11:22:33:44:55".to_string()),
+                ..make_update_req() // 规划字段与 add_stream 落库值一致（500/512/10000/None）
+            };
+            let result = update_flow_stream_inner(&pool, &req).await.unwrap();
+            assert!(!result.planning_fields_changed);
+            assert_eq!(read_stale(&pool).await, 0, "非规划字段不置 stale");
+        });
+    }
+
+    /// KTD14②：改周期 → planning_fields_changed=true、stale=1（同事务持久化）。
+    #[test]
+    fn update_period_marks_stale() {
+        tauri::async_runtime::block_on(async {
+            let pool = fresh_pool().await;
+            seed_linear(&pool).await;
+            add_stream(&pool, 0, "ST", 7).await;
+            add_gcl_meta(&pool, "ok", 0).await;
+            let req = UpdateFlowStreamRequest {
+                period_us: 250,
+                ..make_update_req()
+            };
+            let result = update_flow_stream_inner(&pool, &req).await.unwrap();
+            assert!(result.planning_fields_changed);
+            assert_eq!(read_stale(&pool).await, 1, "改周期须置 stale");
+        });
+    }
+
+    /// KTD14③：路径变更（path_link_seqs）→ planning_fields_changed=true、stale=1；
+    /// 无 meta 行时置位是 no-op（不报错）。
+    #[test]
+    fn update_path_marks_stale_and_noop_without_meta() {
+        tauri::async_runtime::block_on(async {
+            let pool = fresh_pool().await;
+            seed_linear(&pool).await;
+            add_stream(&pool, 0, "ST", 7).await;
+            // 无 meta 行：路径变更照常成功（no-op 置位）。
+            let req = UpdateFlowStreamRequest {
+                path_link_seqs: Some(vec![0, 1]),
+                ..make_update_req()
+            };
+            let result = update_flow_stream_inner(&pool, &req).await.unwrap();
+            assert!(result.planning_fields_changed, "路径变更算规划字段变更");
+            // 有 meta 行：clear_path 同样置位。
+            add_gcl_meta(&pool, "ok", 0).await;
+            let req = UpdateFlowStreamRequest {
+                clear_path: true,
+                ..make_update_req()
+            };
+            let result = update_flow_stream_inner(&pool, &req).await.unwrap();
+            assert!(result.planning_fields_changed);
+            assert_eq!(read_stale(&pool).await, 1, "路径变更须置 stale");
+        });
+    }
+
+    // ── get_flow_path_candidates 测试（U10b）─────────────────────────────────
+
+    /// 菱形拓扑（1-0-2 / 1-3-2 等长两条）→ 两条候选、显示名映射（0 有名、3 缺名回退 mid）。
+    #[test]
+    fn path_candidates_diamond_two_routes_with_names() {
+        tauri::async_runtime::block_on(async {
+            let pool = fresh_pool().await;
+            for (mid, name) in [
+                ("0", Some("SW-A")),
+                ("1", Some("ES-1")),
+                ("2", Some("ES-2")),
+                ("3", None),
+            ] {
+                sqlx::query("INSERT INTO topology_nodes (session_id, mid, name, x, y, node_type, port_count, queue_count, insert_order) VALUES ('s1', ?, ?, 0, 0, 'switch', 8, 8, 0)")
+                    .bind(mid).bind(name).execute(&pool).await.unwrap();
+            }
+            for (seq, src, sp, dst, dp) in [
+                (0, "1", 0, "0", 0),
+                (1, "0", 1, "2", 0),
+                (2, "1", 1, "3", 0),
+                (3, "3", 1, "2", 1),
+            ] {
+                sqlx::query("INSERT INTO topology_links (session_id, link_seq, name, src_node, dst_node, src_port, dst_port, speed, styles_json) VALUES ('s1', ?, NULL, ?, ?, ?, ?, 1000, '{}')")
+                    .bind(seq).bind(src).bind(dst).bind(sp).bind(dp).execute(&pool).await.unwrap();
+            }
+            let r = get_flow_path_candidates_inner(&pool, "s1", "1", "2")
+                .await
+                .unwrap();
+            assert!(!r.truncated);
+            assert_eq!(r.candidates.len(), 2);
+            assert_eq!(r.candidates[0].node_path, vec!["1", "0", "2"]);
+            assert_eq!(
+                r.candidates[0].node_path_names,
+                vec!["ES-1", "SW-A", "ES-2"]
+            );
+            assert_eq!(r.candidates[0].link_seqs, vec![0, 1]);
+            assert_eq!(r.candidates[1].node_path, vec!["1", "3", "2"]);
+            assert_eq!(r.candidates[1].node_path_names, vec!["ES-1", "3", "ES-2"]);
+        });
+    }
+
+    /// 9 条并行两跳路径 > 上限 8 → 截断标志置位、返回 8 条。
+    #[test]
+    fn path_candidates_truncated_at_limit() {
+        tauri::async_runtime::block_on(async {
+            let pool = fresh_pool().await;
+            for mid in ["t", "l"] {
+                sqlx::query("INSERT INTO topology_nodes (session_id, mid, name, x, y, node_type, port_count, queue_count, insert_order) VALUES ('s1', ?, NULL, 0, 0, 'endSystem', 8, 8, 0)")
+                    .bind(mid).execute(&pool).await.unwrap();
+            }
+            for i in 0..9i64 {
+                let mid = format!("m{i}");
+                sqlx::query("INSERT INTO topology_nodes (session_id, mid, name, x, y, node_type, port_count, queue_count, insert_order) VALUES ('s1', ?, NULL, 0, 0, 'switch', 8, 8, 0)")
+                    .bind(&mid).execute(&pool).await.unwrap();
+                sqlx::query("INSERT INTO topology_links (session_id, link_seq, name, src_node, dst_node, src_port, dst_port, speed, styles_json) VALUES ('s1', ?, NULL, 't', ?, ?, 0, 1000, '{}')")
+                    .bind(i * 2).bind(&mid).bind(i).execute(&pool).await.unwrap();
+                sqlx::query("INSERT INTO topology_links (session_id, link_seq, name, src_node, dst_node, src_port, dst_port, speed, styles_json) VALUES ('s1', ?, NULL, ?, 'l', 1, ?, 1000, '{}')")
+                    .bind(i * 2 + 1).bind(&mid).bind(i).execute(&pool).await.unwrap();
+            }
+            let r = get_flow_path_candidates_inner(&pool, "s1", "t", "l")
+                .await
+                .unwrap();
+            assert!(r.truncated, "9 条候选超上限 8 应截断");
+            assert_eq!(r.candidates.len(), 8);
         });
     }
 }

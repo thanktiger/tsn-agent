@@ -95,13 +95,20 @@ struct TimesyncNodeRow {
 }
 
 /// flow domain 的 pre-image：录入流表 + 综合门控表。列清单与 `flow_streams` /
-/// `flow_plans` schema 一一对应（与 SESSION_SCOPED_TABLES 同源，避免漂移）。
+/// `flow_plans` / `gcl_windows` / `gcl_plan_meta` schema 一一对应（与
+/// SESSION_SCOPED_TABLES 同源，避免漂移）。**`gcl_raw_archive` 不入快照**（KTD1）：
+/// undo 后 raw 保持最新，重新规划即对齐——存档是重放事实源不是展示态。
+/// 新增字段全 `#[serde(default)]`（旧格式 blob 反序列化兼容，a9a3e3e 同型坑）。
 /// flow 的单步撤销触发（按钮/命令）本期 defer，但 snapshot/restore 分派须域安全
 /// （domain="flow" 绝不落到 topology 表名上）——故两段都实现。
 #[derive(Debug, Serialize, Deserialize)]
 struct FlowPreImage {
     streams: Vec<FlowStreamRow>,
     plans: Vec<FlowPlanRow>,
+    #[serde(default)]
+    gcl_windows: Vec<GclWindowRow>,
+    #[serde(default)]
+    gcl_plan_meta: Vec<GclPlanMetaRow>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -150,6 +157,30 @@ struct FlowPlanRow {
     offset_ns: i64,
     durations_ns: String,
     solver: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct GclWindowRow {
+    session_id: String,
+    provider: String,
+    node: String,
+    eth_n: i64,
+    entry_idx: i64,
+    start_ns: i64,
+    duration_ns: i64,
+    gate_states: i64,
+    flow_refs: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct GclPlanMetaRow {
+    session_id: String,
+    provider: String,
+    status: String,
+    cycle_ns: i64,
+    algorithm: String,
+    stale: i64,
+    created_at: String,
 }
 
 /// serde_json 错误折进 sqlx::Error，保持函数签名为 `Result<_, sqlx::Error>`
@@ -306,7 +337,8 @@ async fn snapshot_timesync_blob(
     serde_json::to_string(&pre_image).map_err(json_err)
 }
 
-/// 读 flow 两表（flow_streams / flow_plans）→ blob JSON。
+/// 读 flow 四表（flow_streams / flow_plans / gcl_windows / gcl_plan_meta）→ blob JSON。
+/// gcl_raw_archive 有意不快照（KTD1，见 FlowPreImage 注释）。
 async fn snapshot_flow_blob(
     conn: &mut SqliteConnection,
     session_id: &str,
@@ -326,6 +358,21 @@ async fn snapshot_flow_blob(
         r#"SELECT session_id, stream_seq, node, eth_n, gate_index, initially_open,
                   offset_ns, durations_ns, solver
            FROM flow_plans WHERE session_id = ? ORDER BY stream_seq, node, eth_n, gate_index"#,
+    )
+    .bind(session_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    let window_rows = sqlx::query(
+        r#"SELECT session_id, provider, node, eth_n, entry_idx, start_ns, duration_ns,
+                  gate_states, flow_refs
+           FROM gcl_windows WHERE session_id = ? ORDER BY provider, node, eth_n, entry_idx"#,
+    )
+    .bind(session_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    let meta_rows = sqlx::query(
+        r#"SELECT session_id, provider, status, cycle_ns, algorithm, stale, created_at
+           FROM gcl_plan_meta WHERE session_id = ? ORDER BY provider"#,
     )
     .bind(session_id)
     .fetch_all(&mut *conn)
@@ -373,6 +420,32 @@ async fn snapshot_flow_blob(
                 offset_ns: r.get("offset_ns"),
                 durations_ns: r.get("durations_ns"),
                 solver: r.get("solver"),
+            })
+            .collect(),
+        gcl_windows: window_rows
+            .into_iter()
+            .map(|r| GclWindowRow {
+                session_id: r.get("session_id"),
+                provider: r.get("provider"),
+                node: r.get("node"),
+                eth_n: r.get("eth_n"),
+                entry_idx: r.get("entry_idx"),
+                start_ns: r.get("start_ns"),
+                duration_ns: r.get("duration_ns"),
+                gate_states: r.get("gate_states"),
+                flow_refs: r.get("flow_refs"),
+            })
+            .collect(),
+        gcl_plan_meta: meta_rows
+            .into_iter()
+            .map(|r| GclPlanMetaRow {
+                session_id: r.get("session_id"),
+                provider: r.get("provider"),
+                status: r.get("status"),
+                cycle_ns: r.get("cycle_ns"),
+                algorithm: r.get("algorithm"),
+                stale: r.get("stale"),
+                created_at: r.get("created_at"),
             })
             .collect(),
     };
@@ -534,7 +607,8 @@ async fn restore_timesync(
     Ok(())
 }
 
-/// 盖回 flow 两表（flow_streams / flow_plans）。目标表集合严格限于 flow domain。
+/// 盖回 flow 四表（flow_streams / flow_plans / gcl_windows / gcl_plan_meta）。目标表集合
+/// 严格限于 flow domain；gcl_raw_archive 不盖回（KTD1：undo 后 raw 保持最新，重新规划对齐）。
 async fn restore_flow(
     tx: &mut SqliteConnection,
     session_id: &str,
@@ -542,7 +616,7 @@ async fn restore_flow(
 ) -> Result<(), sqlx::Error> {
     let pre_image: FlowPreImage = serde_json::from_str(blob_json).map_err(json_err)?;
 
-    for table in ["flow_streams", "flow_plans"] {
+    for table in ["flow_streams", "flow_plans", "gcl_windows", "gcl_plan_meta"] {
         sqlx::query(&format!("DELETE FROM {table} WHERE session_id = ?"))
             .bind(session_id)
             .execute(&mut *tx)
@@ -603,6 +677,43 @@ async fn restore_flow(
         .bind(p.offset_ns)
         .bind(&p.durations_ns)
         .bind(&p.solver)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    for w in &pre_image.gcl_windows {
+        sqlx::query(
+            r#"INSERT INTO gcl_windows
+               (session_id, provider, node, eth_n, entry_idx, start_ns, duration_ns,
+                gate_states, flow_refs)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
+        )
+        .bind(&w.session_id)
+        .bind(&w.provider)
+        .bind(&w.node)
+        .bind(w.eth_n)
+        .bind(w.entry_idx)
+        .bind(w.start_ns)
+        .bind(w.duration_ns)
+        .bind(w.gate_states)
+        .bind(&w.flow_refs)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    for m in &pre_image.gcl_plan_meta {
+        sqlx::query(
+            r#"INSERT INTO gcl_plan_meta
+               (session_id, provider, status, cycle_ns, algorithm, stale, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)"#,
+        )
+        .bind(&m.session_id)
+        .bind(&m.provider)
+        .bind(&m.status)
+        .bind(m.cycle_ns)
+        .bind(&m.algorithm)
+        .bind(m.stale)
+        .bind(&m.created_at)
         .execute(&mut *tx)
         .await?;
     }
@@ -1089,7 +1200,7 @@ mod tests {
         });
     }
 
-    /// 写一条 ST 流 + 一条 GCL 门样本。
+    /// 写一条 ST 流 + 一条 GCL 门样本 + 门控新表各一行（gcl_windows / gcl_plan_meta）。
     async fn seed_flow(pool: &Pool<Sqlite>) {
         sqlx::query(
             "INSERT INTO flow_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener, max_latency_us, redundant, paths) \
@@ -1105,6 +1216,20 @@ mod tests {
         .execute(pool)
         .await
         .unwrap();
+        sqlx::query(
+            "INSERT INTO gcl_windows (session_id, provider, node, eth_n, entry_idx, start_ns, duration_ns, gate_states, flow_refs) \
+             VALUES ('s1', 'inet-z3', '1', 2, 0, 0, 300000, 128, '[{\"seq\":0,\"source\":\"derived\"}]')",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO gcl_plan_meta (session_id, provider, status, cycle_ns, algorithm, stale, created_at) \
+             VALUES ('s1', 'inet-z3', 'ok', 1000000, 'Z3', 0, 'now')",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
     }
 
     async fn count_streams(pool: &Pool<Sqlite>) -> i64 {
@@ -1114,7 +1239,7 @@ mod tests {
             .unwrap()
     }
 
-    /// flow snapshot → 改库 → restore 盖回：流表与 GCL 表逐字段还原。
+    /// flow snapshot → 改库 → restore 盖回：流表、GCL 表与门控新表逐字段还原。
     #[test]
     fn flow_snapshot_restore_round_trips() {
         tauri::async_runtime::block_on(async {
@@ -1122,15 +1247,13 @@ mod tests {
             seed_flow(&pool).await;
             snapshot_domain(&pool, FLOW_DOMAIN).await;
 
-            // 删光两表。
-            sqlx::query("DELETE FROM flow_streams WHERE session_id='s1'")
-                .execute(&pool)
-                .await
-                .unwrap();
-            sqlx::query("DELETE FROM flow_plans WHERE session_id='s1'")
-                .execute(&pool)
-                .await
-                .unwrap();
+            // 删光四表。
+            for table in ["flow_streams", "flow_plans", "gcl_windows", "gcl_plan_meta"] {
+                sqlx::query(&format!("DELETE FROM {table} WHERE session_id='s1'"))
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+            }
             assert_eq!(count_streams(&pool).await, 0);
 
             assert!(restore_pre_image(&pool, "s1", FLOW_DOMAIN).await.unwrap());
@@ -1143,6 +1266,66 @@ mod tests {
             .unwrap();
             assert_eq!(durations, "[500,500]", "GCL durations 盖回");
             assert_eq!(solver, "Z3", "GCL solver 出处盖回");
+            let (gate_states, flow_refs): (i64, Option<String>) = sqlx::query_as(
+                "SELECT gate_states, flow_refs FROM gcl_windows WHERE session_id='s1' AND provider='inet-z3' AND entry_idx=0",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(gate_states, 128, "gcl_windows 位图盖回");
+            assert_eq!(
+                flow_refs.as_deref(),
+                Some(r#"[{"seq":0,"source":"derived"}]"#),
+                "flow_refs 盖回"
+            );
+            let (status, cycle_ns): (String, i64) = sqlx::query_as(
+                "SELECT status, cycle_ns FROM gcl_plan_meta WHERE session_id='s1' AND provider='inet-z3'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(status, "ok", "gcl_plan_meta 盖回");
+            assert_eq!(cycle_ns, 1000000);
+        });
+    }
+
+    /// 旧格式 blob（只含 streams/plans 键）反序列化兼容：serde(default) 生效，两新表
+    /// 恢复为空集不报错（a9a3e3e 同型坑锁定）。
+    #[test]
+    fn flow_restore_accepts_legacy_blob_without_gcl_tables() {
+        tauri::async_runtime::block_on(async {
+            let pool = fresh_pool().await;
+            seed_flow(&pool).await;
+            // 手写旧格式 blob（无 gcl_windows / gcl_plan_meta 键）。
+            let legacy = r#"{"streams":[],"plans":[{"session_id":"s1","stream_seq":0,"node":"1","eth_n":2,"gate_index":0,"initially_open":1,"offset_ns":100,"durations_ns":"[500,500]","solver":"Z3"}]}"#;
+            sqlx::query(
+                "INSERT INTO topology_undo_snapshots (session_id, domain, blob_json, created_at) VALUES ('s1', 'flow', ?, 'now')",
+            )
+            .bind(legacy)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+            assert!(restore_pre_image(&pool, "s1", FLOW_DOMAIN).await.unwrap());
+            // 旧 blob 无新表数据 → 盖回后两新表为空（现库行被清、不报错）。
+            let windows: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM gcl_windows WHERE session_id='s1'")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(windows, 0, "旧 blob → 新表空集");
+            let meta: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM gcl_plan_meta WHERE session_id='s1'")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(meta, 0);
+            let plans: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM flow_plans WHERE session_id='s1'")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(plans, 1, "旧 blob 的 plans 照常盖回");
         });
     }
 

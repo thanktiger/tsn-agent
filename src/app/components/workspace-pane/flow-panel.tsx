@@ -5,13 +5,17 @@ import { CHART_COLORS } from "./chart-palette";
 import { FlowDetailModal } from "./flow-detail-modal";
 import {
   buildGateTimelineRows,
+  buildGclOverview,
   type FlowPlanDetail,
   type FlowPlanQueryState,
   flowPlanPresentation,
+  type GclDetail,
+  type GclOverview,
   gclDutyCycle,
   gclOpenIntervals,
   gptpDiagLine,
   invokeGetFlowPlan,
+  invokeGetGclDetail,
   invokeListFlowStreams,
   invokePlanTas,
   invokeVerifyTas,
@@ -34,6 +38,7 @@ import {
 } from "./flow-sim";
 import { FlowStreamList } from "./flow-stream-list";
 import { type FlowSubTab, FlowSubTabs } from "./flow-subtabs";
+import { GclDetailModal } from "./gcl-detail-modal";
 import { PanelCta } from "./panel-cta";
 
 export interface FlowPanelProps {
@@ -58,7 +63,17 @@ export interface FlowPanelProps {
   getFlowPlan?: (sessionId: string) => Promise<FlowPlanDetail>;
   /** 流集查询读通道（U4，测试注入替身）。 */
   listFlowStreams?: (sessionId: string) => Promise<ListFlowStreamsResult>;
+  /** 门控详情读通道（U5 透传 GclDetailModal + U9 概览八卡；测试注入替身）。 */
+  getGclDetail?: (sessionId: string) => Promise<GclDetail>;
+  /** R16 路径预览联动（透传 FlowDetailModal → WorkspacePane 画布高亮）。 */
+  onPreviewPath?: (linkSeqs: number[] | null) => void;
 }
+
+/** U9：门控明细（新表）查询态——与 FlowPlanQueryState 同型，data=GclDetail。 */
+type GclQueryState =
+  | { status: "loading" }
+  | { status: "unavailable" }
+  | { status: "loaded"; detail: GclDetail };
 
 export function FlowPanel({
   inFlowStage,
@@ -75,6 +90,8 @@ export function FlowPanel({
   verifyTas = invokeVerifyTas,
   getFlowPlan = invokeGetFlowPlan,
   listFlowStreams = invokeListFlowStreams,
+  getGclDetail = invokeGetGclDetail,
+  onPreviewPath,
 }: FlowPanelProps) {
   // ref 即时拦并发（disabled 态下一拍才生效，防双击派发第二次）。
   const planInflight = useRef(false);
@@ -86,6 +103,8 @@ export function FlowPanel({
   // U8：详情弹窗 + 重规划提示 banner（切会话重置）。
   const [openModalStream, setOpenModalStream] = useState<ListFlowStreamRow | null>(null);
   const [bannerVisible, setBannerVisible] = useState(false);
+  // U5：门控详情弹窗开关（切会话重置）。
+  const [gclDetailOpen, setGclDetailOpen] = useState(false);
 
   // U2/KTD1：门控明细查询态——面板挂载即拉，展示态由数据推导（切会话回来凭数据恢复）。
   const [planQuery, setPlanQuery] = useState<FlowPlanQueryState>({ status: "loading" });
@@ -102,17 +121,39 @@ export function FlowPanel({
     }
   }, [getFlowPlan, sessionId]);
 
+  // U9：门控明细（get_gcl_detail 新表）查询态——概览八卡数据源；触发源与 planQuery 同三处
+  // （挂载·切会话 / 规划完成 / flow domain DB 变更），requestSeq 丢弃过期响应。
+  const [gclQuery, setGclQuery] = useState<GclQueryState>({ status: "loading" });
+  const gclQueryReqRef = useRef(0);
+  const refreshGclQuery = useCallback(async () => {
+    const seq = ++gclQueryReqRef.current;
+    try {
+      const detail = await getGclDetail(sessionId);
+      if (gclQueryReqRef.current === seq) setGclQuery({ status: "loaded", detail });
+    } catch {
+      if (gclQueryReqRef.current === seq) setGclQuery({ status: "unavailable" });
+    }
+  }, [getGclDetail, sessionId]);
+
   // 挂载 / 切会话：先回 loading（避免闪旧数据 + 抑制 CTA 闪现），再取。
   useEffect(() => {
     setPlanQuery({ status: "loading" });
     void refreshPlanQuery();
   }, [refreshPlanQuery]);
 
+  useEffect(() => {
+    setGclQuery({ status: "loading" });
+    void refreshGclQuery();
+  }, [refreshGclQuery]);
+
   // 规划完成（含 no_gating 清表 / solver_failed 旧表保留）后刷新明细；切 tab 卸载重挂后再变 done
   // 也刷新（不再在 handlePlan 里内联取数——重挂后内联块随旧闭包丢失）。
   useEffect(() => {
-    if (planState.status === "done") void refreshPlanQuery();
-  }, [planState, refreshPlanQuery]);
+    if (planState.status === "done") {
+      void refreshPlanQuery();
+      void refreshGclQuery();
+    }
+  }, [planState, refreshPlanQuery, refreshGclQuery]);
 
   // U4：流集查询态（挂载即拉，DB 变更重拉；requestSeq 丢弃过期响应）。
   const [streams, setStreams] = useState<ListFlowStreamRow[]>([]);
@@ -141,6 +182,7 @@ export function FlowPanel({
     setStreamsLoading(true);
     setOpenModalStream(null);
     setBannerVisible(false);
+    setGclDetailOpen(false);
     void refreshStreams();
   }, [refreshStreams]);
 
@@ -149,6 +191,7 @@ export function FlowPanel({
     sessionId,
     onChange: () => {
       void refreshPlanQuery();
+      void refreshGclQuery();
       void refreshStreams();
     },
   });
@@ -266,14 +309,26 @@ export function FlowPanel({
           <div className="timesync-commandbar flow-commandbar">
             <div className="timesync-commandbar__actions" role="group" aria-label="门控规划操作">
               {!fresh && !idleLoading && (
-                <button
-                  type="button"
-                  className="btn primary"
-                  onClick={() => void handlePlan()}
-                  disabled={planDisabled}
-                >
-                  {planning ? "综合中…（分钟级）" : "重新规划"}
-                </button>
+                <>
+                  {/* U5：门控详情弹窗入口（无规划数据禁用——数据推导口径同时序图显隐）。 */}
+                  <button
+                    type="button"
+                    className="btn"
+                    onClick={() => setGclDetailOpen(true)}
+                    disabled={queryPresentation !== "planned"}
+                    title={queryPresentation !== "planned" ? "请先规划出门控表" : undefined}
+                  >
+                    门控详情
+                  </button>
+                  <button
+                    type="button"
+                    className="btn primary"
+                    onClick={() => void handlePlan()}
+                    disabled={planDisabled}
+                  >
+                    {planning ? "综合中…（分钟级）" : "重新规划"}
+                  </button>
+                </>
               )}
             </div>
           </div>
@@ -281,16 +336,22 @@ export function FlowPanel({
           {/* R22：分钟级综合进行中反馈。 */}
           {planning && <p className="flow-progress mono">正在跑 Z3 门控综合，分钟级，请稍候…</p>}
 
+          {/* 判定头行（「门控表·N条目 + 求解器徽章」/失败信息）置于概览之上（boss 定）。 */}
           {idleLoading ? null : fresh ? (
             <PanelCta
               label="规划门控表"
-              hint="用 INET Z3 配置器综合 802.1Qbv 门控表（GCL），结果落库并在此可视化。"
+              hint="用 INET Z3 配置器综合 802.1Qbv 门控表（GCL），结果落库；明细在「门控详情」弹窗查看。"
               onClick={() => void handlePlan()}
               disabled={planDisabled}
               title={!inFlowStage ? "请先进入流量规划阶段" : undefined}
             />
           ) : (
             <PlanResultArea planState={planState} planQuery={planQuery} />
+          )}
+
+          {/* U9/R15：门控概览八卡（仅已规划态渲染；数据源=get_gcl_detail，与详情弹窗同源 KTD8）。 */}
+          {queryPresentation === "planned" && gclQuery.status === "loaded" && (
+            <GclOverviewSection overview={buildGclOverview(gclQuery.detail)} />
           )}
 
           {/*
@@ -352,12 +413,21 @@ export function FlowPanel({
       <FlowDetailModal
         stream={openModalStream}
         sessionId={sessionId}
+        onPreviewPath={onPreviewPath}
         onClose={() => setOpenModalStream(null)}
         onSaved={(didChangePlanningFields) => {
           if (didChangePlanningFields) setBannerVisible(true);
           // 保存后重拉流集（反映更新后的数据）。
           void refreshStreams();
         }}
+      />
+
+      {/* U5：门控详情弹窗（全屏三页签，portal 级挂法同 FlowDetailModal）。 */}
+      <GclDetailModal
+        open={gclDetailOpen}
+        sessionId={sessionId}
+        onClose={() => setGclDetailOpen(false)}
+        getGclDetail={getGclDetail}
       />
     </section>
   );
@@ -373,9 +443,163 @@ function SolverBadge({ solver, z3 }: { solver: string; z3: boolean }) {
   );
 }
 
+/** 百分比格式化（概览卡）：null → 「—」。 */
+function fmtPct(v: number | null): string {
+  return v === null ? "—" : `${v.toFixed(1)}%`;
+}
+
+/** 概览统计卡（U9/R15）：标签 + 主值 + 副行小字；modifier=--ok（绿）/--stale（琥珀）。 */
+function OverviewCard({
+  label,
+  value,
+  sub,
+  modifier = "",
+}: {
+  label: string;
+  value: string;
+  sub: string;
+  modifier?: string;
+}) {
+  return (
+    <div className={`gcl-overview-card${modifier}`}>
+      <span className="gcl-overview-card__label">{label}</span>
+      <span className="gcl-overview-card__value">{value}</span>
+      <span className="gcl-overview-card__sub">{sub}</span>
+    </div>
+  );
+}
+
 /**
- * 规划结果区（U2）：头行（planState 瞬态优先，否则凭查询数据恢复）+ 门控时序图 + 折叠明细表。
- * KTD1：展示态由数据推导——切会话回来 entries 非空即恢复时序图，无需规划动作记忆。
+ * 门控概览八卡（U9/R15）：静态标题 + 4×2 grid（窄面板 auto-fit 换行，boss 定不折叠）。
+ * 时延分析卡（高亮）可点击展开每流明细表（流名/时延/裕度——负裕度红字挂「口径不同」，
+ * KTD9 推导模型≠求解器约束口径）。全部数值为规划推导值，非实测（R9 诚实边界）。
+ */
+function GclOverviewSection({ overview }: { overview: GclOverview }) {
+  const [latencyOpen, setLatencyOpen] = useState(false);
+  const lat = overview.latency;
+
+  // ① 调度状态：stale 过期（KTD14）优先于 status 三态。
+  let statusValue: string;
+  let statusSub: string;
+  let statusMod = "";
+  if (overview.stale) {
+    statusValue = "需重新规划";
+    statusSub = "配置已变更";
+    statusMod = " gcl-overview-card--stale";
+  } else if (overview.scheduleStatus === "ok") {
+    statusValue = "可调度";
+    statusSub = "GCL 已生成";
+    statusMod = " gcl-overview-card--ok";
+  } else if (overview.scheduleStatus === "no_gating") {
+    statusValue = "无需门控";
+    statusSub = "流集无 ST 流";
+  } else {
+    statusValue = "未规划";
+    statusSub = "尚无规划结果";
+  }
+
+  const latencySub = `最大端到端时延·规划推导值${
+    lat.excludedCount > 0 ? `（${lat.excludedCount} 条流未计入）` : ""
+  }`;
+
+  return (
+    <div className="gcl-overview">
+      <p className="gcl-overview-title">门控概览</p>
+      <div className="gcl-overview-grid">
+        <OverviewCard label="调度状态" value={statusValue} sub={statusSub} modifier={statusMod} />
+        <OverviewCard
+          label="超周期"
+          value={overview.cycleNs !== null ? `${nsToUs(overview.cycleNs)} μs` : "—"}
+          sub="规划周期"
+        />
+        <OverviewCard
+          label="业务流 / 门控端口"
+          value={`${overview.streamCount} 条 / ${overview.gatedPortCount}`}
+          sub={
+            overview.gatedQueues.length > 0
+              ? `涉及 ${overview.gatedQueues.map((q) => `q${q}`).join(",")} 队列`
+              : "无门控队列"
+          }
+        />
+        <OverviewCard
+          label="GCL 表项"
+          value={`${overview.entryCount}`}
+          sub={`打开窗口 ${overview.openWindowCount} 个`}
+        />
+        <OverviewCard
+          label="最大门控窗口占用"
+          value={fmtPct(overview.maxPortOpenPct)}
+          sub="按端口打开窗口/超周期推导"
+        />
+        <OverviewCard
+          label="最大链路带宽占用"
+          value={fmtPct(overview.maxLinkUtilizationPct)}
+          sub={overview.maxLinkUtilizationPct === null ? "链路速率未知" : "按流带宽/链路速率推导"}
+        />
+        <OverviewCard
+          label="关闭窗口占比"
+          value={fmtPct(overview.closedPct)}
+          sub="全关窗口/所有端口周期"
+        />
+        {/* ⑧ 时延分析（高亮卡）：可点击展开每流明细。 */}
+        <button
+          type="button"
+          className="gcl-overview-card gcl-overview-card--highlight"
+          aria-expanded={latencyOpen}
+          onClick={() => setLatencyOpen((v) => !v)}
+          disabled={lat.rows.length === 0}
+          title={lat.rows.length > 0 ? "点击展开每流时延明细" : undefined}
+        >
+          <span className="gcl-overview-card__label">时延分析</span>
+          <span className="gcl-overview-card__value">
+            {lat.maxLatencyNs !== null ? `最大端到端 ${nsToUs(lat.maxLatencyNs)} μs` : "—"}
+          </span>
+          <span className="gcl-overview-card__sub">{latencySub}</span>
+        </button>
+      </div>
+      {latencyOpen && lat.rows.length > 0 && (
+        <table className="eng-table gcl-overview-latency-table">
+          <thead>
+            <tr>
+              <th>流</th>
+              <th>端到端时延(μs)</th>
+              <th>裕度</th>
+            </tr>
+          </thead>
+          <tbody>
+            {lat.rows.map((r) => {
+              const marginNs = r.maxLatencyNs !== null ? r.maxLatencyNs - r.latencyNs : null;
+              return (
+                <tr key={r.streamSeq}>
+                  <td>{r.name}</td>
+                  <td className="mono">{nsToUs(r.latencyNs)}</td>
+                  <td className="mono">
+                    {marginNs === null ? (
+                      "未设上限"
+                    ) : marginNs >= 0 ? (
+                      `${nsToUs(marginNs)} μs`
+                    ) : (
+                      <span
+                        className="gcl-overview-margin-neg"
+                        title="推导模型与求解器约束口径不同"
+                      >
+                        {nsToUs(marginNs)} μs（口径不同）
+                      </span>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+}
+
+/**
+ * 规划结果区（U2→boss 精简）：仅判定头行（planState 瞬态优先，否则凭查询数据恢复）。
+ * 时序图/明细表已并入门控详情弹窗，面板不再重复。
  */
 function PlanResultArea({
   planState,
@@ -437,180 +661,21 @@ function PlanResultArea({
     );
   }
 
-  // 时序图/明细仅在 presentation==='planned'（有 ST + 库里有门控表）时画。error（命令抛错、态未定）
-  // 不画旧图误导；solver_failed（新综合失败但旧 GCL 未被覆盖、有 ST 时仍会被 verify pin）保留旧图是
-  // 诚实的——故仅排除 error 态，不排除 done。
-  const showGcl = presentation === "planned" && planState.status !== "error";
-  // 明细读取失败但 planState 有成功结果：显式「不可用」态，绝不回退画旧/空图（判定仍由 head 供）。
+  // 时序图/明细已并入门控详情弹窗（boss 定：面板不再重复展示），本区只留判定头行。
+  // 明细读取失败但 planState 有成功结果：显式「不可用」态（判定仍由 head 供）。
   const showUnavailableNote =
     planQuery.status === "unavailable" &&
     planState.status === "done" &&
     planSucceeded(planState.result);
 
-  if (!head && !showGcl && !showUnavailableNote) return null;
+  if (!head && !showUnavailableNote) return null;
   return (
     <div className="flow-plan-result">
       {head}
-      {showGcl && detail && (
-        <>
-          <GateTimelineChart detail={detail} />
-          <GclDetailTable detail={detail} />
-        </>
-      )}
       {showUnavailableNote && (
         <p className="flow-message mono">
           门控明细暂不可用（读取失败）；判定见上，可稍后重试或重新规划。
         </p>
-      )}
-    </div>
-  );
-}
-
-/**
- * 门控时序图（U2/KTD2，零依赖 SVG 泳道，参照 time-sync OffsetChart 手法）：每行一个
- * (节点,端口)，x 轴 = 1ms 门周期（刻度 0/250/500/750/1000µs），ST 开窗画色块
- * （CHART_COLORS[0]）、关窗为底色轨道；行按首个开窗起点升序（Z3 流水线阶梯错位一眼可见）。
- * hover `<title>` 显示精确开窗值；极窄窗设 1.5px 渲染下限保证可见。
- */
-function GateTimelineChart({ detail }: { detail: FlowPlanDetail }) {
-  const rows = buildGateTimelineRows(detail.entries, detail.cycleNs);
-  if (rows.length === 0) return null;
-
-  const W = 680;
-  const ml = 110;
-  const mr = 12;
-  const mt = 8;
-  const mb = 26;
-  const rowH = 26;
-  const trackH = 14;
-  const pw = W - ml - mr;
-  const plotH = rows.length * rowH;
-  const H = mt + plotH + mb;
-  const xAt = (ns: number) => ml + (ns / detail.cycleNs) * pw;
-  const ticks = [0, 0.25, 0.5, 0.75, 1].map((f) => f * detail.cycleNs);
-
-  return (
-    <figure className="sim-chart flow-gcl-chart">
-      <figcaption>门控时序图（1ms 门周期 · 行按首个开窗起点排序）</figcaption>
-      <svg
-        viewBox={`0 0 ${W} ${H}`}
-        className="sim-chart-svg"
-        role="img"
-        aria-label="门控时序图"
-        preserveAspectRatio="xMidYMid meet"
-      >
-        <title>门控时序图</title>
-        {/* 周期刻度网格：0/250/500/750/1000µs */}
-        {ticks.map((t) => (
-          <g key={t}>
-            <line x1={xAt(t)} y1={mt} x2={xAt(t)} y2={mt + plotH} className="flow-gcl-grid" />
-            <text
-              x={xAt(t)}
-              y={mt + plotH + 16}
-              className="sim-chart-tick"
-              textAnchor={t === 0 ? "start" : "end"}
-            >
-              {t === detail.cycleNs ? "1000 µs" : `${Math.round(t / 1000)}`}
-            </text>
-          </g>
-        ))}
-        {/* 每行：标签「短名·ethN」 + 底色轨道（关窗） + ST 开窗色块 */}
-        {rows.map((row, i) => {
-          const y = mt + i * rowH + (rowH - trackH) / 2;
-          return (
-            <g key={`${row.node}-${row.ethN}`}>
-              <text
-                x={ml - 8}
-                y={y + trackH / 2 + 4}
-                className="sim-chart-tick flow-gcl-row-label"
-                textAnchor="end"
-              >
-                {row.nodeName}·eth{row.ethN}
-              </text>
-              <rect x={ml} y={y} width={pw} height={trackH} rx={3} className="flow-gcl-track" />
-              {row.windows.map(([s, e]) => (
-                <rect
-                  key={`${s}-${e}`}
-                  x={xAt(s)}
-                  y={y}
-                  width={Math.max(((e - s) / detail.cycleNs) * pw, 1.5)}
-                  height={trackH}
-                  rx={2}
-                  fill={CHART_COLORS[0]}
-                  className="flow-gcl-window"
-                >
-                  <title>{`开 ${nsToUs(s)}µs → ${nsToUs(e)}µs（${e - s}ns）`}</title>
-                </rect>
-              ))}
-            </g>
-          );
-        })}
-      </svg>
-      <ul className="sim-chart-legend">
-        <li>
-          <span
-            className="sim-chart-swatch"
-            style={{ background: CHART_COLORS[0] }}
-            aria-hidden="true"
-          />
-          ST 开窗
-        </li>
-        <li>
-          <span className="sim-chart-swatch flow-gcl-swatch-track" aria-hidden="true" />
-          关窗（底色轨道）
-        </li>
-      </ul>
-    </figure>
-  );
-}
-
-/** 门控明细折叠表（U2）：折叠头样式同 sim-override-toggle，列全 mono 数字。 */
-function GclDetailTable({ detail }: { detail: FlowPlanDetail }) {
-  const [expanded, setExpanded] = useState(false);
-  return (
-    <div className="flow-gcl-detail">
-      <button
-        type="button"
-        className="sim-override-toggle"
-        aria-expanded={expanded}
-        onClick={() => setExpanded((value) => !value)}
-      >
-        {expanded ? "▾" : "▸"} 门控明细 · {detail.entries.length} 条目
-      </button>
-      {expanded && (
-        <table className="eng-table flow-gcl-table">
-          <thead>
-            <tr>
-              <th>节点</th>
-              <th>端口</th>
-              <th>门</th>
-              <th>offset(µs)</th>
-              <th>开窗(µs)</th>
-              <th>占空比</th>
-              <th>初态</th>
-            </tr>
-          </thead>
-          <tbody>
-            {detail.entries.map((g) => {
-              const windows = gclOpenIntervals(g, detail.cycleNs);
-              return (
-                <tr key={`${g.node}-${g.ethN}-${g.gateIndex}`}>
-                  <td title={g.node}>{g.nodeName}</td>
-                  <td className="mono">eth{g.ethN}</td>
-                  <td className="mono">{g.gateIndex}</td>
-                  <td className="mono">{nsToUs(g.offsetNs)}</td>
-                  <td className="mono">
-                    {windows.length > 0
-                      ? windows.map(([s, e]) => `${nsToUs(s)}–${nsToUs(e)}`).join("、")
-                      : "—"}
-                  </td>
-                  <td className="mono">{(gclDutyCycle(g, detail.cycleNs) * 100).toFixed(1)}%</td>
-                  <td>{g.initiallyOpen ? "开" : "关"}</td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
       )}
     </div>
   );

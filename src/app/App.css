@@ -2918,6 +2918,100 @@ textarea:focus-visible {
   padding: 0 2px;
 }
 
+/* U9/R15：门控概览八卡（gcl-overview-* 类族）——卡片 grid 复用面板卡片视觉语言
+   （sim-overall 绿/琥珀同色系），窄面板 auto-fit 自动换行。 */
+/* 门控概览静态标题（boss 定不折叠）。 */
+.gcl-overview-title {
+  margin: 0 0 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted, #6b7280);
+}
+
+.gcl-overview {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.gcl-overview-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 8px;
+}
+
+.gcl-overview-card {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #ffffff;
+  text-align: left;
+  font: inherit;
+}
+
+/* 时延分析卡是可点击 button：清默认外观、保留卡片视觉。 */
+button.gcl-overview-card {
+  appearance: none;
+  cursor: pointer;
+}
+
+button.gcl-overview-card:disabled {
+  cursor: default;
+}
+
+.gcl-overview-card__label {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.gcl-overview-card__value {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.gcl-overview-card__sub {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+/* 调度状态绿卡（可调度，复用 sim-overall.converged 色系）。 */
+.gcl-overview-card--ok {
+  border-color: rgba(22, 163, 74, 0.3);
+  background: rgba(236, 253, 245, 0.95);
+}
+
+.gcl-overview-card--ok .gcl-overview-card__value {
+  color: #15803d;
+}
+
+/* 过期琥珀卡（KTD14 stale=需重新规划，复用 sim-overall.warn 色系）。 */
+.gcl-overview-card--stale {
+  border-color: rgba(217, 119, 6, 0.3);
+  background: rgba(255, 251, 235, 0.95);
+}
+
+.gcl-overview-card--stale .gcl-overview-card__value {
+  color: #b45309;
+}
+
+/* 时延分析高亮卡（浅琥珀底）。 */
+.gcl-overview-card--highlight {
+  border-color: rgba(217, 119, 6, 0.2);
+  background: rgba(255, 251, 235, 0.6);
+}
+
+.gcl-overview-latency-table {
+  margin-top: 2px;
+}
+
+.gcl-overview-margin-neg {
+  color: #b91c1c;
+}
+
 .config-tabs {
   display: flex;
   align-items: center;
@@ -4656,6 +4750,101 @@ textarea:focus-visible {
 }
 .flow-detail-modal-hint {
   margin-right: auto;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+/* U5：门控详情弹窗（gcl-detail-* 类族）——复用 flow-detail-modal 层/遮罩结构，全屏尺寸；
+   页签复用 flow-subtabs 分段开关样式。 */
+.gcl-detail-modal {
+  width: 92vw;
+  max-width: 92vw;
+  height: 88vh;
+  max-height: 88vh;
+}
+.gcl-detail-subtitle {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.gcl-detail-state {
+  margin: 24px 0;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+.gcl-detail-filters {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.gcl-detail-filters label {
+  font-size: 13px;
+  color: var(--text-muted);
+}
+.gcl-detail-filters label + select {
+  margin-right: 12px;
+}
+.gcl-detail-tabs {
+  align-self: flex-start;
+}
+.gcl-detail-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+.gcl-table-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+.gcl-table-count {
+  margin-right: auto;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+/* q0-q7 八圆点位图（实心=开 bit=1，空心=关）+ 微字号下标。 */
+.gcl-q-dots {
+  display: inline-flex;
+  gap: 6px;
+}
+.gcl-q {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+}
+.gcl-q-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  border: 1px solid var(--accent);
+}
+.gcl-q-dot.on {
+  background: var(--accent);
+}
+.gcl-q-dot.off {
+  background: transparent;
+  border-color: var(--border);
+}
+.gcl-q-label {
+  font-size: 9px;
+  color: var(--text-muted);
+}
+/* 关联流徽章（class 降级中性色）与空窗标注。 */
+.gcl-flow-ref-badge {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: #0072b2;
+  color: #fff;
+  font-size: 11px;
+  margin-right: 4px;
+}
+.gcl-flow-ref-badge.degraded {
+  background: #6b7280;
+}
+.gcl-flow-ref-empty {
   font-size: 12px;
   color: var(--text-muted);
 }

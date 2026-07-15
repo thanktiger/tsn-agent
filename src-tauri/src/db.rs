@@ -218,10 +218,19 @@ pub const PROJECT_TEMPLATES_SEED_SQL: &str = r#"
 /// `redundant`/`paths` 为 802.1CB 双平面预留槽（R4/R17，本期只留数据槽、不写 FRER 逻辑）。
 /// talker/listener 逻辑上引用 `topology_nodes.mid`，不写跨表 FK（照 timesync 惯例）。
 ///
-/// `flow_plans`（KTD2b 承重事实源）：Z3/Eager 综合出的 GCL，per-(port, gate) 粒度，
-/// 键 `(session_id, stream_seq, node, eth_n, gate_index)`。`durations_ns` 是交替
-/// open/close 时长的 JSON 数组串（单位 ns、和=gateCycleDuration），`offset_ns` 门循环相位，
-/// `solver` 记出处（Z3 带保证 / Eager 无保证，R8）。U7 写、U8 读回 pin、U10 对账共用。
+/// `flow_plans`（历史形态，2026-07-14 起**停写退役**）：per-(port, gate) 一行、durations
+/// 交替 JSON。写路径已切三张门控新表（下），本表暂留（观察一个版本后物理删除），
+/// 写新表的事务内清残留行防旧管线消费中间态。
+///
+/// 门控明细新表体系（2026-07-14，gcl-window U2，KTD1/KTD2）：
+/// - `gcl_windows` 逐窗一行（展示事实源）：`gate_states` 0-255 位图（bit g = gate g 开）、
+///   `flow_refs` JSON 数组 `[{"seq":N,"source":"derived"|"class"}]`（无关联流 NULL）、
+///   provider 进键（本期恒 'inet-z3'，castup 外部求解器留位）。
+/// - `gcl_plan_meta` 每 (session, provider) 一行：status/cycle_ns/algorithm/stale/created_at；
+///   `stale` 是规划过期标记（KTD14：写手置 1，复位仅发生在规划成功事务内）。
+/// - `gcl_raw_archive` 求解 par 行集存档（KTD4：verify pin 重放的事实源，覆盖式最新一份）；
+///   **有意不进 SESSION_SCOPED_TABLES**（不随会话导出、不入 undo 快照——导入方/撤销后
+///   重新规划即恢复）。
 pub const FLOW_DOMAIN_SCHEMA_SQL: &str = r#"
     CREATE TABLE IF NOT EXISTS flow_streams (
         session_id              TEXT    NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
@@ -262,6 +271,38 @@ pub const FLOW_DOMAIN_SCHEMA_SQL: &str = r#"
         durations_ns   TEXT    NOT NULL,
         solver         TEXT    NOT NULL,
         PRIMARY KEY (session_id, stream_seq, node, eth_n, gate_index)
+    );
+
+    CREATE TABLE IF NOT EXISTS gcl_windows (
+        session_id  TEXT    NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        provider    TEXT    NOT NULL,
+        node        TEXT    NOT NULL,
+        eth_n       INTEGER NOT NULL,
+        entry_idx   INTEGER NOT NULL,
+        start_ns    INTEGER NOT NULL,
+        duration_ns INTEGER NOT NULL,
+        gate_states INTEGER NOT NULL,
+        flow_refs   TEXT,
+        PRIMARY KEY (session_id, provider, node, eth_n, entry_idx)
+    );
+
+    CREATE TABLE IF NOT EXISTS gcl_plan_meta (
+        session_id TEXT    NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        provider   TEXT    NOT NULL,
+        status     TEXT    NOT NULL,
+        cycle_ns   INTEGER NOT NULL,
+        algorithm  TEXT    NOT NULL,
+        stale      INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT    NOT NULL,
+        PRIMARY KEY (session_id, provider)
+    );
+
+    CREATE TABLE IF NOT EXISTS gcl_raw_archive (
+        session_id TEXT    NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        provider   TEXT    NOT NULL,
+        par_lines  TEXT    NOT NULL,
+        created_at TEXT    NOT NULL,
+        PRIMARY KEY (session_id, provider)
     );
 "#;
 
@@ -830,6 +871,35 @@ pub const SESSION_SCOPED_TABLES: &[(&str, &[&str])] = &[
             "offset_ns",
             "durations_ns",
             "solver",
+        ],
+    ),
+    (
+        // 门控明细逐窗行（gcl-window U2）：位图 gate_states + flow_refs JSON。
+        "gcl_windows",
+        &[
+            "session_id",
+            "provider",
+            "node",
+            "eth_n",
+            "entry_idx",
+            "start_ns",
+            "duration_ns",
+            "gate_states",
+            "flow_refs",
+        ],
+    ),
+    (
+        // 门控规划元数据（gcl-window U2）：status/cycle_ns/algorithm/stale/created_at。
+        // gcl_raw_archive 有意不进本清单（不随会话导出，KTD1）。
+        "gcl_plan_meta",
+        &[
+            "session_id",
+            "provider",
+            "status",
+            "cycle_ns",
+            "algorithm",
+            "stale",
+            "created_at",
         ],
     ),
 ];

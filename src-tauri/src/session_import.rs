@@ -268,6 +268,17 @@ async fn perform_import_inner(
     // 首列 session_id 改写为 target；其余列经字段级校验后动态 bind。
     // 行数已由 main 事务前的 COUNT 预检约束。
     for (table, cols) in crate::db::SESSION_SCOPED_TABLES {
+        // KTD10 旧导出兼容：源库缺表（老版本导出无门控新表等）按零行跳过，
+        // 降级为空规划态导入，不再硬报错让全部历史导出文件不可导入。
+        let table_exists: Option<String> =
+            sqlx::query_scalar("SELECT name FROM sqlite_master WHERE type='table' AND name = ?")
+                .bind(table)
+                .fetch_optional(src_pool)
+                .await
+                .map_err(|e| format!("源库表探测 {table} 失败：{e}"))?;
+        if table_exists.is_none() {
+            continue;
+        }
         let select_sql = format!(
             "SELECT {} FROM {} WHERE session_id = ?",
             cols.join(", "),
@@ -304,6 +315,15 @@ async fn perform_import_inner(
             }
         }
     }
+
+    // boss 定：导入的工程一律提示重新规划——gcl_raw_archive 有意不随导出（重放源缺位，
+    // verify 会报无规划），置 stale=1 让概览/弹窗出「需重新规划」琥珀提示，口径一致。
+    // 无 gcl_plan_meta 行（未规划/旧导出）则 no-op。
+    sqlx::query("UPDATE gcl_plan_meta SET stale = 1 WHERE session_id = ?")
+        .bind(&target_session_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("导入置 stale 失败：{e}"))?;
 
     tx.commit().await.map_err(|e| format!("commit 失败：{e}"))?;
 
@@ -993,6 +1013,70 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(resp.rows_inserted.topology_nodes, MAX_NODES as u64);
+        });
+    }
+
+    /// Covers KTD10：旧导出文件（无门控新表）按零行跳过导入成功——不硬报错，
+    /// 降级为空规划态。
+    #[test]
+    fn import_skips_missing_new_tables_as_zero_rows() {
+        tauri::async_runtime::block_on(async {
+            let (dir, main_pool) = seed_main_pool().await;
+            let src_pool = source_pool(dir.path()).await;
+            // 模拟旧版本导出：把门控新表从源库删掉。
+            for table in ["gcl_windows", "gcl_plan_meta", "gcl_raw_archive"] {
+                sqlx::query(&format!("DROP TABLE {table}"))
+                    .execute(&src_pool)
+                    .await
+                    .unwrap();
+            }
+            sqlx::query("INSERT INTO sessions (id, title, created_at, updated_at, payload) VALUES ('orig', 't', 'now', 'now', '{}')")
+                .execute(&src_pool).await.unwrap();
+            sqlx::query("INSERT INTO topology_nodes (session_id, mid, x, y, insert_order) VALUES ('orig', '0', 0.0, 0.0, 0), ('orig', '1', 1.0, 1.0, 1)")
+                .execute(&src_pool).await.unwrap();
+            src_pool.close().await;
+
+            let src_path = dir.path().join("src.db");
+            let resp = perform_import(&main_pool, &src_path, Some("legacy"))
+                .await
+                .expect("缺新表的旧导出文件应按零行跳过导入成功");
+            assert_eq!(resp.rows_inserted.topology_nodes, 2);
+            let wins: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM gcl_windows WHERE session_id='legacy'")
+                    .fetch_one(&main_pool)
+                    .await
+                    .unwrap();
+            assert_eq!(wins, 0, "缺表按零行处理（空规划态）");
+        });
+    }
+
+    /// boss 定：导入的已规划工程须提示重新规划——raw 重放源不随导出，
+    /// verify 会报无规划，导入时置 gcl_plan_meta.stale=1 让 UI 出琥珀提示口径一致。
+    #[test]
+    fn import_marks_plan_meta_stale() {
+        tauri::async_runtime::block_on(async {
+            let (dir, main_pool) = seed_main_pool().await;
+            let src_pool = source_pool(dir.path()).await;
+            sqlx::query("INSERT INTO sessions (id, title, created_at, updated_at, payload) VALUES ('orig', 't', 'now', 'now', '{}')")
+                .execute(&src_pool).await.unwrap();
+            // 源工程已规划（meta stale=0）+ 一条窗口行。
+            sqlx::query("INSERT INTO gcl_plan_meta (session_id, provider, status, cycle_ns, algorithm, stale, created_at) VALUES ('orig', 'inet-z3', 'ok', 1000000, 'Z3', 0, 'now')")
+                .execute(&src_pool).await.unwrap();
+            sqlx::query("INSERT INTO gcl_windows (session_id, provider, node, eth_n, entry_idx, start_ns, duration_ns, gate_states, flow_refs) VALUES ('orig', 'inet-z3', '0', 1, 0, 0, 1000000, 255, NULL)")
+                .execute(&src_pool).await.unwrap();
+            src_pool.close().await;
+
+            let src_path = dir.path().join("src.db");
+            let resp = perform_import(&main_pool, &src_path, Some("imported"))
+                .await
+                .unwrap();
+            let stale: i64 =
+                sqlx::query_scalar("SELECT stale FROM gcl_plan_meta WHERE session_id = ?")
+                    .bind(&resp.session_id)
+                    .fetch_one(&main_pool)
+                    .await
+                    .unwrap();
+            assert_eq!(stale, 1, "导入工程的规划应标记过期（需重新规划提示）");
         });
     }
 

@@ -48,7 +48,7 @@ pub struct VerifyError {
 }
 
 impl VerifyError {
-    fn new(code: &str, message_zh: String, node_ref: Option<String>) -> Self {
+    pub(crate) fn new(code: &str, message_zh: String, node_ref: Option<String>) -> Self {
         Self {
             code: code.to_string(),
             message_zh,
@@ -226,6 +226,30 @@ pub async fn verify_flow(
         errors.append(&mut es);
     }
 
+    // 9. R16：ST/BE 显式指定路径（paths.origin=user）的录入校验——链路存在/端点连续/
+    //    首尾锚定/无重复节点/双平面同平面（build_route_from_link_seqs 全套）。
+    if s.class != "RC"
+        && node_mids.contains(&s.talker)
+        && node_mids.contains(&s.listener)
+        && let Some(json) = &s.paths
+        && let Some(fp) = crate::flow_route::parse_flow_paths(json)
+        && fp.origin == "user"
+        && let Some(route) = fp.routes.first()
+    {
+        let (_nodes, links) = load_route_topology(pool, session_id).await?;
+        if let Err(es) = crate::flow_route::build_route_from_link_seqs(
+            &route.link_seqs,
+            &s.talker,
+            &s.listener,
+            &links,
+        ) {
+            errors.extend(
+                es.into_iter()
+                    .map(|e| map_route_error(e, &s.talker, &s.listener)),
+            );
+        }
+    }
+
     Ok(errors)
 }
 
@@ -250,11 +274,22 @@ pub async fn derive_rc_paths(
         )]));
     }
     match derive_redundant_routes(talker, listener, &nodes, &links) {
-        Ok((a, b)) => Ok(Ok(serde_json::json!({
-            "a": { "node_path": a.node_path, "link_seqs": a.link_seqs },
-            "b": { "node_path": b.node_path, "link_seqs": b.link_seqs },
+        // KTD12 统一形状：routes[0]=A 平面、routes[1]=B 平面，origin=system（凭证语义不变）。
+        Ok((a, b)) => Ok(Ok(serde_json::to_string(&crate::flow_route::FlowPaths {
+            version: 1,
+            origin: "system".to_string(),
+            routes: vec![
+                crate::flow_route::PathRoute {
+                    node_path: a.node_path,
+                    link_seqs: a.link_seqs,
+                },
+                crate::flow_route::PathRoute {
+                    node_path: b.node_path,
+                    link_seqs: b.link_seqs,
+                },
+            ],
         })
-        .to_string())),
+        .expect("FlowPaths 序列化不可失败"))),
         Err(errs) => Ok(Err(errs
             .into_iter()
             .map(|e| map_route_error(e, talker, listener))
