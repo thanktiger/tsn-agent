@@ -97,6 +97,12 @@ export function FlowPanel({
   // U5：门控详情弹窗开关（切会话重置）。
   const [gclDetailOpen, setGclDetailOpen] = useState(false);
 
+  // U1/U2（plan 2026-07-15-001）：求解器选择（KTD1 纯前端不穿透写通道；open-planner 置灰预留）
+  // + 重新规划两步流程 armed 快照（KTD2：挂 sessionId，切工程即失效，防跨工程残留）。
+  const [solver, setSolver] = useState<GclSolverChoice>("inet-z3");
+  const [replanSnapshot, setReplanSnapshot] = useState<{ sessionId: string } | null>(null);
+  const replanArmed = replanSnapshot?.sessionId === sessionId;
+
   // KTD1/KTD8 单查询：门控明细（get_gcl_detail）——头行三态 + 概览八卡数据源，面板挂载即拉，
   // 展示态由数据推导（切会话回来凭数据恢复）。三触发源（挂载·切会话 / 规划完成 / flow domain
   // DB 变更）共用；requestSeq 丢弃过期响应（会话已切或更新请求在途）。失败置 unavailable
@@ -155,6 +161,7 @@ export function FlowPanel({
     setOpenModalStream(null);
     setBannerVisible(false);
     setGclDetailOpen(false);
+    setReplanSnapshot(null);
     void refreshStreams();
   }, [refreshStreams]);
 
@@ -185,8 +192,12 @@ export function FlowPanel({
   // 否则按钮收命令栏右上。
   const fresh = planState.status === "idle" && !idleLoading && queryPresentation === "unplanned";
 
+  // U3：stale 禁验证（KTD3 唯一判定源=flow_gcl_plan.stale 列；gclQuery unavailable 时 stale
+  // 不可得，沿用既有 fail-open——按钮闸退回 planState 口径，同现状）。
+  const gclStale = gclQuery.status === "loaded" && (gclQuery.detail.meta?.stale ?? false);
+
   const planDisabled = !inFlowStage || planning;
-  const verifyDisabled = !inFlowStage || verifying || planning || !havePlan;
+  const verifyDisabled = !inFlowStage || verifying || planning || !havePlan || gclStale;
 
   async function handlePlan() {
     if (planDisabled || planInflight.current) return;
@@ -279,7 +290,7 @@ export function FlowPanel({
           {/* 命令栏：右侧规划按钮。渐进式（KTD3）：未规划态规划按钮在 body CTA，有结果后收进右上角。 */}
           <div className="timesync-commandbar flow-commandbar">
             <div className="timesync-commandbar__actions" role="group" aria-label="门控规划操作">
-              {!fresh && !idleLoading && (
+              {!fresh && !idleLoading && !replanArmed && (
                 <>
                   {/* U5：门控详情弹窗入口（无规划数据禁用——数据推导口径同时序图显隐）。 */}
                   <button
@@ -291,10 +302,12 @@ export function FlowPanel({
                   >
                     门控详情
                   </button>
+                  {/* U2 两步流程：置位 armed 回初始视图（不直接重跑，仿 timesync「重新仿真」）；
+                      旧门控表仍在库里，真跑一次规划或切工程可回结果视图（boss 定：无取消路径）。 */}
                   <button
                     type="button"
                     className="btn primary"
-                    onClick={() => void handlePlan()}
+                    onClick={() => setReplanSnapshot({ sessionId })}
                     disabled={planDisabled}
                   >
                     {planning ? "综合中…（分钟级）" : "重新规划"}
@@ -307,12 +320,21 @@ export function FlowPanel({
           {/* R22：分钟级综合进行中反馈。 */}
           {planning && <p className="flow-progress mono">正在跑 Z3 门控综合，分钟级，请稍候…</p>}
 
-          {/* 判定头行（「门控表·N条目 + 求解器徽章」/失败信息）置于概览之上（boss 定）。 */}
-          {idleLoading ? null : fresh ? (
+          {/* U1：求解器选择区（仅初始态 Fresh/Armed 渲染；结果态判定条已有求解器徽章）。 */}
+          {!idleLoading && (fresh || replanArmed) && (
+            <SolverPickerRegion solver={solver} onSelect={setSolver} />
+          )}
+
+          {/* 判定头行（「门控表·N条目 + 求解器徽章」/失败信息）置于概览之上（boss 定）。
+              U2：Armed 态强制回初始 CTA（fresh 推导含「库里无门控表」，armed 单独兜）。 */}
+          {idleLoading ? null : fresh || replanArmed ? (
             <PanelCta
               label="规划门控表"
               hint="用 INET Z3 配置器综合 802.1Qbv 门控表（GCL），结果落库；明细在「门控详情」弹窗查看。"
-              onClick={() => void handlePlan()}
+              onClick={() => {
+                setReplanSnapshot(null);
+                void handlePlan();
+              }}
               disabled={planDisabled}
               title={!inFlowStage ? "请先进入流量规划阶段" : undefined}
             />
@@ -320,8 +342,9 @@ export function FlowPanel({
             <PlanResultArea planState={planState} gclQuery={gclQuery} />
           )}
 
-          {/* U9/R15：门控概览八卡（仅已规划态渲染；数据源=get_gcl_detail，与详情弹窗同源 KTD8）。 */}
-          {queryPresentation === "planned" && gclQuery.status === "loaded" && (
+          {/* U9/R15：门控概览八卡（仅已规划态渲染；数据源=get_gcl_detail，与详情弹窗同源 KTD8）。
+              U2：渲染条件不含 fresh，Armed 须单独收口，否则八卡与初始 CTA 同屏。 */}
+          {queryPresentation === "planned" && gclQuery.status === "loaded" && !replanArmed && (
             <GclOverviewSection overview={buildGclOverview(gclQuery.detail)} />
           )}
 
@@ -350,7 +373,13 @@ export function FlowPanel({
                 className="btn primary"
                 onClick={() => void handleVerify()}
                 disabled={verifyDisabled}
-                title={!havePlan ? "请先规划出门控表" : undefined}
+                title={
+                  !havePlan
+                    ? "请先规划出门控表"
+                    : gclStale
+                      ? "流量参数已变更，请重新规划后再验证"
+                      : undefined
+                }
               >
                 {verifying ? "软仿中…（分钟级）" : "软仿验证"}
               </button>
@@ -401,6 +430,44 @@ export function FlowPanel({
         getGclDetail={getGclDetail}
       />
     </section>
+  );
+}
+
+/** 求解器选择值（CONCEPTS「求解器来源」）：inet-z3 现役；open-planner 预留（置灰不可选）。 */
+type GclSolverChoice = "inet-z3" | "open-planner";
+
+/**
+ * U1 求解器选择区（仅初始态渲染）：原生 radio 组（天然键盘可达）；open-planner disabled
+ * 标「预留」（仿 flow-subtabs hw-deploy 先例）。KTD1：纯前端 state，不穿透 plan_tas。
+ */
+function SolverPickerRegion({
+  solver,
+  onSelect,
+}: {
+  solver: GclSolverChoice;
+  onSelect: (choice: GclSolverChoice) => void;
+}) {
+  return (
+    <div className="solver-picker" role="group" aria-label="求解器选择">
+      <span className="solver-picker__label">求解器</span>
+      <label className="solver-picker__option">
+        <input
+          type="radio"
+          name="gcl-solver"
+          value="inet-z3"
+          checked={solver === "inet-z3"}
+          onChange={() => onSelect("inet-z3")}
+        />
+        inet-z3
+      </label>
+      <label
+        className="solver-picker__option solver-picker__option--reserved"
+        title="预留：调度规划 API 接入后可用"
+      >
+        <input type="radio" name="gcl-solver" value="open-planner" disabled />
+        open-planner（预留）
+      </label>
+    </div>
   );
 }
 

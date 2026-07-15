@@ -2488,6 +2488,35 @@ textarea:focus-visible {
   margin-bottom: 12px;
 }
 
+/* U1（plan 2026-07-15-001）：门控求解器选择区（仅初始态；open-planner 置灰预留）。
+   flex 不用 grid（WebKit grid+overflow 行塌陷坑）。 */
+.solver-picker {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 10px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.solver-picker__label {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.solver-picker__option {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+}
+
+.solver-picker__option--reserved {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 .sim-override-toggle {
   border: 0;
   padding: 4px 0;
