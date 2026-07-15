@@ -41,6 +41,9 @@ pub struct RouteState {
     /// U7：validate 廉价返回缓存——per-session「上次校验通过」的 mutationId。只在此路由层；
     /// 确认闸（verify_topology 命令走 load_and_verify_topology）够不着它、永远全量重算。
     pub last_validated_ok: Arc<Mutex<HashMap<String, u64>>>,
+    /// 门控 raw 存档文件根（app 数据目录；`gcl_raw_store`）：remove_stream 删流清规划时
+    /// 连带删 raw 文件用。生产在 launch 时由 AppHandle 解析注入，测试注入 tempdir。
+    pub gcl_raw_base_dir: std::path::PathBuf,
 }
 
 pub(crate) fn structured_error(
@@ -366,7 +369,7 @@ async fn persist_initialized_topology(
     }
 
     // KTD14 拓扑写手：initialize 全量重建会重发 link_seq，既有门控规划随之过期
-    // ——同事务置 gcl_plan_meta.stale（无行 no-op）。指定路径不级联清（KTD11 惰性
+    // ——同事务置 flow_gcl_plan.stale（无行 no-op）。指定路径不级联清（KTD11 惰性
     // PATH_STALE 防线），只置过期标记。
     crate::flow_plan_command::mark_gcl_stale(&mut *conn, session_id)
         .await
@@ -966,7 +969,7 @@ mod tests {
         });
     }
 
-    /// KTD14 拓扑写手：initialize 全量重建（link_seq 重编号）→ 同事务置 gcl_plan_meta.stale。
+    /// KTD14 拓扑写手：initialize 全量重建（link_seq 重编号）→ 同事务置 flow_gcl_plan.stale。
     #[test]
     fn persist_initialized_topology_marks_gcl_stale() {
         tauri::async_runtime::block_on(async {
@@ -983,7 +986,7 @@ mod tests {
                 .execute(&pool)
                 .await
                 .unwrap();
-            sqlx::query("INSERT INTO gcl_plan_meta (session_id, provider, status, cycle_ns, algorithm, stale, created_at) VALUES ('s1', 'inet-z3', 'ok', 1000000, 'Z3', 0, 'now')")
+            sqlx::query("INSERT INTO flow_gcl_plan (session_id, provider, status, cycle_ns, algorithm, stale, created_at, windows_json) VALUES ('s1', 'inet-z3', 'ok', 1000000, 'Z3', 0, 'now', '[]')")
                 .execute(&pool)
                 .await
                 .unwrap();
@@ -1006,7 +1009,7 @@ mod tests {
                 .unwrap();
 
             let stale: i64 =
-                sqlx::query_scalar("SELECT stale FROM gcl_plan_meta WHERE session_id = 's1'")
+                sqlx::query_scalar("SELECT stale FROM flow_gcl_plan WHERE session_id = 's1'")
                     .fetch_one(&pool)
                     .await
                     .unwrap();

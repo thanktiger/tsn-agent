@@ -1,13 +1,12 @@
-//! `plan_tas`（U7）：让 INET Z3 配置器真算 802.1Qbv 门控表（GCL），app 读回落门控明细
-//! 新表体系（`gcl_windows` / `gcl_plan_meta` / `gcl_raw_archive`，2026-07-14 U2）。
+//! `plan_tas`（U7）：让 INET Z3 配置器真算 802.1Qbv 门控表（GCL），app 读回落门控结果
+//! 单表 `flow_gcl_plan`（2026-07-15 单表化）+ raw par 行出库文件（`gcl_raw_store`）。
 //!
 //! 流程（KTD1 可测内核 + 注入式 client）：读流集 → **只保留 ST 流**（R4/KTD4：RC/BE 不进
-//! synth bundle、不排窗；无 ST 流写 meta=`no_gating` 并清表，R5）→ 逐 ST 流推导路径
-//! （U5，喂 pathFragments；双平面锁平面 A，KTD6）→ 组 synth flow+TAS bundle（U6）→
-//! `InetSimPlanClient::plan_gcl` 跑配置器 + dump `.sca`（U1/U6 spike）→ 解析 GCL（ned→mid，
-//! **含空 durations 恒态门**）→ **不可行/空则判 FAIL 不落空表（R10）** → 位图合成（KTD3
-//! 切分点法）+ 流关联匹配（KTD5 首跳锚定 + 窗长指纹）→ 全量覆盖写三新表 + par 行存档。
-//! `flow_plans` 停写退役（写事务内清残留行防旧管线消费中间态）。
+//! synth bundle、不排窗；无 ST 流写行 status=`no_gating` 并删 raw 文件，R5）→ 逐 ST 流推导
+//! 路径（U5，喂 pathFragments；双平面锁平面 A，KTD6）→ `InetSimPlanClient::plan_gcl` 跑
+//! 配置器 + dump `.sca`（U1/U6 spike）→ 解析 GCL（ned→mid，**含空 durations 恒态门**）→
+//! **不可行/空则判 FAIL 不落空表（R10）** → 位图合成（KTD3 切分点法）+ 流关联匹配（KTD5
+//! 首跳锚定 + 窗长指纹）→ 覆盖写 `flow_gcl_plan` 单行（windows_json）+ raw 写文件。
 //! 求解器出处（Z3 带保证 / Eager 无保证，R8）随结果 + 落库记录。
 //! `.sca` 解析 / 位图合成 / 流关联匹配等 KTD3/KTD5 纯函数在 `gcl_synth` 模块。
 //!
@@ -32,8 +31,8 @@ use crate::inet_sim_http::InetSimPlanClient;
 
 pub const CALIBER_FLOW_TAS_PLANNED: &str = "flow_tas_planned";
 
-/// 门控新表体系的 provider 键值（KTD1/KTD6，进三表 PK）：本期唯一 provider；
-/// castup 外部求解器接入时另立值。
+/// 门控结果的 provider 键值（KTD1/KTD6，进 `flow_gcl_plan` PK 与 raw 文件名）：
+/// 本期唯一 provider；castup 外部求解器接入时另立值。
 pub(crate) const GCL_PROVIDER: &str = "inet-z3";
 
 /// 规划结果（前端/agent 消费）。status 区分各态；solver 记出处（R8/KTD7 诚实边界）。
@@ -119,23 +118,30 @@ pub(crate) async fn load_streams(
 /// 端口键 `(node mid, ethN)` → 每门开窗区间集（位图合成中间形态）。
 type PortGateIntervals = BTreeMap<(String, usize), BTreeMap<usize, Vec<(u64, u64)>>>;
 
-/// 全量覆盖写门控新表体系（U2 落库切换）：事务内 undo 快照先行 → 清三新表该 session 行
-/// + 清 `flow_plans` 残留（停写 ≠ 留残留，防陈旧 pin 中间态被旧管线静默消费）→ 按 status：
-/// - `ok`：写 windows + meta（stale=0，KTD14 复位仅发生在规划成功事务内）+ raw 存档
-///   （par 行集覆盖式最新一份）。
-/// - `no_gating`：只写 meta，windows/raw 保持清空（R5）。
+/// 覆盖写门控结果单行（2026-07-15 单表化）：事务内 undo 快照先行 → DELETE 该 session
+/// 的 `flow_gcl_plan` 行 → INSERT 单行（windows 序列化进 `windows_json`）→ **提交前**
+/// 写/删 raw 文件 → commit。按 status：
+/// - `ok`：行 stale=0（KTD14 复位仅发生在规划成功事务内）+ raw par 行覆盖写文件。
+/// - `no_gating`：行 windows_json='[]' + 删 raw 文件（R5）。
+///
+/// raw 文件在 commit 前操作：文件写失败则不提交（事务随 drop 回滚），DB 与文件不会
+/// 出现「行是新规划、文件是旧存档」的错配；文件成功后 commit 失败仅多留一份将被
+/// 下次覆盖的文件（verify 读它会与旧行 algorithm 组合，属可接受窗口——重规划即对齐）。
 ///
 /// 失败态（solver_failed/unreachable）**不走本函数**——不写不清，保留上一次规划（R10/KTD1）。
-async fn write_gcl_tables(
+async fn write_gcl_plan(
     pool: &sqlx::Pool<sqlx::Sqlite>,
+    base_dir: &std::path::Path,
     session_id: &str,
     status: &str,
     algorithm: &str,
     windows: &[GclWindowRow],
     par_lines: Option<&str>,
 ) -> Result<(), String> {
+    let windows_json =
+        serde_json::to_string(windows).map_err(|e| format!("序列化 windows_json 失败：{e}"))?;
     let mut tx = pool.begin().await.map_err(|e| format!("开事务失败：{e}"))?;
-    // 写前快照（flow domain，撤销留位）。
+    // 写前快照（flow domain，撤销留位；raw 文件不参与 undo）。
     crate::topology_undo::snapshot_pre_image(
         &mut tx,
         session_id,
@@ -143,82 +149,53 @@ async fn write_gcl_tables(
     )
     .await
     .map_err(|e| format!("快照失败：{e}"))?;
-    for table in [
-        "gcl_windows",
-        "gcl_plan_meta",
-        "gcl_raw_archive",
-        "flow_plans",
-    ] {
-        sqlx::query(&format!("DELETE FROM {table} WHERE session_id = ?"))
-            .bind(session_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| format!("清 {table} 失败：{e}"))?;
-    }
-    for w in windows {
-        sqlx::query(
-            "INSERT INTO gcl_windows (session_id, provider, node, eth_n, entry_idx, start_ns, duration_ns, gate_states, flow_refs) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        )
+    sqlx::query("DELETE FROM flow_gcl_plan WHERE session_id = ?")
         .bind(session_id)
-        .bind(GCL_PROVIDER)
-        .bind(&w.node)
-        .bind(w.eth_n as i64)
-        .bind(w.entry_idx as i64)
-        .bind(w.start_ns as i64)
-        .bind(w.duration_ns as i64)
-        .bind(w.gate_states as i64)
-        .bind(&w.flow_refs)
         .execute(&mut *tx)
         .await
-        .map_err(|e| format!("写 gcl_windows 失败：{e}"))?;
-    }
+        .map_err(|e| format!("清 flow_gcl_plan 失败：{e}"))?;
     sqlx::query(
-        "INSERT INTO gcl_plan_meta (session_id, provider, status, cycle_ns, algorithm, stale, created_at) \
-         VALUES (?, ?, ?, ?, ?, 0, datetime('now'))",
+        "INSERT INTO flow_gcl_plan (session_id, provider, status, cycle_ns, algorithm, stale, created_at, windows_json) \
+         VALUES (?, ?, ?, ?, ?, 0, datetime('now'), ?)",
     )
     .bind(session_id)
     .bind(GCL_PROVIDER)
     .bind(status)
     .bind(GATE_CYCLE_NS as i64)
     .bind(algorithm)
+    .bind(&windows_json)
     .execute(&mut *tx)
     .await
-    .map_err(|e| format!("写 gcl_plan_meta 失败：{e}"))?;
-    if let Some(par) = par_lines {
-        sqlx::query(
-            "INSERT INTO gcl_raw_archive (session_id, provider, par_lines, created_at) \
-             VALUES (?, ?, ?, datetime('now'))",
-        )
-        .bind(session_id)
-        .bind(GCL_PROVIDER)
-        .bind(par)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| format!("写 gcl_raw_archive 失败：{e}"))?;
+    .map_err(|e| format!("写 flow_gcl_plan 失败：{e}"))?;
+    // raw 文件（提交前，见函数注释）：有 par 覆盖写；无（no_gating）删旧文件。
+    match par_lines {
+        Some(par) => crate::gcl_raw_store::write_raw(base_dir, session_id, GCL_PROVIDER, par)?,
+        None => crate::gcl_raw_store::remove_raw(base_dir, session_id, GCL_PROVIDER)?,
     }
     tx.commit().await.map_err(|e| format!("提交失败：{e}"))?;
     Ok(())
 }
 
-/// KTD14 stale 写手：置 `gcl_plan_meta.stale=1`（无行 no-op）。写手清单 = 加流 / 改规划
-/// 字段或路径 / 拓扑结构变更（initialize 与增删链路）；删流清整张 meta 表故无需置位。
-/// **复位仅发生在规划成功事务内**（`write_gcl_tables` 重写 meta 行 stale=0）。
+/// KTD14 stale 写手：置 `flow_gcl_plan.stale=1`（无行 no-op）。写手清单 = 加流 / 改规划
+/// 字段或路径 / 拓扑结构变更（initialize 与增删链路）；删流清整行故无需置位。
+/// **复位仅发生在规划成功事务内**（`write_gcl_plan` 重写行 stale=0）。
 pub(crate) async fn mark_gcl_stale<'e, E>(executor: E, session_id: &str) -> Result<(), String>
 where
     E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
 {
-    sqlx::query("UPDATE gcl_plan_meta SET stale = 1 WHERE session_id = ?")
+    sqlx::query("UPDATE flow_gcl_plan SET stale = 1 WHERE session_id = ?")
         .bind(session_id)
         .execute(executor)
         .await
-        .map_err(|e| format!("置 gcl_plan_meta.stale 失败：{e}"))?;
+        .map_err(|e| format!("置 flow_gcl_plan.stale 失败：{e}"))?;
     Ok(())
 }
 
 /// 可测内核：注入 `InetSimPlanClient`，编排 流集 → 路径 → synth bundle → 跑配置器 → 解析 → 落库。
+/// `base_dir` = raw 文件存档根（生产由 AppHandle 解析、测试传 tempdir，见 `gcl_raw_store`）。
 pub async fn plan_tas_inner<P: InetSimPlanClient>(
     pool: &sqlx::Pool<sqlx::Sqlite>,
+    base_dir: &std::path::Path,
     session_id: &str,
     plan_client: &P,
     base_url: &str,
@@ -237,8 +214,8 @@ pub async fn plan_tas_inner<P: InetSimPlanClient>(
     let has_rc = streams.iter().any(|s| s.class == "RC");
     let st_streams: Vec<&DbStream> = streams.iter().filter(|s| s.class == "ST").collect();
     if st_streams.is_empty() {
-        // R5：无 ST 流 → 跳过求解器，meta 记 no_gating、清 windows/raw 与 flow_plans 存量。
-        write_gcl_tables(pool, session_id, "no_gating", "Z3", &[], None).await?;
+        // R5：无 ST 流 → 跳过求解器，行记 no_gating（windows_json='[]'）、删 raw 文件。
+        write_gcl_plan(pool, base_dir, session_id, "no_gating", "Z3", &[], None).await?;
         return Ok(PlanResult::simple(
             "no_gating",
             "流集无 ST 流，无需门控综合；可直接验证。",
@@ -486,8 +463,9 @@ pub async fn plan_tas_inner<P: InetSimPlanClient>(
         }
     }
 
-    write_gcl_tables(
+    write_gcl_plan(
         pool,
+        base_dir,
         session_id,
         "ok",
         &solver,
@@ -531,8 +509,10 @@ pub async fn plan_tas(
             Some("InetSimHttpConfig.base_url 为空。".to_string()),
         ));
     };
+    let base_dir = crate::gcl_raw_store::resolve_base_dir(&app)?;
     plan_tas_inner(
         pool,
+        &base_dir,
         &request.session_id,
         &crate::inet_sim_http::ReqwestInetSimClient,
         &base_url,
@@ -635,19 +615,34 @@ mod tests {
             .bind(seq).bind(class).bind(pcp).execute(pool).await.unwrap();
     }
 
-    /// AE2：约束可满足 → Z3 出 GCL，出处记 Z3，落门控新表（U2：flow_plans 停写、
-    /// 残留清空；windows 位图逐窗 + meta + raw 存档齐全）。
+    /// 读 flow_gcl_plan 单行（status/cycle/algorithm/stale + windows_json 反序列化）。
+    async fn read_plan_row(
+        pool: &sqlx::Pool<sqlx::Sqlite>,
+    ) -> Option<(String, i64, String, i64, Vec<GclWindowRow>)> {
+        let row: Option<(String, i64, String, i64, String)> = sqlx::query_as(
+            "SELECT status, cycle_ns, algorithm, stale, windows_json FROM flow_gcl_plan \
+             WHERE session_id='s1' AND provider='inet-z3'",
+        )
+        .fetch_optional(pool)
+        .await
+        .unwrap();
+        row.map(|(status, cycle, algo, stale, windows_json)| {
+            let windows: Vec<GclWindowRow> = serde_json::from_str(&windows_json).unwrap();
+            (status, cycle, algo, stale, windows)
+        })
+    }
+
+    /// AE2：约束可满足 → Z3 出 GCL，出处记 Z3，落 flow_gcl_plan 单行（windows_json
+    /// 位图逐窗 + meta 列齐全）+ raw par 行写文件。
     #[test]
     fn plan_tas_synthesizes_and_persists() {
         tauri::async_runtime::block_on(async {
             let pool = fresh_pool().await;
+            let dir = tempfile::tempdir().unwrap();
             seed_linear(&pool).await;
             add_stream(&pool, 0, "ST", 7).await;
-            // flow_plans 残留（旧管线）——写路径须清（停写 ≠ 留残留）。
-            sqlx::query("INSERT INTO flow_plans (session_id, stream_seq, node, eth_n, gate_index, initially_open, offset_ns, durations_ns, solver) VALUES ('s1', 0, '0', 1, 7, 1, 0, '[1]', 'Z3')")
-                .execute(&pool).await.unwrap();
-            // KTD14：预置 stale=1 的旧 meta——规划成功须复位为 0（覆盖式重写）。
-            sqlx::query("INSERT INTO gcl_plan_meta (session_id, provider, status, cycle_ns, algorithm, stale, created_at) VALUES ('s1', 'inet-z3', 'ok', 1000000, 'Z3', 1, 'now')")
+            // KTD14：预置 stale=1 的旧行——规划成功须复位为 0（覆盖式重写）。
+            sqlx::query("INSERT INTO flow_gcl_plan (session_id, provider, status, cycle_ns, algorithm, stale, created_at, windows_json) VALUES ('s1', 'inet-z3', 'ok', 1000000, 'Z3', 1, 'now', '[]')")
                 .execute(&pool).await.unwrap();
             // mock 服务回 sw1 gate 的 .sca（node ned sw1 → mid 0）。
             let sca = "par N.sw1.eth[1].macLayer.queue.transmissionGate[0] initiallyOpen true\npar N.sw1.eth[1].macLayer.queue.transmissionGate[0] offset 0s\npar N.sw1.eth[1].macLayer.queue.transmissionGate[0] durations \"[300us, 700us]\"\n";
@@ -659,52 +654,43 @@ mod tests {
                     solver: Some("Z3".into()),
                 }),
             };
-            let r = plan_tas_inner(&pool, "s1", &client, "http://x")
+            let r = plan_tas_inner(&pool, dir.path(), "s1", &client, "http://x")
                 .await
                 .unwrap();
             assert_eq!(r.status, "ok", "{r:?}");
             assert_eq!(r.solver.as_deref(), Some("Z3"));
             assert_eq!(r.gate_count, 1);
-            // flow_plans 停写且残留被清。
-            let plans_left: i64 =
-                sqlx::query_scalar("SELECT COUNT(*) FROM flow_plans WHERE session_id='s1'")
-                    .fetch_one(&pool)
-                    .await
-                    .unwrap();
-            assert_eq!(plans_left, 0, "flow_plans 停写且残留清空");
-            // gcl_windows：gate0 开窗 [0,300us) → 两窗（0x01 / 0x00），node=mid 0。
-            let wins: Vec<(String, i64, i64, i64, i64, i64)> = sqlx::query_as(
-                "SELECT node, eth_n, entry_idx, start_ns, duration_ns, gate_states \
-                 FROM gcl_windows WHERE session_id='s1' AND provider='inet-z3' ORDER BY entry_idx",
-            )
-            .fetch_all(&pool)
-            .await
-            .unwrap();
+            // 单行：status ok / cycle / algorithm / stale=0；windows_json 逐窗
+            // （gate0 开窗 [0,300us) → 两窗 0x01 / 0x00，node=mid 0）。
+            let (status, cycle, algo, stale, wins) = read_plan_row(&pool).await.unwrap();
             assert_eq!(
-                wins,
+                (status.as_str(), cycle, algo.as_str(), stale),
+                ("ok", 1_000_000, "Z3", 0)
+            );
+            let projected: Vec<(String, usize, usize, u64, u64, u8)> = wins
+                .iter()
+                .map(|w| {
+                    (
+                        w.node.clone(),
+                        w.eth_n,
+                        w.entry_idx,
+                        w.start_ns,
+                        w.duration_ns,
+                        w.gate_states,
+                    )
+                })
+                .collect();
+            assert_eq!(
+                projected,
                 vec![
                     ("0".into(), 1, 0, 0, 300_000, 0x01),
                     ("0".into(), 1, 1, 300_000, 700_000, 0x00),
                 ]
             );
-            // meta：status ok / cycle / algorithm / stale=0。
-            let (status, cycle, algo, stale): (String, i64, String, i64) = sqlx::query_as(
-                "SELECT status, cycle_ns, algorithm, stale FROM gcl_plan_meta WHERE session_id='s1' AND provider='inet-z3'",
-            )
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-            assert_eq!(
-                (status.as_str(), cycle, algo.as_str(), stale),
-                ("ok", 1_000_000, "Z3", 0)
-            );
-            // raw 存档 = 服务返回的 par 行集原文。
-            let par: String = sqlx::query_scalar(
-                "SELECT par_lines FROM gcl_raw_archive WHERE session_id='s1' AND provider='inet-z3'",
-            )
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+            // raw 文件 = 服务返回的 par 行集原文。
+            let par = crate::gcl_raw_store::read_raw(dir.path(), "s1", GCL_PROVIDER)
+                .unwrap()
+                .expect("应有 raw 文件");
             assert_eq!(par, sca);
         });
     }
@@ -715,6 +701,7 @@ mod tests {
     fn plan_tas_route_error_names_stream_and_guides_to_path_pick() {
         tauri::async_runtime::block_on(async {
             let pool = fresh_pool().await;
+            let dir = tempfile::tempdir().unwrap();
             // 菱形：1—0—2 与 1—3—2 两条等长路径（无 plane 键 → AMBIGUOUS_ROUTE）。
             for (mid, ty, ord) in [
                 ("0", "switch", 0),
@@ -743,7 +730,7 @@ mod tests {
             let client = MockPlanClient {
                 result: Err("不该被调用".into()),
             };
-            let r = plan_tas_inner(&pool, "s1", &client, "http://x")
+            let r = plan_tas_inner(&pool, dir.path(), "s1", &client, "http://x")
                 .await
                 .unwrap();
             assert_eq!(r.status, "route_error", "{r:?}");
@@ -761,6 +748,7 @@ mod tests {
     fn plan_tas_infeasible_fails_without_empty_table() {
         tauri::async_runtime::block_on(async {
             let pool = fresh_pool().await;
+            let dir = tempfile::tempdir().unwrap();
             seed_linear(&pool).await;
             add_stream(&pool, 0, "ST", 7).await;
             let client = MockPlanClient {
@@ -771,41 +759,37 @@ mod tests {
                     solver: None,
                 }),
             };
-            let r = plan_tas_inner(&pool, "s1", &client, "http://x")
+            let r = plan_tas_inner(&pool, dir.path(), "s1", &client, "http://x")
                 .await
                 .unwrap();
             assert_eq!(r.status, "solver_failed", "{r:?}");
-            for table in [
-                "flow_plans",
-                "gcl_windows",
-                "gcl_plan_meta",
-                "gcl_raw_archive",
-            ] {
-                let count: i64 = sqlx::query_scalar(&format!(
-                    "SELECT COUNT(*) FROM {table} WHERE session_id='s1'"
-                ))
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-                assert_eq!(count, 0, "不可行不得落空/半截 {table}（R10）");
-            }
+            let count: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM flow_gcl_plan WHERE session_id='s1'")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(count, 0, "不可行不得落空/半截 flow_gcl_plan（R10）");
+            assert!(
+                crate::gcl_raw_store::read_raw(dir.path(), "s1", GCL_PROVIDER)
+                    .unwrap()
+                    .is_none(),
+                "不可行不得写 raw 文件（R10）"
+            );
         });
     }
 
-    /// KTD1/KTD14：失败态**不写不清**——上一次规划（windows/meta/raw）原样保留，
+    /// KTD1/KTD14：失败态**不写不清**——上一次规划（行 + raw 文件）原样保留，
     /// 且已置位的 stale 保持 true（复位仅发生在规划成功事务内）。
     #[test]
     fn plan_tas_failure_preserves_previous_plan_and_stale() {
         tauri::async_runtime::block_on(async {
             let pool = fresh_pool().await;
+            let dir = tempfile::tempdir().unwrap();
             seed_linear(&pool).await;
             add_stream(&pool, 0, "ST", 7).await;
-            sqlx::query("INSERT INTO gcl_windows (session_id, provider, node, eth_n, entry_idx, start_ns, duration_ns, gate_states, flow_refs) VALUES ('s1', 'inet-z3', '0', 1, 0, 0, 1000000, 255, NULL)")
+            sqlx::query("INSERT INTO flow_gcl_plan (session_id, provider, status, cycle_ns, algorithm, stale, created_at, windows_json) VALUES ('s1', 'inet-z3', 'ok', 1000000, 'Z3', 1, 'now', '[{\"node\":\"0\",\"ethN\":1,\"entryIdx\":0,\"startNs\":0,\"durationNs\":1000000,\"gateStates\":255,\"flowRefs\":null}]')")
                 .execute(&pool).await.unwrap();
-            sqlx::query("INSERT INTO gcl_plan_meta (session_id, provider, status, cycle_ns, algorithm, stale, created_at) VALUES ('s1', 'inet-z3', 'ok', 1000000, 'Z3', 1, 'now')")
-                .execute(&pool).await.unwrap();
-            sqlx::query("INSERT INTO gcl_raw_archive (session_id, provider, par_lines, created_at) VALUES ('s1', 'inet-z3', 'prev-par', 'now')")
-                .execute(&pool).await.unwrap();
+            crate::gcl_raw_store::write_raw(dir.path(), "s1", GCL_PROVIDER, "prev-par").unwrap();
             let client = MockPlanClient {
                 result: Ok(HttpPlanResult {
                     exit_code: 1,
@@ -814,59 +798,45 @@ mod tests {
                     solver: None,
                 }),
             };
-            let r = plan_tas_inner(&pool, "s1", &client, "http://x")
+            let r = plan_tas_inner(&pool, dir.path(), "s1", &client, "http://x")
                 .await
                 .unwrap();
             assert_eq!(r.status, "solver_failed", "{r:?}");
-            let wins: i64 =
-                sqlx::query_scalar("SELECT COUNT(*) FROM gcl_windows WHERE session_id='s1'")
-                    .fetch_one(&pool)
-                    .await
-                    .unwrap();
-            assert_eq!(wins, 1, "失败不得清上一次 windows");
-            let (status, stale): (String, i64) =
-                sqlx::query_as("SELECT status, stale FROM gcl_plan_meta WHERE session_id='s1'")
-                    .fetch_one(&pool)
-                    .await
-                    .unwrap();
+            let (status, _cycle, _algo, stale, wins) = read_plan_row(&pool).await.unwrap();
+            assert_eq!(wins.len(), 1, "失败不得清上一次 windows");
             assert_eq!(
                 (status.as_str(), stale),
                 ("ok", 1),
-                "meta 原样、stale 保持 true"
+                "行原样、stale 保持 true"
             );
-            let par: String =
-                sqlx::query_scalar("SELECT par_lines FROM gcl_raw_archive WHERE session_id='s1'")
-                    .fetch_one(&pool)
-                    .await
-                    .unwrap();
-            assert_eq!(par, "prev-par", "失败不得动 raw 存档");
+            let par = crate::gcl_raw_store::read_raw(dir.path(), "s1", GCL_PROVIDER)
+                .unwrap()
+                .expect("raw 文件仍在");
+            assert_eq!(par, "prev-par", "失败不得动 raw 文件");
         });
     }
 
-    /// KTD2/R4：raw 存档覆盖式最新一份——旧存档被新规划的 par 行集替换。
+    /// KTD2/R4：raw 文件覆盖式最新一份——旧存档被新规划的 par 行集替换。
     #[test]
     fn plan_tas_overwrites_raw_archive() {
         tauri::async_runtime::block_on(async {
             let pool = fresh_pool().await;
+            let dir = tempfile::tempdir().unwrap();
             seed_linear(&pool).await;
             add_stream(&pool, 0, "ST", 7).await;
-            sqlx::query("INSERT INTO gcl_raw_archive (session_id, provider, par_lines, created_at) VALUES ('s1', 'inet-z3', 'stale-par', 'now')")
-                .execute(&pool).await.unwrap();
+            crate::gcl_raw_store::write_raw(dir.path(), "s1", GCL_PROVIDER, "stale-par").unwrap();
             let client = MockPlanClient {
                 result: ok_plan_result(),
             };
-            let r = plan_tas_inner(&pool, "s1", &client, "http://x")
+            let r = plan_tas_inner(&pool, dir.path(), "s1", &client, "http://x")
                 .await
                 .unwrap();
             assert_eq!(r.status, "ok", "{r:?}");
-            let pars: Vec<String> =
-                sqlx::query_scalar("SELECT par_lines FROM gcl_raw_archive WHERE session_id='s1'")
-                    .fetch_all(&pool)
-                    .await
-                    .unwrap();
-            assert_eq!(pars.len(), 1, "覆盖式只留一份");
-            assert!(pars[0].contains("transmissionGate[7]"), "{}", pars[0]);
-            assert!(!pars[0].contains("stale-par"));
+            let par = crate::gcl_raw_store::read_raw(dir.path(), "s1", GCL_PROVIDER)
+                .unwrap()
+                .expect("应有 raw 文件");
+            assert!(par.contains("transmissionGate[7]"), "{par}");
+            assert!(!par.contains("stale-par"), "覆盖式只留最新一份");
         });
     }
 
@@ -876,6 +846,7 @@ mod tests {
     fn plan_tas_writes_derived_flow_refs() {
         tauri::async_runtime::block_on(async {
             let pool = fresh_pool().await;
+            let dir = tempfile::tempdir().unwrap();
             seed_linear(&pool).await;
             // 周期 = 门控周期（单实例），frame 512 → tx = (512+58)*8 = 4560ns。
             sqlx::query("INSERT INTO flow_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener) VALUES ('s1', 0, 'ST', 7, 1000, 512, 100, '1', '2')")
@@ -897,36 +868,32 @@ mod tests {
                     solver: Some("Z3".into()),
                 }),
             };
-            let r = plan_tas_inner(&pool, "s1", &client, "http://x")
+            let r = plan_tas_inner(&pool, dir.path(), "s1", &client, "http://x")
                 .await
                 .unwrap();
             assert_eq!(r.status, "ok", "{r:?}");
+            let (_, _, _, _, wins) = read_plan_row(&pool).await.unwrap();
+            let find = |node: &str, eth: usize, idx: usize| {
+                wins.iter()
+                    .find(|w| w.node == node && w.eth_n == eth && w.entry_idx == idx)
+                    .unwrap()
+            };
             // sw1(mid 0) eth1：三窗，开窗（idx1）带 derived 引用。
-            let (bits, refs): (i64, Option<String>) = sqlx::query_as(
-                "SELECT gate_states, flow_refs FROM gcl_windows WHERE session_id='s1' AND node='0' AND eth_n=1 AND entry_idx=1",
-            )
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-            assert_eq!(bits, 0x80);
-            assert_eq!(refs.as_deref(), Some(r#"[{"seq":0,"source":"derived"}]"#));
+            let w = find("0", 1, 1);
+            assert_eq!(w.gate_states, 0x80);
+            assert_eq!(
+                w.flow_refs.as_deref(),
+                Some(r#"[{"seq":0,"source":"derived"}]"#)
+            );
             // es1(mid 1) eth0：首窗（首跳锚定）带 derived 引用。
-            let (bits, refs): (i64, Option<String>) = sqlx::query_as(
-                "SELECT gate_states, flow_refs FROM gcl_windows WHERE session_id='s1' AND node='1' AND eth_n=0 AND entry_idx=0",
-            )
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-            assert_eq!(bits, 0x80);
-            assert_eq!(refs.as_deref(), Some(r#"[{"seq":0,"source":"derived"}]"#));
-            // 关窗行 flow_refs = NULL。
-            let refs: Option<String> = sqlx::query_scalar(
-                "SELECT flow_refs FROM gcl_windows WHERE session_id='s1' AND node='0' AND eth_n=1 AND entry_idx=0",
-            )
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-            assert!(refs.is_none(), "关窗行不得有流引用");
+            let w = find("1", 0, 0);
+            assert_eq!(w.gate_states, 0x80);
+            assert_eq!(
+                w.flow_refs.as_deref(),
+                Some(r#"[{"seq":0,"source":"derived"}]"#)
+            );
+            // 关窗行 flowRefs = null。
+            assert!(find("0", 1, 0).flow_refs.is_none(), "关窗行不得有流引用");
         });
     }
 
@@ -935,23 +902,26 @@ mod tests {
     fn plan_tas_missing_offsets_degrade_to_class() {
         tauri::async_runtime::block_on(async {
             let pool = fresh_pool().await;
+            let dir = tempfile::tempdir().unwrap();
             seed_linear(&pool).await;
             add_stream(&pool, 0, "ST", 7).await;
             // ok_plan_result 的 sca 只有门参数行、无 initialProductionOffset。
             let client = MockPlanClient {
                 result: ok_plan_result(),
             };
-            let r = plan_tas_inner(&pool, "s1", &client, "http://x")
+            let r = plan_tas_inner(&pool, dir.path(), "s1", &client, "http://x")
                 .await
                 .unwrap();
             assert_eq!(r.status, "ok", "{r:?}");
-            let refs: Option<String> = sqlx::query_scalar(
-                "SELECT flow_refs FROM gcl_windows WHERE session_id='s1' AND node='0' AND eth_n=1 AND entry_idx=0",
-            )
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-            assert_eq!(refs.as_deref(), Some(r#"[{"seq":0,"source":"class"}]"#));
+            let (_, _, _, _, wins) = read_plan_row(&pool).await.unwrap();
+            let w = wins
+                .iter()
+                .find(|w| w.node == "0" && w.eth_n == 1 && w.entry_idx == 0)
+                .unwrap();
+            assert_eq!(
+                w.flow_refs.as_deref(),
+                Some(r#"[{"seq":0,"source":"class"}]"#)
+            );
         });
     }
 
@@ -960,6 +930,7 @@ mod tests {
     fn plan_tas_empty_gcl_fails() {
         tauri::async_runtime::block_on(async {
             let pool = fresh_pool().await;
+            let dir = tempfile::tempdir().unwrap();
             seed_linear(&pool).await;
             add_stream(&pool, 0, "ST", 7).await;
             let client = MockPlanClient {
@@ -972,7 +943,7 @@ mod tests {
                     solver: Some("Z3".into()),
                 }),
             };
-            let r = plan_tas_inner(&pool, "s1", &client, "http://x")
+            let r = plan_tas_inner(&pool, dir.path(), "s1", &client, "http://x")
                 .await
                 .unwrap();
             assert_eq!(r.status, "solver_failed", "{r:?}");
@@ -984,6 +955,7 @@ mod tests {
     fn plan_tas_no_streams() {
         tauri::async_runtime::block_on(async {
             let pool = fresh_pool().await;
+            let dir = tempfile::tempdir().unwrap();
             seed_linear(&pool).await;
             let client = MockPlanClient {
                 result: Ok(HttpPlanResult {
@@ -993,7 +965,7 @@ mod tests {
                     solver: None,
                 }),
             };
-            let r = plan_tas_inner(&pool, "s1", &client, "http://x")
+            let r = plan_tas_inner(&pool, dir.path(), "s1", &client, "http://x")
                 .await
                 .unwrap();
             assert_eq!(r.status, "no_streams");
@@ -1006,6 +978,7 @@ mod tests {
     fn plan_synth_ini_only_contains_st_streams() {
         tauri::async_runtime::block_on(async {
             let pool = fresh_pool().await;
+            let dir = tempfile::tempdir().unwrap();
             seed_linear(&pool).await;
             add_stream(&pool, 0, "ST", 7).await;
             add_stream(&pool, 1, "RC", 6).await;
@@ -1014,7 +987,7 @@ mod tests {
                 result: ok_plan_result(),
                 ini: std::sync::Mutex::new(None),
             };
-            let r = plan_tas_inner(&pool, "s1", &client, "http://x")
+            let r = plan_tas_inner(&pool, dir.path(), "s1", &client, "http://x")
                 .await
                 .unwrap();
             assert_eq!(r.status, "ok", "{r:?}");
@@ -1031,47 +1004,38 @@ mod tests {
         });
     }
 
-    /// Covers R5（U3②）：纯 BE / 纯 RC 流集 → no_gating、flow_plans 与门控新表存量清空、
-    /// meta 记 status=no_gating、求解器不被调用。
+    /// Covers R5（U3②）：纯 BE / 纯 RC 流集 → no_gating、行覆盖为零窗口态、raw 文件
+    /// 删除、求解器不被调用。
     #[test]
     fn plan_without_st_returns_no_gating_and_clears_plans() {
         tauri::async_runtime::block_on(async {
             for (class, pcp) in [("BE", 0i64), ("RC", 6i64)] {
                 let pool = fresh_pool().await;
+                let dir = tempfile::tempdir().unwrap();
                 seed_linear(&pool).await;
                 add_stream(&pool, 0, class, pcp).await;
-                // 存量（旧规划残留：flow_plans + 新表三张）——no_gating 应全部清掉。
-                sqlx::query("INSERT INTO flow_plans (session_id, stream_seq, node, eth_n, gate_index, initially_open, offset_ns, durations_ns, solver) VALUES ('s1', 0, '0', 1, 7, 1, 0, '[300000,700000]', 'Z3')")
+                // 存量（旧规划残留：行带窗口 + raw 文件）——no_gating 应覆盖/清掉。
+                sqlx::query("INSERT INTO flow_gcl_plan (session_id, provider, status, cycle_ns, algorithm, stale, created_at, windows_json) VALUES ('s1', 'inet-z3', 'ok', 1000000, 'Z3', 0, 'now', '[{\"node\":\"0\",\"ethN\":1,\"entryIdx\":0,\"startNs\":0,\"durationNs\":1000000,\"gateStates\":255,\"flowRefs\":null}]')")
                     .execute(&pool).await.unwrap();
-                sqlx::query("INSERT INTO gcl_windows (session_id, provider, node, eth_n, entry_idx, start_ns, duration_ns, gate_states, flow_refs) VALUES ('s1', 'inet-z3', '0', 1, 0, 0, 1000000, 255, NULL)")
-                    .execute(&pool).await.unwrap();
-                sqlx::query("INSERT INTO gcl_raw_archive (session_id, provider, par_lines, created_at) VALUES ('s1', 'inet-z3', 'old', 'now')")
-                    .execute(&pool).await.unwrap();
+                crate::gcl_raw_store::write_raw(dir.path(), "s1", GCL_PROVIDER, "old").unwrap();
                 let client = CapturingPlanClient {
                     result: ok_plan_result(),
                     ini: std::sync::Mutex::new(None),
                 };
-                let r = plan_tas_inner(&pool, "s1", &client, "http://x")
+                let r = plan_tas_inner(&pool, dir.path(), "s1", &client, "http://x")
                     .await
                     .unwrap();
                 assert_eq!(r.status, "no_gating", "纯 {class}：{r:?}");
                 assert!(r.overall.contains("无需门控"), "{r:?}");
-                for table in ["flow_plans", "gcl_windows", "gcl_raw_archive"] {
-                    let count: i64 = sqlx::query_scalar(&format!(
-                        "SELECT COUNT(*) FROM {table} WHERE session_id='s1'"
-                    ))
-                    .fetch_one(&pool)
-                    .await
-                    .unwrap();
-                    assert_eq!(count, 0, "纯 {class} 应清空 {table}");
-                }
-                let status: String = sqlx::query_scalar(
-                    "SELECT status FROM gcl_plan_meta WHERE session_id='s1' AND provider='inet-z3'",
-                )
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-                assert_eq!(status, "no_gating", "纯 {class} meta 应记 no_gating");
+                let (status, _, _, _, wins) = read_plan_row(&pool).await.unwrap();
+                assert_eq!(status, "no_gating", "纯 {class} 行应记 no_gating");
+                assert!(wins.is_empty(), "纯 {class} windows_json 应为空数组");
+                assert!(
+                    crate::gcl_raw_store::read_raw(dir.path(), "s1", GCL_PROVIDER)
+                        .unwrap()
+                        .is_none(),
+                    "纯 {class} 应删 raw 文件"
+                );
                 assert!(
                     client.ini.lock().unwrap().is_none(),
                     "纯 {class} 不应调用求解器"
@@ -1086,6 +1050,7 @@ mod tests {
     fn plan_dual_plane_st_locks_plane_a() {
         tauri::async_runtime::block_on(async {
             let pool = fresh_pool().await;
+            let dir = tempfile::tempdir().unwrap();
             // es1(0) =A= sw1(2) =A= es2(1)；es1 =B= sw2(3) =B= es2。GM=0。
             for (mid, ty, ord) in [
                 ("0", "endSystem", 0),
@@ -1122,7 +1087,7 @@ mod tests {
                 result: ok_plan_result(),
                 ini: std::sync::Mutex::new(None),
             };
-            let r = plan_tas_inner(&pool, "s1", &client, "http://x")
+            let r = plan_tas_inner(&pool, dir.path(), "s1", &client, "http://x")
                 .await
                 .unwrap();
             assert_eq!(r.status, "ok", "双平面不该 AMBIGUOUS_ROUTE：{r:?}");

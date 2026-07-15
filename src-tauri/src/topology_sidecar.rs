@@ -224,11 +224,12 @@ pub fn build_router(token: SecretToken, route_state: Arc<RouteState>) -> Router 
         ))
 }
 
-/// 测试辅助：用 in-memory pool 起 router；emit closure 为 no-op。
+/// 测试辅助：用 in-memory pool 起 router；emit closure 为 no-op；raw 存档根用指定 tempdir。
 #[cfg(test)]
-pub(crate) async fn build_test_router_with_pool(
+pub(crate) async fn build_test_router_with_pool_and_dir(
     pool: sqlx::Pool<sqlx::Sqlite>,
     mutation_buffer: Arc<TopologyMutationBuffer>,
+    gcl_raw_base_dir: std::path::PathBuf,
 ) -> (Router, SecretToken) {
     let token = mint_token();
     let state = Arc::new(RouteState {
@@ -236,16 +237,28 @@ pub(crate) async fn build_test_router_with_pool(
         mutation_buffer,
         emit: Arc::new(|_record| {}),
         last_validated_ok: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        gcl_raw_base_dir,
     });
     (build_router(token.clone(), state), token)
 }
 
+/// 测试辅助：raw 存档根用进程 tempdir（不关心 raw 文件的测试用这个）。
+#[cfg(test)]
+pub(crate) async fn build_test_router_with_pool(
+    pool: sqlx::Pool<sqlx::Sqlite>,
+    mutation_buffer: Arc<TopologyMutationBuffer>,
+) -> (Router, SecretToken) {
+    build_test_router_with_pool_and_dir(pool, mutation_buffer, std::env::temp_dir()).await
+}
+
 /// 启动 sidecar：bind + token + spawn axum task。返回 `SidecarHandle`。
+/// `gcl_raw_base_dir` = 门控 raw 存档文件根（app 数据目录，见 `gcl_raw_store`）。
 /// 失败 panic：plan v3 显式 fail-closed，不再有 fallback flag。
 pub async fn launch(
     pool: sqlx::Pool<sqlx::Sqlite>,
     mutation_buffer: Arc<TopologyMutationBuffer>,
     emit: MutationEmitFn,
+    gcl_raw_base_dir: std::path::PathBuf,
 ) -> SidecarHandle {
     let token = mint_token();
     let (listener, port) = bind_loopback().await.unwrap_or_else(|msg| panic!("{msg}"));
@@ -257,6 +270,7 @@ pub async fn launch(
         mutation_buffer,
         emit,
         last_validated_ok: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        gcl_raw_base_dir,
     });
     let router = build_router(token.clone(), route_state);
 
@@ -1193,19 +1207,19 @@ mod tests {
     }
 
     /// KTD14 拓扑写手：apply_operations 含 link_add/link_delete → 同事务置
-    /// gcl_plan_meta.stale；纯节点 op 不置位。
+    /// flow_gcl_plan.stale；纯节点 op 不置位。
     #[test]
     fn apply_operations_link_ops_mark_gcl_stale() {
         tauri::async_runtime::block_on(async {
             let (pool, buf) = test_state().await;
             sqlx::query("INSERT INTO sessions (id, title, created_at, updated_at, payload) VALUES ('s1','t','now','now','{}')")
                 .execute(&pool).await.unwrap();
-            sqlx::query("INSERT INTO gcl_plan_meta (session_id, provider, status, cycle_ns, algorithm, stale, created_at) VALUES ('s1', 'inet-z3', 'ok', 1000000, 'Z3', 0, 'now')")
+            sqlx::query("INSERT INTO flow_gcl_plan (session_id, provider, status, cycle_ns, algorithm, stale, created_at, windows_json) VALUES ('s1', 'inet-z3', 'ok', 1000000, 'Z3', 0, 'now', '[]')")
                 .execute(&pool).await.unwrap();
             let (router, token) = build_test_router_with_pool(pool.clone(), buf.clone()).await;
             let read_stale = |pool: sqlx::Pool<sqlx::Sqlite>| async move {
                 sqlx::query_scalar::<_, i64>(
-                    "SELECT stale FROM gcl_plan_meta WHERE session_id='s1'",
+                    "SELECT stale FROM flow_gcl_plan WHERE session_id='s1'",
                 )
                 .fetch_one(&pool)
                 .await

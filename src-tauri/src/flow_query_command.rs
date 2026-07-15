@@ -3,16 +3,16 @@
 //! 对齐 `topology_query_command`/`timesync_query_command` 的读写分离惯例——`plan_tas` 综合写库
 //! 归 `flow_plan_command`，只读明细查询在此。直接 sqlx in-process 读 main pool（不走 sidecar）。
 //!
-//! U4（2026-07-14 门控明细表）：`get_gcl_detail` 单查询读新表体系（`gcl_windows` +
-//! `gcl_plan_meta` + 流集嵌入，KTD8）——弹窗三页签 / 概览八卡 / 面板头行三态同源。
-//! 旧 `get_flow_plan`（`flow_plans` 投影）已随前端切换 `get_gcl_detail` 退役。
+//! U4（2026-07-14 门控明细，2026-07-15 单表化）：`get_gcl_detail` 读 `flow_gcl_plan`
+//! 单行（windows_json 展开 + meta 列 + 流集嵌入，KTD8）——弹窗三页签 / 概览八卡 /
+//! 面板头行三态同源，对外 `GclDetail` 形状不变。
 
 use serde::Serialize;
 use sqlx::Row;
 
 // ── get_gcl_detail（U4，KTD8 单查询读面）────────────────────────────────────
 
-/// 窗口关联流引用（`gcl_windows.flow_refs` JSON 元素，对齐 flow_plan_command::FlowRef）：
+/// 窗口关联流引用（窗口 `flowRefs` JSON 元素，对齐 flow_plan_command::FlowRef）：
 /// source=derived（实例锚定/窗长指纹命中）| class（类级降级）。
 #[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq)]
 pub struct FlowRefDto {
@@ -36,7 +36,7 @@ pub struct GclWindowDto {
     pub flow_refs: Option<Vec<FlowRefDto>>,
 }
 
-/// 规划级元数据投影（`gcl_plan_meta` 单行）。stale=需重新规划（KTD14）。
+/// 规划级元数据投影（`flow_gcl_plan` 行的 meta 列）。stale=需重新规划（KTD14）。
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct GclMetaDto {
@@ -56,61 +56,73 @@ pub struct GclDetail {
     pub streams: Vec<ListFlowStreamRow>,
 }
 
-/// 只读查询内核（AE5 单查询 DoD）：`gcl_windows`（LEFT JOIN 显示名）+ `gcl_plan_meta` +
-/// 流集，provider 恒 `flow_plan_command::GCL_PROVIDER`（本期唯一 provider，R6）。
+/// 只读查询内核（AE5 单查询 DoD）：`flow_gcl_plan` 单行（windows_json 展开）+ 一次
+/// SELECT topology_nodes 建 mid→显示名映射（取代三表版的 LEFT JOIN）+ 流集，
+/// provider 恒 `flow_plan_command::GCL_PROVIDER`（本期唯一 provider，R6）。
 pub async fn get_gcl_detail_inner(
     pool: &sqlx::Pool<sqlx::Sqlite>,
     session_id: &str,
 ) -> Result<GclDetail, String> {
-    let rows = sqlx::query(
-        "SELECT w.node, n.name AS node_name, w.eth_n, w.entry_idx, w.start_ns, w.duration_ns, w.gate_states, w.flow_refs \
-         FROM gcl_windows w \
-         LEFT JOIN topology_nodes n ON n.session_id = w.session_id AND n.mid = w.node \
-         WHERE w.session_id = ? AND w.provider = ? \
-         ORDER BY w.node, w.eth_n, w.entry_idx",
-    )
-    .bind(session_id)
-    .bind(crate::flow_plan_command::GCL_PROVIDER)
-    .fetch_all(pool)
-    .await
-    .map_err(|e| format!("读 gcl_windows 失败：{e}"))?;
-
-    let windows = rows
-        .iter()
-        .map(|r| {
-            let node: String = r.get("node");
-            let name: Option<String> = r.get("node_name");
-            let refs_json: Option<String> = r.get("flow_refs");
-            GclWindowDto {
-                node_name: name
-                    .filter(|n| !n.is_empty())
-                    .unwrap_or_else(|| node.clone()),
-                node,
-                eth_n: r.get("eth_n"),
-                entry_idx: r.get("entry_idx"),
-                start_ns: r.get("start_ns"),
-                duration_ns: r.get("duration_ns"),
-                gate_states: (r.get::<i64, _>("gate_states") & 0xFF) as u8,
-                flow_refs: refs_json.and_then(|s| serde_json::from_str::<Vec<FlowRefDto>>(&s).ok()),
-            }
-        })
-        .collect();
-
-    let meta = sqlx::query(
-        "SELECT status, cycle_ns, algorithm, stale FROM gcl_plan_meta \
+    let plan_row: Option<(String, i64, String, i64, String)> = sqlx::query_as(
+        "SELECT status, cycle_ns, algorithm, stale, windows_json FROM flow_gcl_plan \
          WHERE session_id = ? AND provider = ?",
     )
     .bind(session_id)
     .bind(crate::flow_plan_command::GCL_PROVIDER)
     .fetch_optional(pool)
     .await
-    .map_err(|e| format!("读 gcl_plan_meta 失败：{e}"))?
-    .map(|r| GclMetaDto {
-        status: r.get("status"),
-        cycle_ns: r.get("cycle_ns"),
-        algorithm: r.get("algorithm"),
-        stale: r.get::<i64, _>("stale") != 0,
-    });
+    .map_err(|e| format!("读 flow_gcl_plan 失败：{e}"))?;
+
+    let (windows, meta) = match plan_row {
+        None => (vec![], None),
+        Some((status, cycle_ns, algorithm, stale, windows_json)) => {
+            // mid → 显示名映射（空名回退 mid，口径同三表版 LEFT JOIN）。
+            let name_rows: Vec<(String, Option<String>)> =
+                sqlx::query_as("SELECT mid, name FROM topology_nodes WHERE session_id = ?")
+                    .bind(session_id)
+                    .fetch_all(pool)
+                    .await
+                    .map_err(|e| format!("读 topology_nodes 失败：{e}"))?;
+            let name_of: std::collections::BTreeMap<String, String> = name_rows
+                .into_iter()
+                .filter_map(|(mid, name)| name.filter(|n| !n.is_empty()).map(|n| (mid, n)))
+                .collect();
+            let rows: Vec<crate::gcl_synth::GclWindowRow> = serde_json::from_str(&windows_json)
+                .map_err(|e| format!("解析 windows_json 失败：{e}"))?;
+            let mut windows: Vec<GclWindowDto> = rows
+                .into_iter()
+                .map(|w| GclWindowDto {
+                    node_name: name_of
+                        .get(&w.node)
+                        .cloned()
+                        .unwrap_or_else(|| w.node.clone()),
+                    node: w.node,
+                    eth_n: w.eth_n as i64,
+                    entry_idx: w.entry_idx as i64,
+                    start_ns: w.start_ns as i64,
+                    duration_ns: w.duration_ns as i64,
+                    gate_states: w.gate_states,
+                    // flow_refs 解析失败按 None（不臆造关联，窗口本身照常返回）。
+                    flow_refs: w
+                        .flow_refs
+                        .and_then(|s| serde_json::from_str::<Vec<FlowRefDto>>(&s).ok()),
+                })
+                .collect();
+            // 排序口径与三表版 ORDER BY node, eth_n, entry_idx 一致。
+            windows.sort_by(|a, b| {
+                (&a.node, a.eth_n, a.entry_idx).cmp(&(&b.node, b.eth_n, b.entry_idx))
+            });
+            (
+                windows,
+                Some(GclMetaDto {
+                    status,
+                    cycle_ns,
+                    algorithm,
+                    stale: stale != 0,
+                }),
+            )
+        }
+    };
 
     let streams = list_flow_streams_inner(pool, session_id).await?.streams;
 
@@ -761,7 +773,7 @@ pub async fn update_flow_stream_inner(
             .map_err(|e| format!("更新路径失败：{e}"))?;
     }
 
-    // 7c. KTD14：规划字段变更 → 同事务置 gcl_plan_meta.stale（无行 no-op）。
+    // 7c. KTD14：规划字段变更 → 同事务置 flow_gcl_plan.stale（无行 no-op）。
     if planning_fields_changed {
         crate::flow_plan_command::mark_gcl_stale(&mut *tx, &req.session_id).await?;
     }
@@ -836,38 +848,28 @@ mod tests {
             .bind(seq).bind(class).bind(pcp).execute(pool).await.unwrap();
     }
 
-    /// 直插一条 gcl_windows 逐窗行（provider=inet-z3，U4 新表读面测试）。
-    #[allow(clippy::too_many_arguments)]
-    async fn add_gcl_window(
+    /// 直插 flow_gcl_plan 单行（provider=inet-z3；windows_json 由调用方给，默认空态传 "[]"）。
+    async fn add_gcl_plan(
         pool: &sqlx::Pool<sqlx::Sqlite>,
-        node: &str,
-        eth_n: i64,
-        entry_idx: i64,
-        start_ns: i64,
-        duration_ns: i64,
-        gate_states: i64,
-        flow_refs: Option<&str>,
+        status: &str,
+        stale: i64,
+        windows_json: &str,
     ) {
         sqlx::query(
-            "INSERT INTO gcl_windows (session_id, provider, node, eth_n, entry_idx, start_ns, duration_ns, gate_states, flow_refs) \
-             VALUES ('s1', 'inet-z3', ?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(node).bind(eth_n).bind(entry_idx).bind(start_ns).bind(duration_ns)
-        .bind(gate_states).bind(flow_refs)
-        .execute(pool).await.unwrap();
-    }
-
-    /// 直插 gcl_plan_meta 单行。
-    async fn add_gcl_meta(pool: &sqlx::Pool<sqlx::Sqlite>, status: &str, stale: i64) {
-        sqlx::query(
-            "INSERT INTO gcl_plan_meta (session_id, provider, status, cycle_ns, algorithm, stale, created_at) \
-             VALUES ('s1', 'inet-z3', ?, 1000000, 'Z3', ?, 'now')",
+            "INSERT INTO flow_gcl_plan (session_id, provider, status, cycle_ns, algorithm, stale, created_at, windows_json) \
+             VALUES ('s1', 'inet-z3', ?, 1000000, 'Z3', ?, 'now', ?)",
         )
         .bind(status)
         .bind(stale)
+        .bind(windows_json)
         .execute(pool)
         .await
         .unwrap();
+    }
+
+    /// 直插无窗口的 flow_gcl_plan 单行（stale 测试用）。
+    async fn add_gcl_meta(pool: &sqlx::Pool<sqlx::Sqlite>, status: &str, stale: i64) {
+        add_gcl_plan(pool, status, stale, "[]").await;
     }
 
     // ── get_gcl_detail 测试（U4）────────────────────────────────────────────
@@ -885,19 +887,14 @@ mod tests {
             .await
             .unwrap();
             add_stream(&pool, 0, "ST", 7).await;
-            add_gcl_meta(&pool, "ok", 1).await;
-            add_gcl_window(
+            add_gcl_plan(
                 &pool,
-                "0",
+                "ok",
                 1,
-                0,
-                0,
-                4_560,
-                0x80,
-                Some(r#"[{"seq":0,"source":"derived"}]"#),
+                r#"[{"node":"0","ethN":1,"entryIdx":0,"startNs":0,"durationNs":4560,"gateStates":128,"flowRefs":"[{\"seq\":0,\"source\":\"derived\"}]"},
+                    {"node":"0","ethN":1,"entryIdx":1,"startNs":4560,"durationNs":995440,"gateStates":127,"flowRefs":null}]"#,
             )
             .await;
-            add_gcl_window(&pool, "0", 1, 1, 4_560, 995_440, 0x7F, None).await;
             let d = get_gcl_detail_inner(&pool, "s1").await.unwrap();
             assert_eq!(d.windows.len(), 2);
             let w0 = &d.windows[0];
@@ -931,8 +928,13 @@ mod tests {
         tauri::async_runtime::block_on(async {
             let pool = fresh_pool().await;
             seed_linear(&pool).await;
-            add_gcl_meta(&pool, "ok", 0).await;
-            add_gcl_window(&pool, "0", 1, 0, 0, 4_560, 0x80, Some("not-json")).await;
+            add_gcl_plan(
+                &pool,
+                "ok",
+                0,
+                r#"[{"node":"0","ethN":1,"entryIdx":0,"startNs":0,"durationNs":4560,"gateStates":128,"flowRefs":"not-json"}]"#,
+            )
+            .await;
             let d = get_gcl_detail_inner(&pool, "s1").await.unwrap();
             assert_eq!(d.windows.len(), 1);
             assert!(d.windows[0].flow_refs.is_none());
@@ -1519,7 +1521,7 @@ mod tests {
     }
 
     async fn read_stale(pool: &sqlx::Pool<sqlx::Sqlite>) -> i64 {
-        sqlx::query_scalar("SELECT stale FROM gcl_plan_meta WHERE session_id='s1'")
+        sqlx::query_scalar("SELECT stale FROM flow_gcl_plan WHERE session_id='s1'")
             .fetch_one(pool)
             .await
             .unwrap()

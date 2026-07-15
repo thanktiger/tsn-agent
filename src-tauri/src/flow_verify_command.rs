@@ -2,8 +2,8 @@
 //! GCL 空：有 ST 流 → `no_plan` 硬拦；无 ST 流 → 放行门全恒开跑（R5/KTD4）。
 //! pin 只认 ST-pcp（gate 7）门条目，存量旧全类条目忽略（G2.4 防互补关窗双写同门）。
 //!
-//! 镜像 `run_timesync_sim_inner`（KTD1 可测内核 + 注入 `RemoteRunner`）：重放 `gcl_raw_archive`
-//! 的 par 行（KTD4，同一解析器两次跑同一输入）得 pin GCL → 喂 U6 pin 模式 bundle（写死
+//! 镜像 `run_timesync_sim_inner`（KTD1 可测内核 + 注入 `RemoteRunner`）：重放 raw 存档文件
+//! （`gcl_raw_store`，KTD4，同一解析器两次跑同一输入）得 pin GCL → 喂 U6 pin 模式 bundle（写死
 //! transmissionGate、禁配置器）→ 现有 `run_sim_fetch_csv` **零改**（KTD1）跑 + 取 per-packet
 //! 向量 CSV → flow `classify`。诚实边界（KTD7）：空/短结果绝不渲染绿（R16）。
 //! **pin 校验的是 plan 存档那份求解结果**——不 pin 则 verify 可能得另一组合法解。
@@ -155,29 +155,34 @@ impl VerifyTasResult {
     }
 }
 
-/// 读 pin 的 GCL：重放 raw_archive par 行（KTD4）——同一解析器
+/// 读 pin 的 GCL：重放 raw 存档文件的 par 行（KTD4）——同一解析器
 /// （`gcl_synth::parse_gcl_from_sca`）两次跑同一输入，输出 GclEntry 直接进现管线。
 /// 空 durations 恒态门被解析器滤掉（不进 pin，补集关窗由 complement_gcl 生成，G2.4 语义保持）。
-/// 无存档行 / 重放为空 → 空 vec（调用方按 has_st 判 no_plan）。solver 取 gcl_plan_meta 的
-/// algorithm（缺行回退 Z3——只用于区分补集门标识，非 COMPLEMENT_SOLVER 即可）。
+/// 文件缺失/空 / 重放为空 → 空 vec（调用方按 has_st 判 no_plan——导入态无文件同语义，AE2）。
+/// solver 取 `flow_gcl_plan.algorithm`（缺行回退 Z3——只用于区分补集门标识，非
+/// COMPLEMENT_SOLVER 即可）。
 async fn load_gcl(
     pool: &sqlx::Pool<sqlx::Sqlite>,
+    base_dir: &std::path::Path,
     session_id: &str,
     ned_to_mid: &BTreeMap<String, String>,
 ) -> Result<Vec<GclEntry>, String> {
-    let row: Option<(String, Option<String>)> = sqlx::query_as(
-        "SELECT a.par_lines, m.algorithm FROM gcl_raw_archive a \
-         LEFT JOIN gcl_plan_meta m ON m.session_id = a.session_id AND m.provider = a.provider \
-         WHERE a.session_id = ? AND a.provider = ?",
+    let Some(par_lines) = crate::gcl_raw_store::read_raw(
+        base_dir,
+        session_id,
+        crate::flow_plan_command::GCL_PROVIDER,
+    )?
+    else {
+        return Ok(vec![]);
+    };
+    let algorithm: Option<String> = sqlx::query_scalar(
+        "SELECT algorithm FROM flow_gcl_plan WHERE session_id = ? AND provider = ?",
     )
     .bind(session_id)
     .bind(crate::flow_plan_command::GCL_PROVIDER)
     .fetch_optional(pool)
     .await
-    .map_err(|e| format!("读 gcl_raw_archive 失败：{e}"))?;
-    let Some((par_lines, algorithm)) = row else {
-        return Ok(vec![]);
-    };
+    .map_err(|e| format!("读 flow_gcl_plan 失败：{e}"))?;
     let solver = algorithm.unwrap_or_else(|| "Z3".to_string());
     Ok(crate::gcl_synth::parse_gcl_from_sca(
         &par_lines, ned_to_mid, &solver,
@@ -589,8 +594,10 @@ fn round_label(round: &str) -> &'static str {
 }
 
 /// 可测内核：注入 RemoteRunner，pin GCL → bundle → 跑 → 逐流实测判决。
+/// `base_dir` = raw 存档文件根（生产由 AppHandle 解析、测试传 tempdir，见 `gcl_raw_store`）。
 pub async fn verify_tas_inner<R: RemoteRunner>(
     pool: &sqlx::Pool<sqlx::Sqlite>,
+    base_dir: &std::path::Path,
     session_id: &str,
     runner: &R,
 ) -> Result<VerifyTasResult, String> {
@@ -622,7 +629,7 @@ pub async fn verify_tas_inner<R: RemoteRunner>(
     let (nodes, links) = load_topology(pool, session_id).await?;
 
     // R5/KTD4：GCL 空只在存在 ST 流时硬拦（ST 要求先规划）；无 ST 流放行——门全恒开跑。
-    // 无 ST 流时存量 raw_archive（删光 ST 后的残留存档）一律不消费：pin 零门条目、
+    // 无 ST 流时存量 raw 存档文件（删光 ST 后的残留）一律不消费：pin 零门条目、
     // 补集不生成，与「门全恒开」口径一致。ned↔mid 映射与 bundle 构建同源
     // （`node_ned_names` 命名单一源），重放解析按它把 sca 的 ned 名折回 mid。
     let has_st = db_streams.iter().any(|s| s.class == "ST");
@@ -631,7 +638,7 @@ pub async fn verify_tas_inner<R: RemoteRunner>(
             .into_iter()
             .map(|(mid, ned)| (ned, mid))
             .collect();
-        load_gcl(pool, session_id, &ned_to_mid).await?
+        load_gcl(pool, base_dir, session_id, &ned_to_mid).await?
     } else {
         vec![]
     };
@@ -1043,7 +1050,8 @@ pub async fn verify_tas(
     };
     let runner =
         crate::inet_sim_http::HttpRunner::new(crate::inet_sim_http::ReqwestInetSimClient, base_url);
-    verify_tas_inner(pool, &request.session_id, &runner).await
+    let base_dir = crate::gcl_raw_store::resolve_base_dir(&app)?;
+    verify_tas_inner(pool, &base_dir, &request.session_id, &runner).await
 }
 
 #[cfg(test)]
@@ -1100,7 +1108,8 @@ mod tests {
         }
     }
 
-    async fn fresh_pool() -> sqlx::Pool<sqlx::Sqlite> {
+    /// 测试夹具：in-memory 库 + raw 存档 tempdir（单表化后 raw 是文件，见 gcl_raw_store）。
+    async fn fresh_pool() -> (sqlx::Pool<sqlx::Sqlite>, tempfile::TempDir) {
         let opts = SqliteConnectOptions::new()
             .in_memory(true)
             .foreign_keys(true);
@@ -1115,10 +1124,10 @@ mod tests {
             .unwrap();
         sqlx::query("INSERT INTO sessions (id, title, created_at, updated_at, payload) VALUES ('s1','t','n','n','{}')")
             .execute(&pool).await.unwrap();
-        pool
+        (pool, tempfile::tempdir().unwrap())
     }
 
-    async fn seed(pool: &sqlx::Pool<sqlx::Sqlite>) {
+    async fn seed(pool: &sqlx::Pool<sqlx::Sqlite>, base_dir: &std::path::Path) {
         // es1(1) — sw1(0) — es2(2)。GM=1。一条 ST 流 es1→es2，count=3。
         for (mid, ty, ord) in [
             ("0", "switch", 0),
@@ -1142,8 +1151,8 @@ mod tests {
         }
         sqlx::query("INSERT INTO flow_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener, max_latency_us) VALUES ('s1', 0, 'ST', 7, 500, 512, 3, '1', '2', 400)")
             .execute(pool).await.unwrap();
-        // pin GCL 一条（sw1=mid0, eth1, gate7=ST 门）——重放事实源是 raw_archive par 行（KTD4）。
-        seed_gcl_archive(pool, &gate_par_lines("sw1", 1, 7, "[300us, 700us]")).await;
+        // pin GCL 一条（sw1=mid0, eth1, gate7=ST 门）——重放事实源是 raw 存档文件 par 行（KTD4）。
+        seed_gcl_archive(base_dir, &gate_par_lines("sw1", 1, 7, "[300us, 700us]"));
     }
 
     /// 拼一条门的 par 行三件套（initiallyOpen true / offset 0s / durations），
@@ -1155,17 +1164,18 @@ mod tests {
         )
     }
 
-    /// 写/追加 raw_archive par 行（模拟 plan 落库的存档；重复调用追加行，供多门夹具）。
-    async fn seed_gcl_archive(pool: &sqlx::Pool<sqlx::Sqlite>, par_lines: &str) {
-        sqlx::query(
-            "INSERT INTO gcl_raw_archive (session_id, provider, par_lines, created_at) \
-             VALUES ('s1', ?, ?, 'now') \
-             ON CONFLICT(session_id, provider) DO UPDATE SET par_lines = par_lines || excluded.par_lines",
+    /// 写/追加 raw 存档文件 par 行（模拟 plan 出库的存档；重复调用追加行，供多门夹具）。
+    fn seed_gcl_archive(base_dir: &std::path::Path, par_lines: &str) {
+        let provider = crate::flow_plan_command::GCL_PROVIDER;
+        let existing = crate::gcl_raw_store::read_raw(base_dir, "s1", provider)
+            .unwrap()
+            .unwrap_or_default();
+        crate::gcl_raw_store::write_raw(
+            base_dir,
+            "s1",
+            provider,
+            &format!("{existing}{par_lines}"),
         )
-        .bind(crate::flow_plan_command::GCL_PROVIDER)
-        .bind(par_lines)
-        .execute(pool)
-        .await
         .unwrap();
     }
 
@@ -1178,8 +1188,8 @@ mod tests {
     #[test]
     fn verify_pass_when_received_equals_sent_low_jitter() {
         tauri::async_runtime::block_on(async {
-            let pool = fresh_pool().await;
-            seed(&pool).await;
+            let (pool, dir) = fresh_pool().await;
+            seed(&pool, dir.path()).await;
             // 时延 3 样本（秒）都 < 400us；抖动 3 样本 < 1us。
             let csv = format!(
                 "{}TsnAgentFlowTasNetwork.es2.app[0].sink,packetLifeTime:vector,0 0 0,0.0001 0.00012 0.00011\nTsnAgentFlowTasNetwork.es2.app[0].sink,packetJitter:vector,0 0 0,0.0000002 0.0000003 0.0000001\n",
@@ -1188,7 +1198,9 @@ mod tests {
             let runner = MockRunner {
                 outcome: outcome(Some(&csv)),
             };
-            let r = verify_tas_inner(&pool, "s1", &runner).await.unwrap();
+            let r = verify_tas_inner(&pool, dir.path(), "s1", &runner)
+                .await
+                .unwrap();
             assert_eq!(r.status, "ok", "{r:?}");
             assert_eq!(r.per_stream.len(), 1);
             assert!(r.per_stream[0].pass);
@@ -1203,8 +1215,8 @@ mod tests {
     #[test]
     fn verify_fail_on_high_jitter() {
         tauri::async_runtime::block_on(async {
-            let pool = fresh_pool().await;
-            seed(&pool).await;
+            let (pool, dir) = fresh_pool().await;
+            seed(&pool, dir.path()).await;
             // 高抖动样本放在**非首位**（首样本被 skip_first 跳过——那是定义性启动瞬态）。
             let csv = format!(
                 "{}TsnAgentFlowTasNetwork.es2.app[0].sink,packetLifeTime:vector,0 0 0,0.0001 0.00012 0.00011\nTsnAgentFlowTasNetwork.es2.app[0].sink,packetJitter:vector,0 0 0,0.0000001 0.000002 0.0000003\n",
@@ -1212,6 +1224,7 @@ mod tests {
             );
             let r = verify_tas_inner(
                 &pool,
+                dir.path(),
                 "s1",
                 &MockRunner {
                     outcome: outcome(Some(&csv)),
@@ -1229,8 +1242,8 @@ mod tests {
     #[test]
     fn verify_ignores_first_sample_jitter_spike() {
         tauri::async_runtime::block_on(async {
-            let pool = fresh_pool().await;
-            seed(&pool).await;
+            let (pool, dir) = fresh_pool().await;
+            seed(&pool, dir.path()).await;
             // 首抖动样本 2us（>1us）但其余 <1us；跳首后不该触发抖动失败。
             let csv = format!(
                 "{}TsnAgentFlowTasNetwork.es2.app[0].sink,packetLifeTime:vector,0 0 0,0.0001 0.00012 0.00011\nTsnAgentFlowTasNetwork.es2.app[0].sink,packetJitter:vector,0 0 0,0.000002 0.0000003 0.0000001\n",
@@ -1238,6 +1251,7 @@ mod tests {
             );
             let r = verify_tas_inner(
                 &pool,
+                dir.path(),
                 "s1",
                 &MockRunner {
                     outcome: outcome(Some(&csv)),
@@ -1254,8 +1268,8 @@ mod tests {
     #[test]
     fn verify_fail_on_packet_loss() {
         tauri::async_runtime::block_on(async {
-            let pool = fresh_pool().await;
-            seed(&pool).await;
+            let (pool, dir) = fresh_pool().await;
+            seed(&pool, dir.path()).await;
             // 只收到 1 个（实发≈4：sim=count×period=1500us→floor+1=4）——丢 3 个远超在途容差 → FAIL。
             let csv = format!(
                 "{}TsnAgentFlowTasNetwork.es2.app[0].sink,packetLifeTime:vector,0,0.0001\nTsnAgentFlowTasNetwork.es2.app[0].sink,packetJitter:vector,0,0.0000002\n",
@@ -1263,6 +1277,7 @@ mod tests {
             );
             let r = verify_tas_inner(
                 &pool,
+                dir.path(),
                 "s1",
                 &MockRunner {
                     outcome: outcome(Some(&csv)),
@@ -1279,10 +1294,11 @@ mod tests {
     #[test]
     fn verify_empty_csv_is_not_green() {
         tauri::async_runtime::block_on(async {
-            let pool = fresh_pool().await;
-            seed(&pool).await;
+            let (pool, dir) = fresh_pool().await;
+            seed(&pool, dir.path()).await;
             let r = verify_tas_inner(
                 &pool,
+                dir.path(),
                 "s1",
                 &MockRunner {
                     outcome: outcome(None),
@@ -1295,12 +1311,12 @@ mod tests {
         });
     }
 
-    /// 未规划（raw_archive 无行）且存在 ST 流 → no_plan（U3④：ST 才要求 GCL）。
+    /// 未规划（raw 存档文件不存在）且存在 ST 流 → no_plan（U3④：ST 才要求 GCL）。
     #[test]
     fn verify_without_plan_is_no_plan() {
         tauri::async_runtime::block_on(async {
-            let pool = fresh_pool().await;
-            // 只 seed 拓扑 + 流，不写 raw_archive。
+            let (pool, dir) = fresh_pool().await;
+            // 只 seed 拓扑 + 流，不写 raw 存档文件。
             for (mid, ty, ord) in [
                 ("0", "switch", 0),
                 ("1", "endSystem", 1),
@@ -1313,6 +1329,7 @@ mod tests {
                 .execute(&pool).await.unwrap();
             let r = verify_tas_inner(
                 &pool,
+                dir.path(),
                 "s1",
                 &MockRunner {
                     outcome: outcome(None),
@@ -1324,24 +1341,55 @@ mod tests {
         });
     }
 
-    /// KTD4 pin 重放等价：raw_archive 里混杂 门参数行 + 空 durations 恒态门行 +
+    /// AE2：已规划（flow_gcl_plan 行在）但 raw 文件被手动删掉 → 响亮报无规划
+    /// （fail-safe，与导入态同语义——行不是重放事实源，文件才是）。
+    #[test]
+    fn verify_no_plan_when_raw_file_manually_deleted() {
+        tauri::async_runtime::block_on(async {
+            let (pool, dir) = fresh_pool().await;
+            seed(&pool, dir.path()).await; // 写了 raw 文件。
+            sqlx::query("INSERT INTO flow_gcl_plan (session_id, provider, status, cycle_ns, algorithm, stale, created_at, windows_json) VALUES ('s1', 'inet-z3', 'ok', 1000000, 'Z3', 0, 'now', '[]')")
+                .execute(&pool).await.unwrap();
+            crate::gcl_raw_store::remove_raw(
+                dir.path(),
+                "s1",
+                crate::flow_plan_command::GCL_PROVIDER,
+            )
+            .unwrap();
+            let r = verify_tas_inner(
+                &pool,
+                dir.path(),
+                "s1",
+                &MockRunner {
+                    outcome: outcome(None),
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(r.status, "no_plan", "文件缺失须响亮报无规划：{r:?}");
+        });
+    }
+
+    /// KTD4 pin 重放等价：raw 存档文件里混杂 门参数行 + 空 durations 恒态门行 +
     /// initialProductionOffset 行 → load_gcl 输出与直接 parse 同文本逐字段相等；
     /// 空 durations 门被滤掉（恒态门不进 pin）；solver 取 meta.algorithm。
     #[test]
     fn load_gcl_replays_archive_par_lines_equivalently() {
         tauri::async_runtime::block_on(async {
-            let pool = fresh_pool().await;
+            let (pool, dir) = fresh_pool().await;
             let mut par = gate_par_lines("sw1", 1, 7, "[300us, 700us]");
             par.push_str(&gate_par_lines("sw1", 1, 0, "[]")); // 恒态门（空 durations）。
             par.push_str("par N.es1.app[0].source initialProductionOffset 4.2e-05\n");
-            seed_gcl_archive(&pool, &par).await;
-            sqlx::query("INSERT INTO gcl_plan_meta (session_id, provider, status, cycle_ns, algorithm, stale, created_at) VALUES ('s1', ?, 'ok', 1000000, 'Eager', 0, 'now')")
+            seed_gcl_archive(dir.path(), &par);
+            sqlx::query("INSERT INTO flow_gcl_plan (session_id, provider, status, cycle_ns, algorithm, stale, created_at, windows_json) VALUES ('s1', ?, 'ok', 1000000, 'Eager', 0, 'now', '[]')")
                 .bind(crate::flow_plan_command::GCL_PROVIDER)
                 .execute(&pool).await.unwrap();
 
             let mut ned_to_mid = BTreeMap::new();
             ned_to_mid.insert("sw1".to_string(), "0".to_string());
-            let got = load_gcl(&pool, "s1", &ned_to_mid).await.unwrap();
+            let got = load_gcl(&pool, dir.path(), "s1", &ned_to_mid)
+                .await
+                .unwrap();
             let expected = crate::gcl_synth::parse_gcl_from_sca(&par, &ned_to_mid, "Eager");
             assert_eq!(got, expected, "重放=同一解析器两次跑同一输入");
             assert_eq!(got.len(), 1, "空 durations 恒态门不进 pin：{got:?}");
@@ -1352,22 +1400,25 @@ mod tests {
         });
     }
 
-    /// raw_archive 有行但重放为空（只有偏移行/恒态门行）且有 ST 流 → no_plan（口径与
-    /// 无存档行一致）。
+    /// raw 存档文件存在但重放为空（只有偏移行/恒态门行）且有 ST 流 → no_plan（口径与
+    /// 无存档文件一致）。
     #[test]
     fn verify_no_plan_when_archive_replay_is_empty() {
         tauri::async_runtime::block_on(async {
-            let pool = fresh_pool().await;
-            seed(&pool).await;
-            sqlx::query("DELETE FROM gcl_raw_archive WHERE session_id='s1'")
-                .execute(&pool)
-                .await
-                .unwrap();
+            let (pool, dir) = fresh_pool().await;
+            seed(&pool, dir.path()).await;
+            crate::gcl_raw_store::remove_raw(
+                dir.path(),
+                "s1",
+                crate::flow_plan_command::GCL_PROVIDER,
+            )
+            .unwrap();
             let mut par = gate_par_lines("sw1", 1, 0, "[]"); // 仅恒态门（重放滤空）。
             par.push_str("par N.es1.app[0].source initialProductionOffset 4.2e-05\n");
-            seed_gcl_archive(&pool, &par).await;
+            seed_gcl_archive(dir.path(), &par);
             let r = verify_tas_inner(
                 &pool,
+                dir.path(),
                 "s1",
                 &MockRunner {
                     outcome: outcome(None),
@@ -1379,22 +1430,24 @@ mod tests {
         });
     }
 
-    /// Covers AE5（U3③，R5/R13 前半）：纯 BE 流集、raw_archive 空 → 不再 no_plan，
+    /// Covers AE5（U3③，R5/R13 前半）：纯 BE 流集、raw 存档空 → 不再 no_plan，
     /// 放行跑软仿（门全恒开）。
     #[test]
     fn verify_pure_be_without_gcl_runs() {
         tauri::async_runtime::block_on(async {
-            let pool = fresh_pool().await;
-            seed(&pool).await;
+            let (pool, dir) = fresh_pool().await;
+            seed(&pool, dir.path()).await;
             // 换成纯 BE 流集 + 清掉 GCL 存档。
             sqlx::query("DELETE FROM flow_streams WHERE session_id='s1'")
                 .execute(&pool)
                 .await
                 .unwrap();
-            sqlx::query("DELETE FROM gcl_raw_archive WHERE session_id='s1'")
-                .execute(&pool)
-                .await
-                .unwrap();
+            crate::gcl_raw_store::remove_raw(
+                dir.path(),
+                "s1",
+                crate::flow_plan_command::GCL_PROVIDER,
+            )
+            .unwrap();
             sqlx::query("INSERT INTO flow_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener, max_latency_us) VALUES ('s1', 0, 'BE', 0, 500, 512, 3, '1', '2', 400)")
                 .execute(&pool).await.unwrap();
             let csv = format!(
@@ -1403,6 +1456,7 @@ mod tests {
             );
             let r = verify_tas_inner(
                 &pool,
+                dir.path(),
                 "s1",
                 &MockRunner {
                     outcome: outcome(Some(&csv)),
@@ -1415,14 +1469,14 @@ mod tests {
         });
     }
 
-    /// 删光 ST 后存量 GCL 不消费：seed 的 gate7 raw_archive 残留 + 纯 BE 流集 → 提交的
+    /// 删光 ST 后存量 GCL 不消费：seed 的 gate7 raw 存档残留 + 纯 BE 流集 → 提交的
     /// pin ini 无任何 transmissionGate 行（零门条目、补集不接管存量），验证正常跑。
     #[test]
     fn stale_gcl_ignored_when_no_st_streams() {
         tauri::async_runtime::block_on(async {
-            let pool = fresh_pool().await;
-            seed(&pool).await; // 带 gate7 raw_archive 存量。
-            // 删光 ST，只留 BE（不清 raw_archive——模拟删流后残留）。
+            let (pool, dir) = fresh_pool().await;
+            seed(&pool, dir.path()).await; // 带 gate7 raw 存档存量。
+            // 删光 ST，只留 BE（不清 raw 存档——模拟删流后残留）。
             sqlx::query("DELETE FROM flow_streams WHERE session_id='s1'")
                 .execute(&pool)
                 .await
@@ -1437,7 +1491,9 @@ mod tests {
                 outcome: outcome(Some(&csv)),
                 ini: std::sync::Mutex::new(None),
             };
-            let r = verify_tas_inner(&pool, "s1", &runner).await.unwrap();
+            let r = verify_tas_inner(&pool, dir.path(), "s1", &runner)
+                .await
+                .unwrap();
             assert_eq!(r.status, "ok", "{r:?}");
             let ini = runner.ini.lock().unwrap().clone().unwrap();
             assert!(
@@ -1447,14 +1503,14 @@ mod tests {
         });
     }
 
-    /// Covers G2.4（U3⑤）：raw_archive 混有 gate0 被调度门（非 ST 门）→ pin 段只出 gate7，
+    /// Covers G2.4（U3⑤）：raw 存档混有 gate0 被调度门（非 ST 门）→ pin 段只出 gate7，
     /// gate0 的 transmissionGate 行不得出现（互补关窗接管前提）。
     #[test]
     fn verify_pin_filters_non_st_gate_entries() {
         tauri::async_runtime::block_on(async {
-            let pool = fresh_pool().await;
-            seed(&pool).await; // 已含 gate7 par 行。
-            seed_gcl_archive(&pool, &gate_par_lines("sw1", 1, 0, "[500us, 500us]")).await;
+            let (pool, dir) = fresh_pool().await;
+            seed(&pool, dir.path()).await; // 已含 gate7 par 行。
+            seed_gcl_archive(dir.path(), &gate_par_lines("sw1", 1, 0, "[500us, 500us]"));
             let csv = format!(
                 "{}TsnAgentFlowTasNetwork.es2.app[0].sink,packetLifeTime:vector,0 0 0,0.0001 0.00012 0.00011\nTsnAgentFlowTasNetwork.es2.app[0].sink,packetJitter:vector,0 0 0,0.0000002 0.0000003 0.0000001\n",
                 header()
@@ -1463,7 +1519,9 @@ mod tests {
                 outcome: outcome(Some(&csv)),
                 ini: std::sync::Mutex::new(None),
             };
-            let r = verify_tas_inner(&pool, "s1", &runner).await.unwrap();
+            let r = verify_tas_inner(&pool, dir.path(), "s1", &runner)
+                .await
+                .unwrap();
             assert_eq!(r.status, "ok", "{r:?}");
             let ini = runner.ini.lock().unwrap().clone().unwrap();
             assert!(ini.contains("transmissionGate[7]"), "{ini}");
@@ -1481,8 +1539,8 @@ mod tests {
     #[test]
     fn verify_mixed_session_emits_complement_gates() {
         tauri::async_runtime::block_on(async {
-            let pool = fresh_pool().await;
-            seed(&pool).await; // ST 流 + gate7 GCL（sw1 eth1 开 [0,300us)）。
+            let (pool, dir) = fresh_pool().await;
+            seed(&pool, dir.path()).await; // ST 流 + gate7 GCL（sw1 eth1 开 [0,300us)）。
             sqlx::query("INSERT INTO flow_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener, max_latency_us) VALUES ('s1', 1, 'BE', 0, 500, 512, 3, '1', '2', 400)")
                 .execute(&pool).await.unwrap();
             // 两个 sink（es2.app[0]=ST、app[1]=BE）都给健康向量。
@@ -1494,7 +1552,9 @@ mod tests {
                 outcome: outcome(Some(&csv)),
                 ini: std::sync::Mutex::new(None),
             };
-            let r = verify_tas_inner(&pool, "s1", &runner).await.unwrap();
+            let r = verify_tas_inner(&pool, dir.path(), "s1", &runner)
+                .await
+                .unwrap();
             assert_eq!(r.status, "ok", "{r:?}");
             let ini = runner.ini.lock().unwrap().clone().unwrap();
             // ST 门：显式关隐式保护带（真机验证关键行）。
@@ -1522,14 +1582,15 @@ mod tests {
     #[test]
     fn verify_rejects_stale_stream_with_wrong_pcp() {
         tauri::async_runtime::block_on(async {
-            let pool = fresh_pool().await;
-            seed(&pool).await;
+            let (pool, dir) = fresh_pool().await;
+            seed(&pool, dir.path()).await;
             sqlx::query("UPDATE flow_streams SET pcp=3 WHERE session_id='s1'")
                 .execute(&pool)
                 .await
                 .unwrap();
             let r = verify_tas_inner(
                 &pool,
+                dir.path(),
                 "s1",
                 &MockRunner {
                     outcome: outcome(None),
@@ -1598,7 +1659,7 @@ mod tests {
     #[test]
     fn verify_rc_rederives_paths_ignoring_stale_credential() {
         tauri::async_runtime::block_on(async {
-            let pool = fresh_pool().await;
+            let (pool, dir) = fresh_pool().await;
             // 过期凭证：node_path 指向已不存在的节点 9（拓扑录流后被改过）。
             let stale = r#"{"a":{"node_path":["1","9","2"],"link_seqs":[9]},"b":{"node_path":["1","8","2"],"link_seqs":[8]}}"#;
             seed_dual_plane_rc(&pool, stale).await;
@@ -1608,7 +1669,9 @@ mod tests {
                 outcome: outcome(Some(&csv)),
                 ini: std::sync::Mutex::new(None),
             };
-            let r = verify_tas_inner(&pool, "s1", &runner).await.unwrap();
+            let r = verify_tas_inner(&pool, dir.path(), "s1", &runner)
+                .await
+                .unwrap();
             assert_ne!(r.status, "route_error", "重推导可行不得报错：{r:?}");
             assert_eq!(r.status, "ok", "{r:?}");
             let ini = runner.ini.lock().unwrap().clone().unwrap();
@@ -1627,7 +1690,7 @@ mod tests {
     #[test]
     fn verify_rc_rederivation_failure_is_loud_and_blocks_assembly() {
         tauri::async_runtime::block_on(async {
-            let pool = fresh_pool().await;
+            let (pool, dir) = fresh_pool().await;
             // 合法形状的旧凭证（录入时曾不相交）。
             let old = r#"{"a":{"node_path":["1","0","2"],"link_seqs":[0,1]},"b":{"node_path":["1","3","2"],"link_seqs":[2,3]}}"#;
             seed_dual_plane_rc(&pool, old).await;
@@ -1640,7 +1703,9 @@ mod tests {
                 outcome: outcome(None),
                 ini: std::sync::Mutex::new(None),
             };
-            let r = verify_tas_inner(&pool, "s1", &runner).await.unwrap();
+            let r = verify_tas_inner(&pool, dir.path(), "s1", &runner)
+                .await
+                .unwrap();
             assert_eq!(r.status, "route_error", "{r:?}");
             assert!(
                 r.message.as_deref().unwrap().contains("流 0"),
@@ -1673,37 +1738,45 @@ mod tests {
         }
     }
 
-    /// R18/R19 CI 接缝：一条 ST 流 record → plan_tas_inner 写 raw_archive → verify_tas_inner
-    /// 重放读回 pin 判决。证 plan→verify 经 raw_archive 的接缝（par 行重放、node=mid，KTD4）。
+    /// R18/R19 CI 接缝：一条 ST 流 record → plan_tas_inner 写 raw 存档文件 → verify_tas_inner
+    /// 重放读回 pin 判决。证 plan→verify 经 raw 存档的接缝（par 行重放、node=mid，KTD4）。
     #[test]
     fn e2e_plan_then_verify_pipeline() {
         tauri::async_runtime::block_on(async {
-            let pool = fresh_pool().await;
-            seed(&pool).await;
-            // 清掉 seed 写的 raw_archive——让 plan_tas 自己综合落库（真接缝）。
-            sqlx::query("DELETE FROM gcl_raw_archive WHERE session_id='s1'")
-                .execute(&pool)
-                .await
-                .unwrap();
+            let (pool, dir) = fresh_pool().await;
+            seed(&pool, dir.path()).await;
+            // 清掉 seed 写的 raw 存档——让 plan_tas 自己综合落盘（真接缝）。
+            crate::gcl_raw_store::remove_raw(
+                dir.path(),
+                "s1",
+                crate::flow_plan_command::GCL_PROVIDER,
+            )
+            .unwrap();
 
             // plan：mock 服务回 sw1 gate7（ST 门）的 .sca（ned sw1 → mid 0）。
             let plan_client = MockPlan {
                 sca: "par N.sw1.eth[1].macLayer.queue.transmissionGate[7] initiallyOpen true\npar N.sw1.eth[1].macLayer.queue.transmissionGate[7] offset 0s\npar N.sw1.eth[1].macLayer.queue.transmissionGate[7] durations \"[300us, 700us]\"\n".into(),
             };
-            let pr =
-                crate::flow_plan_command::plan_tas_inner(&pool, "s1", &plan_client, "http://x")
-                    .await
-                    .unwrap();
+            let pr = crate::flow_plan_command::plan_tas_inner(
+                &pool,
+                dir.path(),
+                "s1",
+                &plan_client,
+                "http://x",
+            )
+            .await
+            .unwrap();
             assert_eq!(pr.status, "ok", "{pr:?}");
             assert_eq!(pr.gate_count, 1);
 
-            // raw_archive 落库（plan 写的）→ verify 重放读回 pin。
+            // raw 存档落盘（plan 写的）→ verify 重放读回 pin。
             let csv = format!(
                 "{}TsnAgentFlowTasNetwork.es2.app[0].sink,packetLifeTime:vector,0 0 0,0.0001 0.00012 0.00011\nTsnAgentFlowTasNetwork.es2.app[0].sink,packetJitter:vector,0 0 0,0.0000002 0.0000003 0.0000001\n",
                 header()
             );
             let vr = verify_tas_inner(
                 &pool,
+                dir.path(),
                 "s1",
                 &MockRunner {
                     outcome: outcome(Some(&csv)),
@@ -1720,8 +1793,8 @@ mod tests {
     #[test]
     fn e2e_bad_gcl_fails_verification() {
         tauri::async_runtime::block_on(async {
-            let pool = fresh_pool().await;
-            seed(&pool).await; // seed 已写一条 GCL（视作坏排程占位）。
+            let (pool, dir) = fresh_pool().await;
+            seed(&pool, dir.path()).await; // seed 已写一条 GCL（视作坏排程占位）。
             // 坏排程的软仿表现：收 < 发（碰撞丢包）。
             let csv = format!(
                 "{}TsnAgentFlowTasNetwork.es2.app[0].sink,packetLifeTime:vector,0,0.0001\nTsnAgentFlowTasNetwork.es2.app[0].sink,packetJitter:vector,0,0.0000002\n",
@@ -1729,6 +1802,7 @@ mod tests {
             );
             let vr = verify_tas_inner(
                 &pool,
+                dir.path(),
                 "s1",
                 &MockRunner {
                     outcome: outcome(Some(&csv)),
@@ -1797,7 +1871,7 @@ mod tests {
     #[test]
     fn fault_rounds_three_runs_with_disconnect_script() {
         tauri::async_runtime::block_on(async {
-            let pool = fresh_pool().await;
+            let (pool, dir) = fresh_pool().await;
             seed_dual_plane_rc(&pool, RC_PATHS).await;
             let csv = healthy_csv("TsnAgentFlowTasNetwork.es2.app[0].sink", 2001);
             let runner = ScriptedRunner::new(vec![
@@ -1805,7 +1879,9 @@ mod tests {
                 Ok(outcome(Some(&csv))),
                 Ok(outcome(Some(&csv))),
             ]);
-            let r = verify_tas_inner(&pool, "s1", &runner).await.unwrap();
+            let r = verify_tas_inner(&pool, dir.path(), "s1", &runner)
+                .await
+                .unwrap();
             assert_eq!(r.status, "ok", "{r:?}");
             let rounds = r.rounds.as_ref().expect("有 RC 应有 rounds");
             assert_eq!(
@@ -1888,14 +1964,16 @@ mod tests {
     #[test]
     fn fault_break_point_picks_max_coverage_shared_link() {
         tauri::async_runtime::block_on(async {
-            let pool = fresh_pool().await;
+            let (pool, dir) = fresh_pool().await;
             seed_dual_plane_two_rc(&pool, ("4", "2")).await;
             let runner = ScriptedRunner::new(vec![
                 Ok(outcome(None)),
                 Ok(outcome(None)),
                 Ok(outcome(None)),
             ]);
-            let r = verify_tas_inner(&pool, "s1", &runner).await.unwrap();
+            let r = verify_tas_inner(&pool, dir.path(), "s1", &runner)
+                .await
+                .unwrap();
             let rounds = r.rounds.expect("rounds");
             assert!(
                 runner.inis()[1].contains("<disconnect src-module='sw1' src-gate='ethg$o[1]'/>"),
@@ -1919,14 +1997,16 @@ mod tests {
     #[test]
     fn fault_break_point_tie_is_deterministic_and_marks_untested() {
         tauri::async_runtime::block_on(async {
-            let pool = fresh_pool().await;
+            let (pool, dir) = fresh_pool().await;
             seed_dual_plane_two_rc(&pool, ("4", "1")).await;
             let runner = ScriptedRunner::new(vec![
                 Ok(outcome(None)),
                 Ok(outcome(None)),
                 Ok(outcome(None)),
             ]);
-            let r = verify_tas_inner(&pool, "s1", &runner).await.unwrap();
+            let r = verify_tas_inner(&pool, dir.path(), "s1", &runner)
+                .await
+                .unwrap();
             let rounds = r.rounds.expect("rounds");
             // 平手确定性：BTreeMap 升序首个 = (link 0, 上游 sw1(mid0))，sw1 库端口 0 → eth0。
             assert!(
@@ -1949,14 +2029,16 @@ mod tests {
     #[test]
     fn fault_tail_guard_errors_loudly_without_running() {
         tauri::async_runtime::block_on(async {
-            let pool = fresh_pool().await;
+            let (pool, dir) = fresh_pool().await;
             seed_dual_plane_rc(&pool, RC_PATHS).await;
             sqlx::query("UPDATE flow_streams SET count=100 WHERE session_id='s1'")
                 .execute(&pool)
                 .await
                 .unwrap();
             let runner = ScriptedRunner::new(vec![]);
-            let r = verify_tas_inner(&pool, "s1", &runner).await.unwrap();
+            let r = verify_tas_inner(&pool, dir.path(), "s1", &runner)
+                .await
+                .unwrap();
             assert_eq!(r.status, "fault_window_too_short", "{r:?}");
             assert!(r.overall.contains("调大"), "{r:?}");
             assert!(
@@ -1974,7 +2056,7 @@ mod tests {
     #[test]
     fn fault_tail_guard_uses_real_send_window_not_intent_window() {
         tauri::async_runtime::block_on(async {
-            let pool = fresh_pool().await;
+            let (pool, dir) = fresh_pool().await;
             seed_dual_plane_rc(&pool, RC_PATHS).await;
             // RC 意图窗缩到 100ms（旧分母下断后 0 帧必拒）；ST 长流把 sim 拉到 10s。
             sqlx::query("UPDATE flow_streams SET count=100, period_us=1000 WHERE session_id='s1'")
@@ -1983,13 +2065,15 @@ mod tests {
                 .unwrap();
             sqlx::query("INSERT INTO flow_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener, max_latency_us) VALUES ('s1', 1, 'ST', 7, 1000, 512, 10000, '1', '2', 800)")
                 .execute(&pool).await.unwrap();
-            seed_gcl_archive(&pool, &gate_par_lines("sw1", 1, 7, "[300us, 700us]")).await;
+            seed_gcl_archive(dir.path(), &gate_par_lines("sw1", 1, 7, "[300us, 700us]"));
             let runner = ScriptedRunner::new(vec![
                 Ok(outcome(None)),
                 Ok(outcome(None)),
                 Ok(outcome(None)),
             ]);
-            let r = verify_tas_inner(&pool, "s1", &runner).await.unwrap();
+            let r = verify_tas_inner(&pool, dir.path(), "s1", &runner)
+                .await
+                .unwrap();
             assert_ne!(
                 r.status, "fault_window_too_short",
                 "真实发送窗充足不得假拒验：{r:?}"
@@ -2009,18 +2093,20 @@ mod tests {
     #[test]
     fn fault_annotations_mark_clock_tree_and_st_route_overlap() {
         tauri::async_runtime::block_on(async {
-            let pool = fresh_pool().await;
+            let (pool, dir) = fresh_pool().await;
             seed_dual_plane_rc(&pool, RC_PATHS).await;
             // 加 ST 流（平面 A：es1→es2）+ 其 GCL（有 ST 无 GCL 会 no_plan 早退）。
             sqlx::query("INSERT INTO flow_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener, max_latency_us) VALUES ('s1', 1, 'ST', 7, 500, 512, 2000, '1', '2', 400)")
                 .execute(&pool).await.unwrap();
-            seed_gcl_archive(&pool, &gate_par_lines("sw1", 1, 7, "[300us, 700us]")).await;
+            seed_gcl_archive(dir.path(), &gate_par_lines("sw1", 1, 7, "[300us, 700us]"));
             let runner = ScriptedRunner::new(vec![
                 Ok(outcome(None)),
                 Ok(outcome(None)),
                 Ok(outcome(None)),
             ]);
-            let r = verify_tas_inner(&pool, "s1", &runner).await.unwrap();
+            let r = verify_tas_inner(&pool, dir.path(), "s1", &runner)
+                .await
+                .unwrap();
             let rounds = r.rounds.expect("rounds");
             let a = &rounds[1];
             assert!(a.annotations.iter().any(|s| s.contains("时钟树")), "{a:?}");
@@ -2042,7 +2128,7 @@ mod tests {
     #[test]
     fn fault_round_failure_continues_and_overall_shows_worst() {
         tauri::async_runtime::block_on(async {
-            let pool = fresh_pool().await;
+            let (pool, dir) = fresh_pool().await;
             seed_dual_plane_rc(&pool, RC_PATHS).await;
             let csv = healthy_csv("TsnAgentFlowTasNetwork.es2.app[0].sink", 2001);
             let runner = ScriptedRunner::new(vec![
@@ -2055,7 +2141,9 @@ mod tests {
                 }),
                 Ok(outcome(Some(&csv))),
             ]);
-            let r = verify_tas_inner(&pool, "s1", &runner).await.unwrap();
+            let r = verify_tas_inner(&pool, dir.path(), "s1", &runner)
+                .await
+                .unwrap();
             assert_eq!(r.status, "ok", "顶层保持健康轮：{r:?}");
             assert_eq!(r.per_stream.len(), 1, "顶层保持健康轮 per_stream：{r:?}");
             assert!(r.per_stream[0].pass);
@@ -2080,7 +2168,7 @@ mod tests {
     #[test]
     fn healthy_round_failure_still_runs_fault_rounds() {
         tauri::async_runtime::block_on(async {
-            let pool = fresh_pool().await;
+            let (pool, dir) = fresh_pool().await;
             seed_dual_plane_rc(&pool, RC_PATHS).await;
             let csv = healthy_csv("TsnAgentFlowTasNetwork.es2.app[0].sink", 2001);
             let runner = ScriptedRunner::new(vec![
@@ -2088,7 +2176,9 @@ mod tests {
                 Ok(outcome(Some(&csv))),
                 Ok(outcome(Some(&csv))),
             ]);
-            let r = verify_tas_inner(&pool, "s1", &runner).await.unwrap();
+            let r = verify_tas_inner(&pool, dir.path(), "s1", &runner)
+                .await
+                .unwrap();
             assert_eq!(r.status, "unreachable", "顶层=健康轮词表：{r:?}");
             assert_eq!(runner.inis().len(), 3, "健康轮失败不阻断故障轮");
             let rounds = r.rounds.as_ref().expect("rounds 应携带全轮");
@@ -2110,7 +2200,7 @@ mod tests {
     #[test]
     fn fault_round_busy_from_409_is_not_fail() {
         tauri::async_runtime::block_on(async {
-            let pool = fresh_pool().await;
+            let (pool, dir) = fresh_pool().await;
             seed_dual_plane_rc(&pool, RC_PATHS).await;
             let csv = healthy_csv("TsnAgentFlowTasNetwork.es2.app[0].sink", 2001);
             let runner = ScriptedRunner::new(vec![
@@ -2120,7 +2210,9 @@ mod tests {
                 )),
                 Ok(outcome(Some(&csv))),
             ]);
-            let r = verify_tas_inner(&pool, "s1", &runner).await.unwrap();
+            let r = verify_tas_inner(&pool, dir.path(), "s1", &runner)
+                .await
+                .unwrap();
             assert_eq!(r.status, "ok", "{r:?}");
             let rounds = r.rounds.as_ref().unwrap();
             assert_eq!(rounds[1].status, "busy", "{rounds:?}");
@@ -2135,14 +2227,16 @@ mod tests {
     #[test]
     fn no_rc_single_round_and_rounds_absent() {
         tauri::async_runtime::block_on(async {
-            let pool = fresh_pool().await;
-            seed(&pool).await; // 纯 ST。
+            let (pool, dir) = fresh_pool().await;
+            seed(&pool, dir.path()).await; // 纯 ST。
             let csv = format!(
                 "{}TsnAgentFlowTasNetwork.es2.app[0].sink,packetLifeTime:vector,0 0 0,0.0001 0.00012 0.00011\nTsnAgentFlowTasNetwork.es2.app[0].sink,packetJitter:vector,0 0 0,0.0000002 0.0000003 0.0000001\n",
                 header()
             );
             let runner = ScriptedRunner::new(vec![Ok(outcome(Some(&csv)))]);
-            let r = verify_tas_inner(&pool, "s1", &runner).await.unwrap();
+            let r = verify_tas_inner(&pool, dir.path(), "s1", &runner)
+                .await
+                .unwrap();
             assert_eq!(r.status, "ok", "{r:?}");
             assert!(r.rounds.is_none(), "{r:?}");
             assert_eq!(runner.inis().len(), 1, "无 RC 只跑一轮");
@@ -2164,15 +2258,17 @@ mod tests {
     #[test]
     fn no_rounds_result_carries_top_level_gptp_diag() {
         tauri::async_runtime::block_on(async {
-            let pool = fresh_pool().await;
-            seed(&pool).await; // 纯 ST，GM=es1(mid1)。
+            let (pool, dir) = fresh_pool().await;
+            seed(&pool, dir.path()).await; // 纯 ST，GM=es1(mid1)。
             let mut csv = format!(
                 "{}TsnAgentFlowTasNetwork.es2.app[0].sink,packetLifeTime:vector,0 0 0,0.0001 0.00012 0.00011\nTsnAgentFlowTasNetwork.es2.app[0].sink,packetJitter:vector,0 0 0,0.0000002 0.0000003 0.0000001\n",
                 header()
             );
             csv.push_str(clock_csv_rows_gm_es1());
             let runner = ScriptedRunner::new(vec![Ok(outcome(Some(&csv)))]);
-            let r = verify_tas_inner(&pool, "s1", &runner).await.unwrap();
+            let r = verify_tas_inner(&pool, dir.path(), "s1", &runner)
+                .await
+                .unwrap();
             assert_eq!(r.status, "ok", "{r:?}");
             assert!(r.rounds.is_none(), "{r:?}");
             let d = r
@@ -2287,7 +2383,7 @@ mod tests {
     #[test]
     fn rc_duplicate_frames_fail_loudly() {
         tauri::async_runtime::block_on(async {
-            let pool = fresh_pool().await;
+            let (pool, dir) = fresh_pool().await;
             seed_dual_plane_rc(&pool, RC_PATHS).await;
             let csv = healthy_csv("TsnAgentFlowTasNetwork.es2.app[0].sink", 2002);
             let runner = ScriptedRunner::new(vec![
@@ -2295,7 +2391,9 @@ mod tests {
                 Ok(outcome(Some(&csv))),
                 Ok(outcome(Some(&csv))),
             ]);
-            let r = verify_tas_inner(&pool, "s1", &runner).await.unwrap();
+            let r = verify_tas_inner(&pool, dir.path(), "s1", &runner)
+                .await
+                .unwrap();
             assert_eq!(r.status, "fail", "{r:?}");
             assert_eq!(r.per_stream[0].class, "RC");
             assert!(r.per_stream[0].judged);
@@ -2317,7 +2415,7 @@ mod tests {
     fn rc_gap_within_tolerance_passes_beyond_fails() {
         tauri::async_runtime::block_on(async {
             // 容差内：收 2000、实发 2001。
-            let pool = fresh_pool().await;
+            let (pool, dir) = fresh_pool().await;
             seed_dual_plane_rc(&pool, RC_PATHS).await;
             let csv = healthy_csv("TsnAgentFlowTasNetwork.es2.app[0].sink", 2000);
             let runner = ScriptedRunner::new(vec![
@@ -2325,12 +2423,14 @@ mod tests {
                 Ok(outcome(Some(&csv))),
                 Ok(outcome(Some(&csv))),
             ]);
-            let r = verify_tas_inner(&pool, "s1", &runner).await.unwrap();
+            let r = verify_tas_inner(&pool, dir.path(), "s1", &runner)
+                .await
+                .unwrap();
             assert_eq!(r.status, "ok", "缺口 1 ≤ 容差 2 应通过：{r:?}");
             assert!(r.per_stream[0].pass);
 
             // 超容差：收 1000。
-            let pool = fresh_pool().await;
+            let (pool, dir) = fresh_pool().await;
             seed_dual_plane_rc(&pool, RC_PATHS).await;
             let csv = healthy_csv("TsnAgentFlowTasNetwork.es2.app[0].sink", 1000);
             let runner = ScriptedRunner::new(vec![
@@ -2338,7 +2438,9 @@ mod tests {
                 Ok(outcome(Some(&csv))),
                 Ok(outcome(Some(&csv))),
             ]);
-            let r = verify_tas_inner(&pool, "s1", &runner).await.unwrap();
+            let r = verify_tas_inner(&pool, dir.path(), "s1", &runner)
+                .await
+                .unwrap();
             assert_eq!(r.status, "fail", "{r:?}");
             assert!(
                 r.per_stream[0].reason.as_deref().unwrap().contains("丢包"),
@@ -2349,13 +2451,13 @@ mod tests {
 
     /// 混合三类 seed：dual-plane RC（seq0）+ ST（seq1，带 gate7 GCL）+ BE（seq2），
     /// 全部 es1→es2、count=2000×500us（sim=1s、每流实发 2001）。
-    async fn seed_mixed_three_classes(pool: &sqlx::Pool<sqlx::Sqlite>) {
+    async fn seed_mixed_three_classes(pool: &sqlx::Pool<sqlx::Sqlite>, base_dir: &std::path::Path) {
         seed_dual_plane_rc(pool, RC_PATHS).await;
         sqlx::query("INSERT INTO flow_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener, max_latency_us) VALUES ('s1', 1, 'ST', 7, 500, 512, 2000, '1', '2', 400)")
             .execute(pool).await.unwrap();
         sqlx::query("INSERT INTO flow_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener) VALUES ('s1', 2, 'BE', 0, 500, 512, 2000, '1', '2')")
             .execute(pool).await.unwrap();
-        seed_gcl_archive(pool, &gate_par_lines("sw1", 1, 7, "[300us, 700us]")).await;
+        seed_gcl_archive(base_dir, &gate_par_lines("sw1", 1, 7, "[300us, 700us]"));
     }
 
     /// 三个 sink（es2.app[0]=RC、app[1]=ST、app[2]=BE）全健康的 CSV；ST sink 抖动可注坏样本。
@@ -2380,15 +2482,17 @@ mod tests {
     #[test]
     fn mixed_three_classes_judged_per_class_all_green() {
         tauri::async_runtime::block_on(async {
-            let pool = fresh_pool().await;
-            seed_mixed_three_classes(&pool).await;
+            let (pool, dir) = fresh_pool().await;
+            seed_mixed_three_classes(&pool, dir.path()).await;
             let csv = mixed_csv(false);
             let runner = ScriptedRunner::new(vec![
                 Ok(outcome(Some(&csv))),
                 Ok(outcome(Some(&csv))),
                 Ok(outcome(Some(&csv))),
             ]);
-            let r = verify_tas_inner(&pool, "s1", &runner).await.unwrap();
+            let r = verify_tas_inner(&pool, dir.path(), "s1", &runner)
+                .await
+                .unwrap();
             assert_eq!(r.status, "ok", "{r:?}");
             assert_eq!(
                 r.per_stream
@@ -2420,15 +2524,17 @@ mod tests {
     #[test]
     fn mixed_st_jitter_breach_not_masked_by_rc_be() {
         tauri::async_runtime::block_on(async {
-            let pool = fresh_pool().await;
-            seed_mixed_three_classes(&pool).await;
+            let (pool, dir) = fresh_pool().await;
+            seed_mixed_three_classes(&pool, dir.path()).await;
             let csv = mixed_csv(true);
             let runner = ScriptedRunner::new(vec![
                 Ok(outcome(Some(&csv))),
                 Ok(outcome(Some(&csv))),
                 Ok(outcome(Some(&csv))),
             ]);
-            let r = verify_tas_inner(&pool, "s1", &runner).await.unwrap();
+            let r = verify_tas_inner(&pool, dir.path(), "s1", &runner)
+                .await
+                .unwrap();
             assert_eq!(r.status, "fail", "ST FAIL 不得被 RC/BE 绿灯掩盖：{r:?}");
             let st = r.per_stream.iter().find(|v| v.class == "ST").unwrap();
             assert!(!st.pass, "{r:?}");
@@ -2452,20 +2558,23 @@ mod tests {
     fn be_zero_receive_fails_half_receive_passes_with_ratio() {
         tauri::async_runtime::block_on(async {
             // 零收包：CSV 只有表头（该流无向量行）→ FAIL。
-            let pool = fresh_pool().await;
-            seed(&pool).await;
+            let (pool, dir) = fresh_pool().await;
+            seed(&pool, dir.path()).await;
             sqlx::query("DELETE FROM flow_streams WHERE session_id='s1'")
                 .execute(&pool)
                 .await
                 .unwrap();
-            sqlx::query("DELETE FROM gcl_raw_archive WHERE session_id='s1'")
-                .execute(&pool)
-                .await
-                .unwrap();
+            crate::gcl_raw_store::remove_raw(
+                dir.path(),
+                "s1",
+                crate::flow_plan_command::GCL_PROVIDER,
+            )
+            .unwrap();
             sqlx::query("INSERT INTO flow_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener) VALUES ('s1', 0, 'BE', 0, 500, 512, 3, '1', '2')")
                 .execute(&pool).await.unwrap();
             let r = verify_tas_inner(
                 &pool,
+                dir.path(),
                 "s1",
                 &MockRunner {
                     outcome: outcome(Some(&header())),
@@ -2492,6 +2601,7 @@ mod tests {
             );
             let r = verify_tas_inner(
                 &pool,
+                dir.path(),
                 "s1",
                 &MockRunner {
                     outcome: outcome(Some(&csv)),
@@ -2512,11 +2622,11 @@ mod tests {
     #[test]
     fn fault_round_st_degradation_reported_not_judged() {
         tauri::async_runtime::block_on(async {
-            let pool = fresh_pool().await;
+            let (pool, dir) = fresh_pool().await;
             seed_dual_plane_rc(&pool, RC_PATHS).await;
             sqlx::query("INSERT INTO flow_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener, max_latency_us) VALUES ('s1', 1, 'ST', 7, 500, 512, 2000, '1', '2', 400)")
                 .execute(&pool).await.unwrap();
-            seed_gcl_archive(&pool, &gate_par_lines("sw1", 1, 7, "[300us, 700us]")).await;
+            seed_gcl_archive(dir.path(), &gate_par_lines("sw1", 1, 7, "[300us, 700us]"));
             let mut healthy = healthy_csv("TsnAgentFlowTasNetwork.es2.app[0].sink", 2001);
             let st = healthy_csv("TsnAgentFlowTasNetwork.es2.app[1].sink", 2001);
             healthy.push_str(st.strip_prefix(&header()).unwrap());
@@ -2530,7 +2640,9 @@ mod tests {
                 Ok(outcome(Some(&fault))),
                 Ok(outcome(Some(&healthy))),
             ]);
-            let r = verify_tas_inner(&pool, "s1", &runner).await.unwrap();
+            let r = verify_tas_inner(&pool, dir.path(), "s1", &runner)
+                .await
+                .unwrap();
             assert_eq!(r.status, "ok", "{r:?}");
             let rounds = r.rounds.as_ref().unwrap();
             let fa = &rounds[1];
@@ -2549,7 +2661,7 @@ mod tests {
     #[test]
     fn fault_round_untested_rc_reported_not_judged() {
         tauri::async_runtime::block_on(async {
-            let pool = fresh_pool().await;
+            let (pool, dir) = fresh_pool().await;
             // 两条 RC 不共向（es1→es2、es3→es1）：断A断点只覆盖流 1，流 0 未测。
             seed_dual_plane_two_rc(&pool, ("4", "1")).await;
             let mut csv = healthy_csv("TsnAgentFlowTasNetwork.es2.app[0].sink", 2001);
@@ -2560,7 +2672,9 @@ mod tests {
                 Ok(outcome(Some(&csv))),
                 Ok(outcome(Some(&csv))),
             ]);
-            let r = verify_tas_inner(&pool, "s1", &runner).await.unwrap();
+            let r = verify_tas_inner(&pool, dir.path(), "s1", &runner)
+                .await
+                .unwrap();
             let rounds = r.rounds.as_ref().unwrap();
             let fa = &rounds[1];
             let s0 = fa.per_stream.iter().find(|v| v.stream_seq == 0).unwrap();
@@ -2579,7 +2693,7 @@ mod tests {
     fn empty_vectors_fail_stream_in_healthy_and_fault_rounds() {
         tauri::async_runtime::block_on(async {
             // 健康轮空向量 → 该流 FAIL、整体 fail。
-            let pool = fresh_pool().await;
+            let (pool, dir) = fresh_pool().await;
             seed_dual_plane_rc(&pool, RC_PATHS).await;
             let bare = header();
             let runner = ScriptedRunner::new(vec![
@@ -2587,7 +2701,9 @@ mod tests {
                 Ok(outcome(Some(&bare))),
                 Ok(outcome(Some(&bare))),
             ]);
-            let r = verify_tas_inner(&pool, "s1", &runner).await.unwrap();
+            let r = verify_tas_inner(&pool, dir.path(), "s1", &runner)
+                .await
+                .unwrap();
             assert_eq!(r.status, "fail", "{r:?}");
             assert!(!r.per_stream[0].pass);
             assert!(
@@ -2600,7 +2716,7 @@ mod tests {
             );
 
             // 故障轮空向量 → 该轮被覆盖 RC FAIL（健康轮不受影响）。
-            let pool = fresh_pool().await;
+            let (pool, dir) = fresh_pool().await;
             seed_dual_plane_rc(&pool, RC_PATHS).await;
             let full = healthy_csv("TsnAgentFlowTasNetwork.es2.app[0].sink", 2001);
             let runner = ScriptedRunner::new(vec![
@@ -2608,7 +2724,9 @@ mod tests {
                 Ok(outcome(Some(&bare))),
                 Ok(outcome(Some(&full))),
             ]);
-            let r = verify_tas_inner(&pool, "s1", &runner).await.unwrap();
+            let r = verify_tas_inner(&pool, dir.path(), "s1", &runner)
+                .await
+                .unwrap();
             assert_eq!(r.status, "ok", "顶层=健康轮：{r:?}");
             let rounds = r.rounds.as_ref().unwrap();
             assert_eq!(rounds[1].status, "fail", "{rounds:?}");
@@ -2640,7 +2758,7 @@ mod tests {
     #[test]
     fn gptp_diag_default_threshold_counts_and_worst_node() {
         tauri::async_runtime::block_on(async {
-            let pool = fresh_pool().await;
+            let (pool, dir) = fresh_pool().await;
             seed_dual_plane_rc(&pool, RC_PATHS).await;
             let mut csv = healthy_csv("TsnAgentFlowTasNetwork.es2.app[0].sink", 2001);
             csv.push_str(clock_csv_rows());
@@ -2649,7 +2767,9 @@ mod tests {
                 Ok(outcome(Some(&csv))),
                 Ok(outcome(Some(&csv))),
             ]);
-            let r = verify_tas_inner(&pool, "s1", &runner).await.unwrap();
+            let r = verify_tas_inner(&pool, dir.path(), "s1", &runner)
+                .await
+                .unwrap();
             assert_eq!(r.status, "ok", "诊断只报告不判：{r:?}");
             let rounds = r.rounds.as_ref().unwrap();
             let d = rounds[0].gptp_diag.as_ref().expect("健康轮应有诊断行");
@@ -2671,7 +2791,7 @@ mod tests {
     #[test]
     fn gptp_diag_per_node_threshold_applies_and_absent_without_clock_rows() {
         tauri::async_runtime::block_on(async {
-            let pool = fresh_pool().await;
+            let (pool, dir) = fresh_pool().await;
             seed_dual_plane_rc(&pool, RC_PATHS).await;
             sqlx::query(
                 "UPDATE timesync_nodes SET offset_threshold=2000 WHERE session_id='s1' AND mid='2'",
@@ -2687,7 +2807,9 @@ mod tests {
                 Ok(outcome(Some(&without_clock))),
                 Ok(outcome(Some(&with_clock))),
             ]);
-            let r = verify_tas_inner(&pool, "s1", &runner).await.unwrap();
+            let r = verify_tas_inner(&pool, dir.path(), "s1", &runner)
+                .await
+                .unwrap();
             let rounds = r.rounds.as_ref().unwrap();
             let d = rounds[0].gptp_diag.as_ref().unwrap();
             assert_eq!(
@@ -2743,19 +2865,20 @@ mod tests {
             }
         }
 
-        /// plan 产物落库的验证锚点：raw_archive 行数（verify pin 重放的事实源，KTD4）。
-        async fn gcl_archive_count(pool: &sqlx::Pool<sqlx::Sqlite>) -> i64 {
-            sqlx::query_scalar("SELECT COUNT(*) FROM gcl_raw_archive WHERE session_id='s1'")
-                .fetch_one(pool)
-                .await
+        /// plan 产物落盘的验证锚点：raw 存档文件是否存在（verify pin 重放的事实源，KTD4）。
+        fn gcl_archive_count(base_dir: &std::path::Path) -> i64 {
+            crate::gcl_raw_store::read_raw(base_dir, "s1", crate::flow_plan_command::GCL_PROVIDER)
                 .unwrap()
+                .map_or(0, |_| 1)
         }
 
-        async fn clear_gcl_archive(pool: &sqlx::Pool<sqlx::Sqlite>) {
-            sqlx::query("DELETE FROM gcl_raw_archive WHERE session_id='s1'")
-                .execute(pool)
-                .await
-                .unwrap();
+        fn clear_gcl_archive(base_dir: &std::path::Path) {
+            crate::gcl_raw_store::remove_raw(
+                base_dir,
+                "s1",
+                crate::flow_plan_command::GCL_PROVIDER,
+            )
+            .unwrap();
         }
 
         /// 矩阵行 1「纯 ST」：进 Z3=ST；plan 产物=GCL 落库；verify=单轮健康（无 rounds）；
@@ -2763,23 +2886,31 @@ mod tests {
         #[test]
         fn matrix_pure_st_single_round_st_criteria() {
             tauri::async_runtime::block_on(async {
-                let pool = fresh_pool().await;
-                seed(&pool).await;
-                clear_gcl_archive(&pool).await; // 真管线：GCL 由 plan 落库。
+                let (pool, dir) = fresh_pool().await;
+                seed(&pool, dir.path()).await;
+                clear_gcl_archive(dir.path()); // 真管线：GCL 由 plan 落库。
                 let plan = plan_gate7();
-                let pr = crate::flow_plan_command::plan_tas_inner(&pool, "s1", &plan, "http://x")
-                    .await
-                    .unwrap();
+                let pr = crate::flow_plan_command::plan_tas_inner(
+                    &pool,
+                    dir.path(),
+                    "s1",
+                    &plan,
+                    "http://x",
+                )
+                .await
+                .unwrap();
                 assert_eq!(pr.status, "ok", "{pr:?}");
                 let synth = plan.ini.lock().unwrap().clone().expect("ST 应进 Z3");
                 assert_eq!(synth.matches("UdpSourceApp").count(), 1, "{synth}");
                 assert!(synth.contains("pcp: 7"), "{synth}");
-                assert_eq!(gcl_archive_count(&pool).await, 1, "plan 产物=GCL 落库");
+                assert_eq!(gcl_archive_count(dir.path()), 1, "plan 产物=GCL 落库");
 
                 let mut csv = healthy_csv("TsnAgentFlowTasNetwork.es2.app[0].sink", 3);
                 csv.push_str(clock_csv_rows_gm_es1());
                 let runner = ScriptedRunner::new(vec![Ok(outcome(Some(&csv)))]);
-                let r = verify_tas_inner(&pool, "s1", &runner).await.unwrap();
+                let r = verify_tas_inner(&pool, dir.path(), "s1", &runner)
+                    .await
+                    .unwrap();
                 assert_eq!(r.status, "ok", "{r:?}");
                 assert!(r.rounds.is_none(), "纯 ST：单轮健康、无 rounds：{r:?}");
                 assert_eq!(runner.inis().len(), 1, "只提交一轮");
@@ -2806,15 +2937,21 @@ mod tests {
         #[test]
         fn matrix_st_be_single_round_complement_and_be_connectivity() {
             tauri::async_runtime::block_on(async {
-                let pool = fresh_pool().await;
-                seed(&pool).await;
+                let (pool, dir) = fresh_pool().await;
+                seed(&pool, dir.path()).await;
                 sqlx::query("INSERT INTO flow_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener) VALUES ('s1', 1, 'BE', 0, 500, 512, 3, '1', '2')")
                     .execute(&pool).await.unwrap();
-                clear_gcl_archive(&pool).await;
+                clear_gcl_archive(dir.path());
                 let plan = plan_gate7();
-                let pr = crate::flow_plan_command::plan_tas_inner(&pool, "s1", &plan, "http://x")
-                    .await
-                    .unwrap();
+                let pr = crate::flow_plan_command::plan_tas_inner(
+                    &pool,
+                    dir.path(),
+                    "s1",
+                    &plan,
+                    "http://x",
+                )
+                .await
+                .unwrap();
                 assert_eq!(pr.status, "ok", "{pr:?}");
                 let synth = plan.ini.lock().unwrap().clone().expect("ST 应进 Z3");
                 assert_eq!(
@@ -2823,14 +2960,16 @@ mod tests {
                     "只有 ST 进 Z3：{synth}"
                 );
                 assert!(!synth.contains("pcp: 0"), "BE 不得进 synth bundle：{synth}");
-                assert_eq!(gcl_archive_count(&pool).await, 1);
+                assert_eq!(gcl_archive_count(dir.path()), 1);
 
                 // ST=app[0]、BE=app[1]（specs 按 stream_seq 序）。
                 let mut csv = healthy_csv("TsnAgentFlowTasNetwork.es2.app[0].sink", 3);
                 let be = healthy_csv("TsnAgentFlowTasNetwork.es2.app[1].sink", 3);
                 csv.push_str(be.strip_prefix(&header()).unwrap());
                 let runner = ScriptedRunner::new(vec![Ok(outcome(Some(&csv)))]);
-                let r = verify_tas_inner(&pool, "s1", &runner).await.unwrap();
+                let r = verify_tas_inner(&pool, dir.path(), "s1", &runner)
+                    .await
+                    .unwrap();
                 assert_eq!(r.status, "ok", "{r:?}");
                 assert!(r.rounds.is_none(), "无 RC：单轮：{r:?}");
                 assert!(r.per_stream.iter().all(|v| v.judged && v.pass), "{r:?}");
@@ -2850,14 +2989,20 @@ mod tests {
         #[test]
         fn matrix_st_rc_three_rounds_st_healthy_only() {
             tauri::async_runtime::block_on(async {
-                let pool = fresh_pool().await;
+                let (pool, dir) = fresh_pool().await;
                 seed_dual_plane_rc(&pool, RC_PATHS).await; // RC seq0。
                 sqlx::query("INSERT INTO flow_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener, max_latency_us) VALUES ('s1', 1, 'ST', 7, 500, 512, 2000, '1', '2', 400)")
                     .execute(&pool).await.unwrap();
                 let plan = plan_gate7();
-                let pr = crate::flow_plan_command::plan_tas_inner(&pool, "s1", &plan, "http://x")
-                    .await
-                    .unwrap();
+                let pr = crate::flow_plan_command::plan_tas_inner(
+                    &pool,
+                    dir.path(),
+                    "s1",
+                    &plan,
+                    "http://x",
+                )
+                .await
+                .unwrap();
                 assert_eq!(pr.status, "ok", "{pr:?}");
                 let synth = plan.ini.lock().unwrap().clone().expect("ST 应进 Z3");
                 assert_eq!(
@@ -2866,7 +3011,7 @@ mod tests {
                     "只有 ST 进 Z3：{synth}"
                 );
                 assert!(!synth.contains("pcp: 6"), "RC 不得进 synth bundle：{synth}");
-                assert_eq!(gcl_archive_count(&pool).await, 1);
+                assert_eq!(gcl_archive_count(dir.path()), 1);
 
                 // RC=app[0]、ST=app[1]。
                 let mut csv = healthy_csv("TsnAgentFlowTasNetwork.es2.app[0].sink", 2001);
@@ -2877,7 +3022,9 @@ mod tests {
                     Ok(outcome(Some(&csv))),
                     Ok(outcome(Some(&csv))),
                 ]);
-                let r = verify_tas_inner(&pool, "s1", &runner).await.unwrap();
+                let r = verify_tas_inner(&pool, dir.path(), "s1", &runner)
+                    .await
+                    .unwrap();
                 assert_eq!(r.status, "ok", "{r:?}");
                 let rounds = r.rounds.as_ref().expect("有 RC 应三轮");
                 assert_eq!(
@@ -2907,13 +3054,19 @@ mod tests {
         #[test]
         fn matrix_all_three_classes_full_criteria() {
             tauri::async_runtime::block_on(async {
-                let pool = fresh_pool().await;
-                seed_mixed_three_classes(&pool).await; // RC0+ST1+BE2 + 手工 GCL。
-                clear_gcl_archive(&pool).await; // 真管线：GCL 由 plan 落库。
+                let (pool, dir) = fresh_pool().await;
+                seed_mixed_three_classes(&pool, dir.path()).await; // RC0+ST1+BE2 + 手工 GCL。
+                clear_gcl_archive(dir.path()); // 真管线：GCL 由 plan 落库。
                 let plan = plan_gate7();
-                let pr = crate::flow_plan_command::plan_tas_inner(&pool, "s1", &plan, "http://x")
-                    .await
-                    .unwrap();
+                let pr = crate::flow_plan_command::plan_tas_inner(
+                    &pool,
+                    dir.path(),
+                    "s1",
+                    &plan,
+                    "http://x",
+                )
+                .await
+                .unwrap();
                 assert_eq!(pr.status, "ok", "{pr:?}");
                 let synth = plan.ini.lock().unwrap().clone().expect("ST 应进 Z3");
                 assert_eq!(
@@ -2923,7 +3076,7 @@ mod tests {
                 );
                 assert!(!synth.contains("pcp: 6"), "{synth}");
                 assert!(!synth.contains("pcp: 0"), "{synth}");
-                assert_eq!(gcl_archive_count(&pool).await, 1);
+                assert_eq!(gcl_archive_count(dir.path()), 1);
 
                 let csv = mixed_csv(false);
                 let runner = ScriptedRunner::new(vec![
@@ -2931,7 +3084,9 @@ mod tests {
                     Ok(outcome(Some(&csv))),
                     Ok(outcome(Some(&csv))),
                 ]);
-                let r = verify_tas_inner(&pool, "s1", &runner).await.unwrap();
+                let r = verify_tas_inner(&pool, dir.path(), "s1", &runner)
+                    .await
+                    .unwrap();
                 assert_eq!(r.status, "ok", "{r:?}");
                 let rounds = r.rounds.as_ref().expect("有 RC 应三轮");
                 assert_eq!(
@@ -2965,17 +3120,23 @@ mod tests {
         #[test]
         fn matrix_pure_rc_three_rounds_all_gates_open() {
             tauri::async_runtime::block_on(async {
-                let pool = fresh_pool().await;
+                let (pool, dir) = fresh_pool().await;
                 seed_dual_plane_rc(&pool, RC_PATHS).await;
                 // 存量旧 GCL 存档（上一轮 ST 规划残留）——no_gating 应清掉，verify 不得 pin 它。
-                seed_gcl_archive(&pool, &gate_par_lines("sw1", 1, 7, "[300us, 700us]")).await;
+                seed_gcl_archive(dir.path(), &gate_par_lines("sw1", 1, 7, "[300us, 700us]"));
                 let plan = plan_gate7();
-                let pr = crate::flow_plan_command::plan_tas_inner(&pool, "s1", &plan, "http://x")
-                    .await
-                    .unwrap();
+                let pr = crate::flow_plan_command::plan_tas_inner(
+                    &pool,
+                    dir.path(),
+                    "s1",
+                    &plan,
+                    "http://x",
+                )
+                .await
+                .unwrap();
                 assert_eq!(pr.status, "no_gating", "{pr:?}");
                 assert!(plan.ini.lock().unwrap().is_none(), "无 ST 不进 Z3");
-                assert_eq!(gcl_archive_count(&pool).await, 0, "no_gating 清表");
+                assert_eq!(gcl_archive_count(dir.path()), 0, "no_gating 清表");
 
                 let mut csv = healthy_csv("TsnAgentFlowTasNetwork.es2.app[0].sink", 2001);
                 csv.push_str(clock_csv_rows());
@@ -2984,7 +3145,9 @@ mod tests {
                     Ok(outcome(Some(&csv))),
                     Ok(outcome(Some(&csv))),
                 ]);
-                let r = verify_tas_inner(&pool, "s1", &runner).await.unwrap();
+                let r = verify_tas_inner(&pool, dir.path(), "s1", &runner)
+                    .await
+                    .unwrap();
                 assert_eq!(r.status, "ok", "{r:?}");
                 let rounds = r.rounds.as_ref().expect("纯 RC 三轮照跑");
                 assert_eq!(
@@ -3019,8 +3182,8 @@ mod tests {
         #[test]
         fn matrix_pure_be_single_round_connectivity_and_diag_line() {
             tauri::async_runtime::block_on(async {
-                let pool = fresh_pool().await;
-                seed(&pool).await; // 带存量 ST GCL——no_gating 应清掉。
+                let (pool, dir) = fresh_pool().await;
+                seed(&pool, dir.path()).await; // 带存量 ST GCL——no_gating 应清掉。
                 sqlx::query("DELETE FROM flow_streams WHERE session_id='s1'")
                     .execute(&pool)
                     .await
@@ -3028,17 +3191,25 @@ mod tests {
                 sqlx::query("INSERT INTO flow_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener) VALUES ('s1', 0, 'BE', 0, 500, 512, 3, '1', '2')")
                     .execute(&pool).await.unwrap();
                 let plan = plan_gate7();
-                let pr = crate::flow_plan_command::plan_tas_inner(&pool, "s1", &plan, "http://x")
-                    .await
-                    .unwrap();
+                let pr = crate::flow_plan_command::plan_tas_inner(
+                    &pool,
+                    dir.path(),
+                    "s1",
+                    &plan,
+                    "http://x",
+                )
+                .await
+                .unwrap();
                 assert_eq!(pr.status, "no_gating", "{pr:?}");
                 assert!(plan.ini.lock().unwrap().is_none(), "无 ST 不进 Z3");
-                assert_eq!(gcl_archive_count(&pool).await, 0, "no_gating 清掉存量 GCL");
+                assert_eq!(gcl_archive_count(dir.path()), 0, "no_gating 清掉存量 GCL");
 
                 let mut csv = healthy_csv("TsnAgentFlowTasNetwork.es2.app[0].sink", 3);
                 csv.push_str(clock_csv_rows_gm_es1());
                 let runner = ScriptedRunner::new(vec![Ok(outcome(Some(&csv)))]);
-                let r = verify_tas_inner(&pool, "s1", &runner).await.unwrap();
+                let r = verify_tas_inner(&pool, dir.path(), "s1", &runner)
+                    .await
+                    .unwrap();
                 assert_eq!(r.status, "ok", "{r:?}");
                 assert!(r.rounds.is_none(), "纯 BE：单轮：{r:?}");
                 assert_eq!(runner.inis().len(), 1);

@@ -110,7 +110,7 @@ export function planSucceeded(result: PlanResult): boolean {
 
 /**
  * 验证按钮闸口径（R5/KTD4）：产出门控表，或流集无 ST 流（`no_gating`，无需门控）均放行。
- * 后端已在 no_gating 时清空 flow_plans，verify 侧对无 ST 流集不再以空 GCL 硬拦（AE5）。
+ * 后端已在 no_gating 时清空门控结果，verify 侧对无 ST 流集不再以空 GCL 硬拦（AE5）。
  */
 export function planAllowsVerify(result: PlanResult): boolean {
   return planSucceeded(result) || result.status === "no_gating";

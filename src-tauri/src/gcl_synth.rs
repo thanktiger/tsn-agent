@@ -5,7 +5,8 @@
 //!   verify pin 重放同源）/ `parse_production_offsets_from_sca`（每流发送偏移行）；
 //! - 位图合成（KTD3 切分点法）：`synthesize_gate_windows`；
 //! - 流关联匹配（KTD5 首跳锚定 + 窗长指纹）：`match_flows_to_st_windows`；
-//! - 相邻结构：`FlowRef` / `FlowMatchStream` / `GclWindowRow`（`gcl_windows` 行内存形态）。
+//! - 相邻结构：`FlowRef` / `FlowMatchStream` / `GclWindowRow`（`flow_gcl_plan.windows_json`
+//!   数组元素内存形态）。
 
 use std::collections::BTreeMap;
 
@@ -224,7 +225,7 @@ pub(crate) fn synthesize_gate_windows(
     out
 }
 
-/// 流引用（`gcl_windows.flow_refs` JSON 元素）：source=derived（实例锚定/窗长指纹命中）
+/// 流引用（窗口 `flowRefs` JSON 数组元素）：source=derived（实例锚定/窗长指纹命中）
 /// | class（类级降级，KTD5 ③⑤）。
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub(crate) struct FlowRef {
@@ -349,8 +350,11 @@ pub(crate) fn match_flows_to_st_windows(
     out
 }
 
-/// 逐窗行（`gcl_windows` 表一行的内存形态；provider 由写入方统一填
-/// `flow_plan_command::GCL_PROVIDER`）。
+/// 逐窗行（`flow_gcl_plan.windows_json` 数组元素的内存形态）。serde camelCase 即列内
+/// JSON 的实存键名（`{node, ethN, entryIdx, startNs, durationNs, gateStates, flowRefs}`），
+/// 写读两端同源；`flow_refs` 保持 JSON 数组**串**形态（与三表版 NULL/串语义逐位一致）。
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct GclWindowRow {
     pub(crate) node: String,
     pub(crate) eth_n: usize,

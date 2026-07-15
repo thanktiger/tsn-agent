@@ -9,6 +9,7 @@ mod flow_route;
 mod flow_sidecar_routes;
 mod flow_verify;
 mod flow_verify_command;
+mod gcl_raw_store;
 mod gcl_synth;
 mod hardware_api;
 mod hardware_api_config;
@@ -95,8 +96,15 @@ pub fn run() {
                 std::sync::Arc::new(move |record| {
                     topology_position_command::emit_session_db_changed(&emit_handle, &record);
                 });
-            let handle =
-                tauri::async_runtime::block_on(topology_sidecar::launch(pool, buffer, emit));
+            // 门控 raw 存档根（gcl_raw_store）：与 sessions.db 同源的 app 数据目录。
+            let gcl_raw_base_dir =
+                gcl_raw_store::resolve_base_dir(app.handle()).expect("resolve gcl raw base dir");
+            let handle = tauri::async_runtime::block_on(topology_sidecar::launch(
+                pool,
+                buffer,
+                emit,
+                gcl_raw_base_dir,
+            ));
             app.manage(handle);
             Ok(())
         })
