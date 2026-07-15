@@ -315,7 +315,7 @@ export function FlowPanel({
             <div className="timesync-commandbar__actions" role="group" aria-label="软仿操作">
               <button
                 type="button"
-                className="btn"
+                className="btn primary"
                 onClick={() => void handleVerify()}
                 disabled={verifyDisabled}
                 title={!havePlan ? "请先规划出门控表" : undefined}
