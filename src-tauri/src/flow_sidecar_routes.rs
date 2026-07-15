@@ -1,7 +1,7 @@
 //! 流量规划写库 sidecar route（`/db/flow/*`）。镜像 `timesync_sidecar_routes`：
 //! 复用同一 `RouteState` / Bearer / session middleware。
 //! - `add_stream`：`verify_flow` 校验闸 → 路径落凭证（RC 双路径 / ST-BE 无 path 时
-//!   derive_route 沉淀 origin=system，歧义 AMBIGUOUS_ROUTE、不可达 NO_ROUTE 拒绝）→
+//!   derive_route 沉淀凭证，歧义 AMBIGUOUS_ROUTE、不可达 NO_ROUTE 拒绝）→
 //!   单一 `insert_stream` 落 `flow_streams`。
 //! - `inspect`：读 streams + 门控结果单行（flow_gcl_plan，windows_json 展开为
 //!   gclWindows/gclMeta 既有响应形状）给 agent（talker/listener→mid 解析用）。
@@ -181,8 +181,8 @@ impl AddStreamRequest {
                 l4_protocol: self.l4_protocol,
                 max_latency_us: self.max_latency_us,
                 // redundant 不透传请求值（系统推导：RC 由落库前 derive_rc_paths 覆盖）。
-                // paths 由 handler 填：path 节点引用 → origin=user（R16 显式指定）；
-                // 未指定 → 录入时 derive_route 沉淀 origin=system 凭证（歧义/不可达拒绝）。
+                // paths 由 handler 填：path 节点引用 → 显式指定凭证（R16）；
+                // 未指定 → 录入时 derive_route 沉淀凭证（歧义/不可达拒绝）。
                 redundant: 0,
                 paths: None,
             },
@@ -225,7 +225,9 @@ pub async fn add_stream(
             &nodes,
             &links,
         ) {
-            Ok(route) => input.paths = Some(crate::flow_route::explicit_paths_json(&route)),
+            Ok(route) => {
+                input.paths = Some(crate::flow_route::paths_json(std::slice::from_ref(&route)));
+            }
             Err(errors) => {
                 // 路由层错误 → 录入闸用户语言（与 verify_flow 同映射）。
                 let mapped: Vec<crate::flow_verify::VerifyError> = errors
@@ -278,7 +280,7 @@ pub async fn add_stream(
             }
         }
     } else if input.paths.is_none() {
-        // ST/BE 无显式路径：录入即推导、沉淀 origin=system 凭证（凭证优先，规划期复验/
+        // ST/BE 无显式路径：录入即推导、沉淀路径凭证（凭证优先，规划期复验/
         // 静默刷新）。plane 语义与 plan_tas 同口径（single_path_plane：双平面锁 A）。
         // 歧义/不可达在录入时拒绝：歧义引导带 path 参数消歧；不可达流录了也没意义。
         let (nodes, links) =
@@ -303,7 +305,9 @@ pub async fn add_stream(
             &nodes,
             &links,
         ) {
-            Ok(route) => input.paths = Some(crate::flow_route::system_paths_json(&route)),
+            Ok(route) => {
+                input.paths = Some(crate::flow_route::paths_json(std::slice::from_ref(&route)));
+            }
             Err(errors) => {
                 if errors.iter().any(|e| e.code == "AMBIGUOUS_ROUTE") {
                     return structured_error(
@@ -843,8 +847,8 @@ mod tests {
 
     /// R1/R2/R3/①：双平面拓扑上 ST@pcp7 / RC@pcp6 / BE@pcp0 各录入成功；
     /// 断言 redundant/paths **列值本身**——ST/BE redundant=0、paths=录入沉淀的
-    /// origin=system 单 route 凭证（双平面锁 A：0-2-1），RC redundant=1、paths JSON
-    /// 的 a/b node_path 与 link_seqs 逐项匹配（非 blob 整体比对）。
+    /// 单 route 凭证（裸数组；双平面锁 A：0-2-1），RC redundant=1、paths JSON
+    /// 的 [0]/[1] node_path 与 link_seqs 逐项匹配（非 blob 整体比对）。
     #[test]
     fn three_classes_persist_redundant_and_paths_columns() {
         tauri::async_runtime::block_on(async {
@@ -870,27 +874,26 @@ mod tests {
             .await
             .unwrap();
             assert_eq!(rows.len(), 3);
-            // ST/BE：录入即沉淀 origin=system 凭证（双平面锁平面 A → 0-2-1）。
+            // ST/BE：录入即沉淀单 route 凭证（裸数组；双平面锁平面 A → 0-2-1）。
             for idx in [0usize, 2] {
                 assert_eq!(rows[idx].2, 0, "{} redundant 应为 0", rows[idx].1);
                 let p: serde_json::Value =
                     serde_json::from_str(rows[idx].3.as_deref().expect("paths 应沉淀凭证"))
                         .unwrap();
-                assert_eq!(p["origin"], json!("system"), "{}", rows[idx].1);
-                assert_eq!(p["routes"][0]["node_path"], json!(["0", "2", "1"]));
-                assert_eq!(p["routes"][0]["link_seqs"], json!([0, 1]));
+                assert!(p.is_array(), "{}: 应为裸数组: {p}", rows[idx].1);
+                assert_eq!(p[0]["node_path"], json!(["0", "2", "1"]));
+                assert_eq!(p[0]["link_seqs"], json!([0, 1]));
             }
 
             assert_eq!((rows[1].1.as_str(), rows[1].2), ("RC", 1));
             let paths: serde_json::Value =
                 serde_json::from_str(rows[1].3.as_deref().unwrap()).unwrap();
-            // KTD12 统一形状：routes[0]=A 平面、routes[1]=B 平面，origin=system。
-            assert_eq!(paths["version"], json!(1));
-            assert_eq!(paths["origin"], json!("system"));
-            assert_eq!(paths["routes"][0]["node_path"], json!(["0", "2", "1"]));
-            assert_eq!(paths["routes"][0]["link_seqs"], json!([0, 1]));
-            assert_eq!(paths["routes"][1]["node_path"], json!(["0", "3", "1"]));
-            assert_eq!(paths["routes"][1]["link_seqs"], json!([2, 3]));
+            // KTD12 统一形状（裸数组）：[0]=A 平面、[1]=B 平面。
+            assert!(paths.is_array(), "应为裸数组: {paths}");
+            assert_eq!(paths[0]["node_path"], json!(["0", "2", "1"]));
+            assert_eq!(paths[0]["link_seqs"], json!([0, 1]));
+            assert_eq!(paths[1]["node_path"], json!(["0", "3", "1"]));
+            assert_eq!(paths[1]["link_seqs"], json!([2, 3]));
         });
     }
 
@@ -920,12 +923,12 @@ mod tests {
             .unwrap();
             assert_eq!(redundant, 0, "ST 落库恒 redundant=0");
             let p: serde_json::Value = serde_json::from_str(paths.as_deref().unwrap()).unwrap();
-            assert_eq!(p["origin"], json!("system"), "垃圾 paths 不透传: {p}");
-            assert_eq!(p["routes"][0]["link_seqs"], json!([0]));
+            assert!(p.is_array(), "垃圾 paths 不透传: {p}");
+            assert_eq!(p[0]["link_seqs"], json!([0]));
         });
     }
 
-    /// 唯一路径录入 → 自动沉淀 origin=system 单 route 凭证（paths JSON 列值本身）。
+    /// 唯一路径录入 → 自动沉淀单 route 凭证（paths JSON 裸数组列值本身）。
     #[test]
     fn add_stream_sediments_system_path_credential() {
         tauri::async_runtime::block_on(async {
@@ -950,10 +953,9 @@ mod tests {
             .unwrap();
             let p: serde_json::Value =
                 serde_json::from_str(paths.as_deref().expect("录入应沉淀凭证")).unwrap();
-            assert_eq!(p["version"], json!(1));
-            assert_eq!(p["origin"], json!("system"));
-            assert_eq!(p["routes"][0]["node_path"], json!(["0", "2", "1"]));
-            assert_eq!(p["routes"][0]["link_seqs"], json!([0, 1]));
+            assert!(p.is_array(), "应为裸数组: {p}");
+            assert_eq!(p[0]["node_path"], json!(["0", "2", "1"]));
+            assert_eq!(p[0]["link_seqs"], json!([0, 1]));
         });
     }
 
@@ -990,9 +992,9 @@ mod tests {
         });
     }
 
-    /// 同一菱形带 path 参数 → 照常 origin=user 落库（显式指定分支现状不动）。
+    /// 同一菱形带 path 参数 → 显式指定路径照常落库为裸数组凭证。
     #[test]
-    fn add_stream_with_explicit_path_stays_user_origin() {
+    fn add_stream_with_explicit_path_persists_credential() {
         tauri::async_runtime::block_on(async {
             let (pool, buf) = test_state().await;
             for mid in ["0", "1", "2", "3"] {
@@ -1017,9 +1019,9 @@ mod tests {
             .await
             .unwrap();
             let p: serde_json::Value = serde_json::from_str(paths.as_deref().unwrap()).unwrap();
-            assert_eq!(p["origin"], json!("user"));
-            assert_eq!(p["routes"][0]["node_path"], json!(["0", "3", "1"]));
-            assert_eq!(p["routes"][0]["link_seqs"], json!([2, 3]));
+            assert!(p.is_array(), "应为裸数组: {p}");
+            assert_eq!(p[0]["node_path"], json!(["0", "3", "1"]));
+            assert_eq!(p[0]["link_seqs"], json!([2, 3]));
         });
     }
 
@@ -1123,7 +1125,7 @@ mod tests {
                 serde_json::from_str(paths_col.as_deref().expect("paths 列非 NULL")).unwrap();
 
             let node_set = |idx: usize| -> std::collections::HashSet<String> {
-                paths["routes"][idx]["node_path"]
+                paths[idx]["node_path"]
                     .as_array()
                     .unwrap()
                     .iter()
@@ -1141,7 +1143,7 @@ mod tests {
             );
 
             let link_set = |idx: usize| -> std::collections::HashSet<i64> {
-                paths["routes"][idx]["link_seqs"]
+                paths[idx]["link_seqs"]
                     .as_array()
                     .unwrap()
                     .iter()

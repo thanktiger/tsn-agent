@@ -1128,7 +1128,7 @@ mod tests {
     }
 
     async fn seed(pool: &sqlx::Pool<sqlx::Sqlite>, base_dir: &std::path::Path) {
-        // es1(1) — sw1(0) — es2(2)。GM=1。一条 ST 流 es1→es2，count=3。
+        // es01(1) — sw01(0) — es02(2)。GM=1。一条 ST 流 es01→es02，count=3。
         for (mid, ty, ord) in [
             ("0", "switch", 0),
             ("1", "endSystem", 1),
@@ -1151,8 +1151,8 @@ mod tests {
         }
         sqlx::query("INSERT INTO flow_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener, max_latency_us) VALUES ('s1', 0, 'ST', 7, 500, 512, 3, '1', '2', 400)")
             .execute(pool).await.unwrap();
-        // pin GCL 一条（sw1=mid0, eth1, gate7=ST 门）——重放事实源是 raw 存档文件 par 行（KTD4）。
-        seed_gcl_archive(base_dir, &gate_par_lines("sw1", 1, 7, "[300us, 700us]"));
+        // pin GCL 一条（sw01=mid0, eth1, gate7=ST 门）——重放事实源是 raw 存档文件 par 行（KTD4）。
+        seed_gcl_archive(base_dir, &gate_par_lines("sw01", 1, 7, "[300us, 700us]"));
     }
 
     /// 拼一条门的 par 行三件套（initiallyOpen true / offset 0s / durations），
@@ -1183,7 +1183,7 @@ mod tests {
         "module,name,vectime,vecvalue\n".to_string()
     }
 
-    /// es2 是 listener(mid2)，其 sink app[0]。流 count=3，窗口 400us。
+    /// es02 是 listener(mid2)，其 sink app[0]。流 count=3，窗口 400us。
     /// AE4：收=发=3、抖动<1us、时延在窗口 → PASS。
     #[test]
     fn verify_pass_when_received_equals_sent_low_jitter() {
@@ -1192,7 +1192,7 @@ mod tests {
             seed(&pool, dir.path()).await;
             // 时延 3 样本（秒）都 < 400us；抖动 3 样本 < 1us。
             let csv = format!(
-                "{}TsnAgentFlowTasNetwork.es2.app[0].sink,packetLifeTime:vector,0 0 0,0.0001 0.00012 0.00011\nTsnAgentFlowTasNetwork.es2.app[0].sink,packetJitter:vector,0 0 0,0.0000002 0.0000003 0.0000001\n",
+                "{}TsnAgentFlowTasNetwork.es02.app[0].sink,packetLifeTime:vector,0 0 0,0.0001 0.00012 0.00011\nTsnAgentFlowTasNetwork.es02.app[0].sink,packetJitter:vector,0 0 0,0.0000002 0.0000003 0.0000001\n",
                 header()
             );
             let runner = MockRunner {
@@ -1219,7 +1219,7 @@ mod tests {
             seed(&pool, dir.path()).await;
             // 高抖动样本放在**非首位**（首样本被 skip_first 跳过——那是定义性启动瞬态）。
             let csv = format!(
-                "{}TsnAgentFlowTasNetwork.es2.app[0].sink,packetLifeTime:vector,0 0 0,0.0001 0.00012 0.00011\nTsnAgentFlowTasNetwork.es2.app[0].sink,packetJitter:vector,0 0 0,0.0000001 0.000002 0.0000003\n",
+                "{}TsnAgentFlowTasNetwork.es02.app[0].sink,packetLifeTime:vector,0 0 0,0.0001 0.00012 0.00011\nTsnAgentFlowTasNetwork.es02.app[0].sink,packetJitter:vector,0 0 0,0.0000001 0.000002 0.0000003\n",
                 header()
             );
             let r = verify_tas_inner(
@@ -1246,7 +1246,7 @@ mod tests {
             seed(&pool, dir.path()).await;
             // 首抖动样本 2us（>1us）但其余 <1us；跳首后不该触发抖动失败。
             let csv = format!(
-                "{}TsnAgentFlowTasNetwork.es2.app[0].sink,packetLifeTime:vector,0 0 0,0.0001 0.00012 0.00011\nTsnAgentFlowTasNetwork.es2.app[0].sink,packetJitter:vector,0 0 0,0.000002 0.0000003 0.0000001\n",
+                "{}TsnAgentFlowTasNetwork.es02.app[0].sink,packetLifeTime:vector,0 0 0,0.0001 0.00012 0.00011\nTsnAgentFlowTasNetwork.es02.app[0].sink,packetJitter:vector,0 0 0,0.000002 0.0000003 0.0000001\n",
                 header()
             );
             let r = verify_tas_inner(
@@ -1272,7 +1272,7 @@ mod tests {
             seed(&pool, dir.path()).await;
             // 只收到 1 个（实发≈4：sim=count×period=1500us→floor+1=4）——丢 3 个远超在途容差 → FAIL。
             let csv = format!(
-                "{}TsnAgentFlowTasNetwork.es2.app[0].sink,packetLifeTime:vector,0,0.0001\nTsnAgentFlowTasNetwork.es2.app[0].sink,packetJitter:vector,0,0.0000002\n",
+                "{}TsnAgentFlowTasNetwork.es02.app[0].sink,packetLifeTime:vector,0,0.0001\nTsnAgentFlowTasNetwork.es02.app[0].sink,packetJitter:vector,0,0.0000002\n",
                 header()
             );
             let r = verify_tas_inner(
@@ -1377,16 +1377,16 @@ mod tests {
     fn load_gcl_replays_archive_par_lines_equivalently() {
         tauri::async_runtime::block_on(async {
             let (pool, dir) = fresh_pool().await;
-            let mut par = gate_par_lines("sw1", 1, 7, "[300us, 700us]");
-            par.push_str(&gate_par_lines("sw1", 1, 0, "[]")); // 恒态门（空 durations）。
-            par.push_str("par N.es1.app[0].source initialProductionOffset 4.2e-05\n");
+            let mut par = gate_par_lines("sw01", 1, 7, "[300us, 700us]");
+            par.push_str(&gate_par_lines("sw01", 1, 0, "[]")); // 恒态门（空 durations）。
+            par.push_str("par N.es01.app[0].source initialProductionOffset 4.2e-05\n");
             seed_gcl_archive(dir.path(), &par);
             sqlx::query("INSERT INTO flow_gcl_plan (session_id, provider, status, cycle_ns, algorithm, stale, created_at, windows_json) VALUES ('s1', ?, 'ok', 1000000, 'Eager', 0, 'now', '[]')")
                 .bind(crate::flow_plan_command::GCL_PROVIDER)
                 .execute(&pool).await.unwrap();
 
             let mut ned_to_mid = BTreeMap::new();
-            ned_to_mid.insert("sw1".to_string(), "0".to_string());
+            ned_to_mid.insert("sw01".to_string(), "0".to_string());
             let got = load_gcl(&pool, dir.path(), "s1", &ned_to_mid)
                 .await
                 .unwrap();
@@ -1413,8 +1413,8 @@ mod tests {
                 crate::flow_plan_command::GCL_PROVIDER,
             )
             .unwrap();
-            let mut par = gate_par_lines("sw1", 1, 0, "[]"); // 仅恒态门（重放滤空）。
-            par.push_str("par N.es1.app[0].source initialProductionOffset 4.2e-05\n");
+            let mut par = gate_par_lines("sw01", 1, 0, "[]"); // 仅恒态门（重放滤空）。
+            par.push_str("par N.es01.app[0].source initialProductionOffset 4.2e-05\n");
             seed_gcl_archive(dir.path(), &par);
             let r = verify_tas_inner(
                 &pool,
@@ -1451,7 +1451,7 @@ mod tests {
             sqlx::query("INSERT INTO flow_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener, max_latency_us) VALUES ('s1', 0, 'BE', 0, 500, 512, 3, '1', '2', 400)")
                 .execute(&pool).await.unwrap();
             let csv = format!(
-                "{}TsnAgentFlowTasNetwork.es2.app[0].sink,packetLifeTime:vector,0 0 0,0.0001 0.00012 0.00011\nTsnAgentFlowTasNetwork.es2.app[0].sink,packetJitter:vector,0 0 0,0.0000002 0.0000003 0.0000001\n",
+                "{}TsnAgentFlowTasNetwork.es02.app[0].sink,packetLifeTime:vector,0 0 0,0.0001 0.00012 0.00011\nTsnAgentFlowTasNetwork.es02.app[0].sink,packetJitter:vector,0 0 0,0.0000002 0.0000003 0.0000001\n",
                 header()
             );
             let r = verify_tas_inner(
@@ -1484,7 +1484,7 @@ mod tests {
             sqlx::query("INSERT INTO flow_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener) VALUES ('s1', 0, 'BE', 0, 500, 512, 3, '1', '2')")
                 .execute(&pool).await.unwrap();
             let csv = format!(
-                "{}TsnAgentFlowTasNetwork.es2.app[0].sink,packetLifeTime:vector,0 0 0,0.0001 0.00012 0.00011\nTsnAgentFlowTasNetwork.es2.app[0].sink,packetJitter:vector,0 0 0,0.0000002 0.0000003 0.0000001\n",
+                "{}TsnAgentFlowTasNetwork.es02.app[0].sink,packetLifeTime:vector,0 0 0,0.0001 0.00012 0.00011\nTsnAgentFlowTasNetwork.es02.app[0].sink,packetJitter:vector,0 0 0,0.0000002 0.0000003 0.0000001\n",
                 header()
             );
             let runner = CapturingRunner {
@@ -1510,9 +1510,9 @@ mod tests {
         tauri::async_runtime::block_on(async {
             let (pool, dir) = fresh_pool().await;
             seed(&pool, dir.path()).await; // 已含 gate7 par 行。
-            seed_gcl_archive(dir.path(), &gate_par_lines("sw1", 1, 0, "[500us, 500us]"));
+            seed_gcl_archive(dir.path(), &gate_par_lines("sw01", 1, 0, "[500us, 500us]"));
             let csv = format!(
-                "{}TsnAgentFlowTasNetwork.es2.app[0].sink,packetLifeTime:vector,0 0 0,0.0001 0.00012 0.00011\nTsnAgentFlowTasNetwork.es2.app[0].sink,packetJitter:vector,0 0 0,0.0000002 0.0000003 0.0000001\n",
+                "{}TsnAgentFlowTasNetwork.es02.app[0].sink,packetLifeTime:vector,0 0 0,0.0001 0.00012 0.00011\nTsnAgentFlowTasNetwork.es02.app[0].sink,packetJitter:vector,0 0 0,0.0000002 0.0000003 0.0000001\n",
                 header()
             );
             let runner = CapturingRunner {
@@ -1540,12 +1540,12 @@ mod tests {
     fn verify_mixed_session_emits_complement_gates() {
         tauri::async_runtime::block_on(async {
             let (pool, dir) = fresh_pool().await;
-            seed(&pool, dir.path()).await; // ST 流 + gate7 GCL（sw1 eth1 开 [0,300us)）。
+            seed(&pool, dir.path()).await; // ST 流 + gate7 GCL（sw01 eth1 开 [0,300us)）。
             sqlx::query("INSERT INTO flow_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener, max_latency_us) VALUES ('s1', 1, 'BE', 0, 500, 512, 3, '1', '2', 400)")
                 .execute(&pool).await.unwrap();
-            // 两个 sink（es2.app[0]=ST、app[1]=BE）都给健康向量。
+            // 两个 sink（es02.app[0]=ST、app[1]=BE）都给健康向量。
             let csv = format!(
-                "{}TsnAgentFlowTasNetwork.es2.app[0].sink,packetLifeTime:vector,0 0 0,0.0001 0.00012 0.00011\nTsnAgentFlowTasNetwork.es2.app[0].sink,packetJitter:vector,0 0 0,0.0000002 0.0000003 0.0000001\nTsnAgentFlowTasNetwork.es2.app[1].sink,packetLifeTime:vector,0 0 0,0.0001 0.00012 0.00011\nTsnAgentFlowTasNetwork.es2.app[1].sink,packetJitter:vector,0 0 0,0.0000002 0.0000003 0.0000001\n",
+                "{}TsnAgentFlowTasNetwork.es02.app[0].sink,packetLifeTime:vector,0 0 0,0.0001 0.00012 0.00011\nTsnAgentFlowTasNetwork.es02.app[0].sink,packetJitter:vector,0 0 0,0.0000002 0.0000003 0.0000001\nTsnAgentFlowTasNetwork.es02.app[1].sink,packetLifeTime:vector,0 0 0,0.0001 0.00012 0.00011\nTsnAgentFlowTasNetwork.es02.app[1].sink,packetJitter:vector,0 0 0,0.0000002 0.0000003 0.0000001\n",
                 header()
             );
             let runner = CapturingRunner {
@@ -1559,16 +1559,16 @@ mod tests {
             let ini = runner.ini.lock().unwrap().clone().unwrap();
             // ST 门：显式关隐式保护带（真机验证关键行）。
             assert!(
-                ini.contains("*.sw1.eth[1].macLayer.queue.transmissionGate[7].enableImplicitGuardBand = false"),
+                ini.contains("*.sw01.eth[1].macLayer.queue.transmissionGate[7].enableImplicitGuardBand = false"),
                 "{ini}"
             );
             // 补集门：gate0（BE/gPTP）带补集窗参数、无 guard band 行（保持 INET 默认 true）。
             assert!(
-                ini.contains("*.sw1.eth[1].macLayer.queue.transmissionGate[0].durations = [700000ns, 300000ns]"),
+                ini.contains("*.sw01.eth[1].macLayer.queue.transmissionGate[0].durations = [700000ns, 300000ns]"),
                 "{ini}"
             );
             assert!(
-                ini.contains("*.sw1.eth[1].macLayer.queue.transmissionGate[0].offset = 700000ns"),
+                ini.contains("*.sw01.eth[1].macLayer.queue.transmissionGate[0].offset = 700000ns"),
                 "{ini}"
             );
             assert!(
@@ -1606,8 +1606,8 @@ mod tests {
 
     // ---------- U4：RC 重推导（凭证不作输入）/ 断言失败响亮不装配 ----------
 
-    /// 双平面 seed：es1(1) —A— sw1(0) —A— es2(2)；—B— sw2(3) —B—。GM=sw1(0)。
-    /// 一条 RC 流 es1→es2（count=2000×500us → 活跃窗 1s：t_break=0.4×1s=400ms、断后
+    /// 双平面 seed：es01(1) —A— sw01(0) —A— es02(2)；—B— sw02(3) —B—。GM=sw01(0)。
+    /// 一条 RC 流 es01→es02（count=2000×500us → 活跃窗 1s：t_break=0.4×1s=400ms、断后
     /// 1200 帧过 KTD7 尾量守卫），paths 凭证由调用方传（模拟录入时预存）。
     async fn seed_dual_plane_rc(pool: &sqlx::Pool<sqlx::Sqlite>, paths: &str) {
         for (mid, ty, ord) in [
@@ -1664,7 +1664,7 @@ mod tests {
             let stale = r#"{"a":{"node_path":["1","9","2"],"link_seqs":[9]},"b":{"node_path":["1","8","2"],"link_seqs":[8]}}"#;
             seed_dual_plane_rc(&pool, stale).await;
             // 收=实发（sim=1s、500us → 2001）。
-            let csv = healthy_csv("TsnAgentFlowTasNetwork.es2.app[0].sink", 2001);
+            let csv = healthy_csv("TsnAgentFlowTasNetwork.es02.app[0].sink", 2001);
             let runner = CapturingRunner {
                 outcome: outcome(Some(&csv)),
                 ini: std::sync::Mutex::new(None),
@@ -1678,7 +1678,7 @@ mod tests {
             // FRER 段在，trees 是重推导的真路径（含拆分内嵌桥），不是过期凭证里的节点 9/8。
             assert!(ini.contains("*.*.hasStreamRedundancy = true"), "{ini}");
             assert!(
-                ini.contains("trees: [[[\"es1\",\"esb1\",\"sw1\",\"esb2\",\"es2\"]],[[\"es1\",\"esb1\",\"sw2\",\"esb2\",\"es2\"]]]"),
+                ini.contains("trees: [[[\"es01\",\"esb01\",\"sw01\",\"esb02\",\"es02\"]],[[\"es01\",\"esb01\",\"sw02\",\"esb02\",\"es02\"]]]"),
                 "{ini}"
             );
             assert!(!ini.contains("\"9\""), "过期凭证不得进装配：{ini}");
@@ -1694,7 +1694,7 @@ mod tests {
             // 合法形状的旧凭证（录入时曾不相交）。
             let old = r#"{"a":{"node_path":["1","0","2"],"link_seqs":[0,1]},"b":{"node_path":["1","3","2"],"link_seqs":[2,3]}}"#;
             seed_dual_plane_rc(&pool, old).await;
-            // 拓扑已改：平面 B 改为也经 sw1(0)（并行链路）→ A/B 共用中间节点。
+            // 拓扑已改：平面 B 改为也经 sw01(0)（并行链路）→ A/B 共用中间节点。
             sqlx::query("UPDATE topology_links SET src_node='1', dst_node='0', src_port=2, dst_port=2 WHERE session_id='s1' AND link_seq=2")
                 .execute(&pool).await.unwrap();
             sqlx::query("UPDATE topology_links SET src_node='0', dst_node='2', src_port=3, dst_port=2 WHERE session_id='s1' AND link_seq=3")
@@ -1753,9 +1753,9 @@ mod tests {
             )
             .unwrap();
 
-            // plan：mock 服务回 sw1 gate7（ST 门）的 .sca（ned sw1 → mid 0）。
+            // plan：mock 服务回 sw01 gate7（ST 门）的 .sca（ned sw01 → mid 0）。
             let plan_client = MockPlan {
-                sca: "par N.sw1.eth[1].macLayer.queue.transmissionGate[7] initiallyOpen true\npar N.sw1.eth[1].macLayer.queue.transmissionGate[7] offset 0s\npar N.sw1.eth[1].macLayer.queue.transmissionGate[7] durations \"[300us, 700us]\"\n".into(),
+                sca: "par N.sw01.eth[1].macLayer.queue.transmissionGate[7] initiallyOpen true\npar N.sw01.eth[1].macLayer.queue.transmissionGate[7] offset 0s\npar N.sw01.eth[1].macLayer.queue.transmissionGate[7] durations \"[300us, 700us]\"\n".into(),
             };
             let pr = crate::flow_plan_command::plan_tas_inner(
                 &pool,
@@ -1771,7 +1771,7 @@ mod tests {
 
             // raw 存档落盘（plan 写的）→ verify 重放读回 pin。
             let csv = format!(
-                "{}TsnAgentFlowTasNetwork.es2.app[0].sink,packetLifeTime:vector,0 0 0,0.0001 0.00012 0.00011\nTsnAgentFlowTasNetwork.es2.app[0].sink,packetJitter:vector,0 0 0,0.0000002 0.0000003 0.0000001\n",
+                "{}TsnAgentFlowTasNetwork.es02.app[0].sink,packetLifeTime:vector,0 0 0,0.0001 0.00012 0.00011\nTsnAgentFlowTasNetwork.es02.app[0].sink,packetJitter:vector,0 0 0,0.0000002 0.0000003 0.0000001\n",
                 header()
             );
             let vr = verify_tas_inner(
@@ -1797,7 +1797,7 @@ mod tests {
             seed(&pool, dir.path()).await; // seed 已写一条 GCL（视作坏排程占位）。
             // 坏排程的软仿表现：收 < 发（碰撞丢包）。
             let csv = format!(
-                "{}TsnAgentFlowTasNetwork.es2.app[0].sink,packetLifeTime:vector,0,0.0001\nTsnAgentFlowTasNetwork.es2.app[0].sink,packetJitter:vector,0,0.0000002\n",
+                "{}TsnAgentFlowTasNetwork.es02.app[0].sink,packetLifeTime:vector,0,0.0001\nTsnAgentFlowTasNetwork.es02.app[0].sink,packetJitter:vector,0,0.0000002\n",
                 header()
             );
             let vr = verify_tas_inner(
@@ -1867,13 +1867,13 @@ mod tests {
 
     /// Covers AE2（U6①⑦）：有 RC → 健康+断A+断B 三轮顺序提交（KTD3）。健康轮 ini/NED 无
     /// scenarioManager（零变化）；断A轮带 disconnect（t 手算=0.4×RC 活跃窗 1s=400ms、
-    /// src-module 经 SplitEs 映射→esb1、平面 A 端口 0→ethg$o[0]）；断B轮断平面 B（端口 1）。
+    /// src-module 经 SplitEs 映射→esb01、平面 A 端口 0→ethg$o[0]）；断B轮断平面 B（端口 1）。
     #[test]
     fn fault_rounds_three_runs_with_disconnect_script() {
         tauri::async_runtime::block_on(async {
             let (pool, dir) = fresh_pool().await;
             seed_dual_plane_rc(&pool, RC_PATHS).await;
-            let csv = healthy_csv("TsnAgentFlowTasNetwork.es2.app[0].sink", 2001);
+            let csv = healthy_csv("TsnAgentFlowTasNetwork.es02.app[0].sink", 2001);
             let runner = ScriptedRunner::new(vec![
                 Ok(outcome(Some(&csv))),
                 Ok(outcome(Some(&csv))),
@@ -1895,11 +1895,11 @@ mod tests {
             // 健康轮零变化。
             assert!(!inis[0].contains("scenarioManager"), "{}", inis[0]);
             assert!(!neds[0].contains("ScenarioManager"), "{}", neds[0]);
-            // 断A轮：t=0.4×(2000×500us)=400ms；断点=链路 0（es1→sw1 有向），上游 es1 拆分
-            // → esb1，库端口 0 → ethg$o[0]。
+            // 断A轮：t=0.4×(2000×500us)=400ms；断点=链路 0（es01→sw01 有向），上游 es01 拆分
+            // → esb01，库端口 0 → ethg$o[0]。
             assert!(
                 inis[1].contains(
-                    "*.scenarioManager.script = xml(\"<script><at t='400000000ns'><disconnect src-module='esb1' src-gate='ethg$o[0]'/></at></script>\")"
+                    "*.scenarioManager.script = xml(\"<script><at t='400000000ns'><disconnect src-module='esb01' src-gate='ethg$o[0]'/></at></script>\")"
                 ),
                 "{}",
                 inis[1]
@@ -1909,17 +1909,17 @@ mod tests {
                 "{}",
                 neds[1]
             );
-            // 断B轮：链路 2（es1→sw2），es1 平面 B 端口 1 → ethg$o[1]。
+            // 断B轮：链路 2（es01→sw02），es01 平面 B 端口 1 → ethg$o[1]。
             assert!(
-                inis[2].contains("<disconnect src-module='esb1' src-gate='ethg$o[1]'/>"),
+                inis[2].contains("<disconnect src-module='esb01' src-gate='ethg$o[1]'/>"),
                 "{}",
                 inis[2]
             );
         });
     }
 
-    /// 双平面 5 节点 seed：sw1(0)=平面A、sw2(3)=平面B；es1(1)/es2(2)/es3(4) 全双宿。
-    /// 两条 RC：seq0 es1→es2 固定；seq1 由调用方指定 talker/listener（共享/平手两形态）。
+    /// 双平面 5 节点 seed：sw01(0)=平面A、sw02(3)=平面B；es01(1)/es02(2)/es03(4) 全双宿。
+    /// 两条 RC：seq0 es01→es02 固定；seq1 由调用方指定 talker/listener（共享/平手两形态）。
     async fn seed_dual_plane_two_rc(pool: &sqlx::Pool<sqlx::Sqlite>, rc1: (&str, &str)) {
         for (mid, ty, ord) in [
             ("0", "switch", 0),
@@ -1958,8 +1958,8 @@ mod tests {
         }
     }
 
-    /// Covers KTD8（U6②前半/⑦非拆分 case）：两条 RC（es1→es2、es3→es2）平面 A 共享
-    /// sw1→es2 链路（覆盖数 2）→ 选中共享链路，上游是交换机（非拆分）→ src-module=sw1、
+    /// Covers KTD8（U6②前半/⑦非拆分 case）：两条 RC（es01→es02、es03→es02）平面 A 共享
+    /// sw01→es02 链路（覆盖数 2）→ 选中共享链路，上游是交换机（非拆分）→ src-module=sw01、
     /// 库端口 1→ethg$o[1]；无未覆盖流。
     #[test]
     fn fault_break_point_picks_max_coverage_shared_link() {
@@ -1976,7 +1976,7 @@ mod tests {
                 .unwrap();
             let rounds = r.rounds.expect("rounds");
             assert!(
-                runner.inis()[1].contains("<disconnect src-module='sw1' src-gate='ethg$o[1]'/>"),
+                runner.inis()[1].contains("<disconnect src-module='sw01' src-gate='ethg$o[1]'/>"),
                 "{}",
                 runner.inis()[1]
             );
@@ -1991,8 +1991,8 @@ mod tests {
         });
     }
 
-    /// Covers KTD8（U6②后半）：两条 RC 不共向（es1→es2、es3→es1）→ 覆盖数全平手，
-    /// 取最小 (link_seq, 上游) 有向占用（链路 0 的 sw1→es1 向，属流 1）→ 确定性选择；
+    /// Covers KTD8（U6②后半）：两条 RC 不共向（es01→es02、es03→es01）→ 覆盖数全平手，
+    /// 取最小 (link_seq, 上游) 有向占用（链路 0 的 sw01→es01 向，属流 1）→ 确定性选择；
     /// 未被该有向断点覆盖的流 0 标「未测容错」。
     #[test]
     fn fault_break_point_tie_is_deterministic_and_marks_untested() {
@@ -2008,9 +2008,9 @@ mod tests {
                 .await
                 .unwrap();
             let rounds = r.rounds.expect("rounds");
-            // 平手确定性：BTreeMap 升序首个 = (link 0, 上游 sw1(mid0))，sw1 库端口 0 → eth0。
+            // 平手确定性：BTreeMap 升序首个 = (link 0, 上游 sw01(mid0))，sw01 库端口 0 → eth0。
             assert!(
-                runner.inis()[1].contains("<disconnect src-module='sw1' src-gate='ethg$o[0]'/>"),
+                runner.inis()[1].contains("<disconnect src-module='sw01' src-gate='ethg$o[0]'/>"),
                 "{}",
                 runner.inis()[1]
             );
@@ -2065,7 +2065,7 @@ mod tests {
                 .unwrap();
             sqlx::query("INSERT INTO flow_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener, max_latency_us) VALUES ('s1', 1, 'ST', 7, 1000, 512, 10000, '1', '2', 800)")
                 .execute(&pool).await.unwrap();
-            seed_gcl_archive(dir.path(), &gate_par_lines("sw1", 1, 7, "[300us, 700us]"));
+            seed_gcl_archive(dir.path(), &gate_par_lines("sw01", 1, 7, "[300us, 700us]"));
             let runner = ScriptedRunner::new(vec![
                 Ok(outcome(None)),
                 Ok(outcome(None)),
@@ -2087,18 +2087,18 @@ mod tests {
         });
     }
 
-    /// Covers KTD2（U6④）：断A断点（es1→sw1）既是时钟树边（GM=sw1 的树含全部平面 A/B 边
-    /// 0/1/2）又撞 ST 平面 A 路由 → 两类响亮标注都在；断B断点（es1→sw2，链路 2）是树边但
+    /// Covers KTD2（U6④）：断A断点（es01→sw01）既是时钟树边（GM=sw01 的树含全部平面 A/B 边
+    /// 0/1/2）又撞 ST 平面 A 路由 → 两类响亮标注都在；断B断点（es01→sw02，链路 2）是树边但
     /// 不撞 ST 路由 → 只有时钟树标注。
     #[test]
     fn fault_annotations_mark_clock_tree_and_st_route_overlap() {
         tauri::async_runtime::block_on(async {
             let (pool, dir) = fresh_pool().await;
             seed_dual_plane_rc(&pool, RC_PATHS).await;
-            // 加 ST 流（平面 A：es1→es2）+ 其 GCL（有 ST 无 GCL 会 no_plan 早退）。
+            // 加 ST 流（平面 A：es01→es02）+ 其 GCL（有 ST 无 GCL 会 no_plan 早退）。
             sqlx::query("INSERT INTO flow_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener, max_latency_us) VALUES ('s1', 1, 'ST', 7, 500, 512, 2000, '1', '2', 400)")
                 .execute(&pool).await.unwrap();
-            seed_gcl_archive(dir.path(), &gate_par_lines("sw1", 1, 7, "[300us, 700us]"));
+            seed_gcl_archive(dir.path(), &gate_par_lines("sw01", 1, 7, "[300us, 700us]"));
             let runner = ScriptedRunner::new(vec![
                 Ok(outcome(None)),
                 Ok(outcome(None)),
@@ -2130,7 +2130,7 @@ mod tests {
         tauri::async_runtime::block_on(async {
             let (pool, dir) = fresh_pool().await;
             seed_dual_plane_rc(&pool, RC_PATHS).await;
-            let csv = healthy_csv("TsnAgentFlowTasNetwork.es2.app[0].sink", 2001);
+            let csv = healthy_csv("TsnAgentFlowTasNetwork.es02.app[0].sink", 2001);
             let runner = ScriptedRunner::new(vec![
                 Ok(outcome(Some(&csv))),
                 Ok(SimRunOutcome {
@@ -2170,7 +2170,7 @@ mod tests {
         tauri::async_runtime::block_on(async {
             let (pool, dir) = fresh_pool().await;
             seed_dual_plane_rc(&pool, RC_PATHS).await;
-            let csv = healthy_csv("TsnAgentFlowTasNetwork.es2.app[0].sink", 2001);
+            let csv = healthy_csv("TsnAgentFlowTasNetwork.es02.app[0].sink", 2001);
             let runner = ScriptedRunner::new(vec![
                 Err(RemoteError::Unreachable("connection refused".into())),
                 Ok(outcome(Some(&csv))),
@@ -2202,7 +2202,7 @@ mod tests {
         tauri::async_runtime::block_on(async {
             let (pool, dir) = fresh_pool().await;
             seed_dual_plane_rc(&pool, RC_PATHS).await;
-            let csv = healthy_csv("TsnAgentFlowTasNetwork.es2.app[0].sink", 2001);
+            let csv = healthy_csv("TsnAgentFlowTasNetwork.es02.app[0].sink", 2001);
             let runner = ScriptedRunner::new(vec![
                 Ok(outcome(Some(&csv))),
                 Err(RemoteError::Unreachable(
@@ -2230,7 +2230,7 @@ mod tests {
             let (pool, dir) = fresh_pool().await;
             seed(&pool, dir.path()).await; // 纯 ST。
             let csv = format!(
-                "{}TsnAgentFlowTasNetwork.es2.app[0].sink,packetLifeTime:vector,0 0 0,0.0001 0.00012 0.00011\nTsnAgentFlowTasNetwork.es2.app[0].sink,packetJitter:vector,0 0 0,0.0000002 0.0000003 0.0000001\n",
+                "{}TsnAgentFlowTasNetwork.es02.app[0].sink,packetLifeTime:vector,0 0 0,0.0001 0.00012 0.00011\nTsnAgentFlowTasNetwork.es02.app[0].sink,packetJitter:vector,0 0 0,0.0000002 0.0000003 0.0000001\n",
                 header()
             );
             let runner = ScriptedRunner::new(vec![Ok(outcome(Some(&csv)))]);
@@ -2259,12 +2259,12 @@ mod tests {
     fn no_rounds_result_carries_top_level_gptp_diag() {
         tauri::async_runtime::block_on(async {
             let (pool, dir) = fresh_pool().await;
-            seed(&pool, dir.path()).await; // 纯 ST，GM=es1(mid1)。
+            seed(&pool, dir.path()).await; // 纯 ST，GM=es01(mid1)。
             let mut csv = format!(
-                "{}TsnAgentFlowTasNetwork.es2.app[0].sink,packetLifeTime:vector,0 0 0,0.0001 0.00012 0.00011\nTsnAgentFlowTasNetwork.es2.app[0].sink,packetJitter:vector,0 0 0,0.0000002 0.0000003 0.0000001\n",
+                "{}TsnAgentFlowTasNetwork.es02.app[0].sink,packetLifeTime:vector,0 0 0,0.0001 0.00012 0.00011\nTsnAgentFlowTasNetwork.es02.app[0].sink,packetJitter:vector,0 0 0,0.0000002 0.0000003 0.0000001\n",
                 header()
             );
-            csv.push_str(clock_csv_rows_gm_es1());
+            csv.push_str(clock_csv_rows_gm_es01());
             let runner = ScriptedRunner::new(vec![Ok(outcome(Some(&csv)))]);
             let r = verify_tas_inner(&pool, dir.path(), "s1", &runner)
                 .await
@@ -2276,8 +2276,8 @@ mod tests {
                 .as_ref()
                 .expect("R15：无 rounds 也应有顶层诊断行");
             assert_eq!(d.total_nodes, 2, "{d:?}");
-            assert_eq!(d.converged_nodes, 1, "es2 1500ns > 缺省 1000ns：{d:?}");
-            assert_eq!(d.worst_node, "es2", "{d:?}");
+            assert_eq!(d.converged_nodes, 1, "es02 1500ns > 缺省 1000ns：{d:?}");
+            assert_eq!(d.worst_node, "es02", "{d:?}");
             let json = serde_json::to_string(&r).unwrap();
             assert!(json.contains("\"gptpDiag\""), "{json}");
             assert!(!json.contains("rounds"), "{json}");
@@ -2320,7 +2320,7 @@ mod tests {
                     converged_nodes: 3,
                     total_nodes: 4,
                     threshold_summary: "1000ns".into(),
-                    worst_node: "sw2".into(),
+                    worst_node: "sw02".into(),
                     worst_offset_ns: 1500.0,
                 }),
             }]),
@@ -2329,7 +2329,7 @@ mod tests {
                 converged_nodes: 3,
                 total_nodes: 4,
                 threshold_summary: "1000ns".into(),
-                worst_node: "sw2".into(),
+                worst_node: "sw02".into(),
                 worst_offset_ns: 1500.0,
             }),
         };
@@ -2347,7 +2347,7 @@ mod tests {
         assert!(json.contains("\"convergedNodes\":3"), "{json}");
         assert!(json.contains("\"totalNodes\":4"), "{json}");
         assert!(json.contains("\"thresholdSummary\":\"1000ns\""), "{json}");
-        assert!(json.contains("\"worstNode\":\"sw2\""), "{json}");
+        assert!(json.contains("\"worstNode\":\"sw02\""), "{json}");
         assert!(json.contains("\"worstOffsetNs\":1500.0"), "{json}");
         assert!(!json.contains("untested_streams"), "{json}");
         assert!(!json.contains("per_stream"), "{json}");
@@ -2385,7 +2385,7 @@ mod tests {
         tauri::async_runtime::block_on(async {
             let (pool, dir) = fresh_pool().await;
             seed_dual_plane_rc(&pool, RC_PATHS).await;
-            let csv = healthy_csv("TsnAgentFlowTasNetwork.es2.app[0].sink", 2002);
+            let csv = healthy_csv("TsnAgentFlowTasNetwork.es02.app[0].sink", 2002);
             let runner = ScriptedRunner::new(vec![
                 Ok(outcome(Some(&csv))),
                 Ok(outcome(Some(&csv))),
@@ -2417,7 +2417,7 @@ mod tests {
             // 容差内：收 2000、实发 2001。
             let (pool, dir) = fresh_pool().await;
             seed_dual_plane_rc(&pool, RC_PATHS).await;
-            let csv = healthy_csv("TsnAgentFlowTasNetwork.es2.app[0].sink", 2000);
+            let csv = healthy_csv("TsnAgentFlowTasNetwork.es02.app[0].sink", 2000);
             let runner = ScriptedRunner::new(vec![
                 Ok(outcome(Some(&csv))),
                 Ok(outcome(Some(&csv))),
@@ -2432,7 +2432,7 @@ mod tests {
             // 超容差：收 1000。
             let (pool, dir) = fresh_pool().await;
             seed_dual_plane_rc(&pool, RC_PATHS).await;
-            let csv = healthy_csv("TsnAgentFlowTasNetwork.es2.app[0].sink", 1000);
+            let csv = healthy_csv("TsnAgentFlowTasNetwork.es02.app[0].sink", 1000);
             let runner = ScriptedRunner::new(vec![
                 Ok(outcome(Some(&csv))),
                 Ok(outcome(Some(&csv))),
@@ -2450,29 +2450,29 @@ mod tests {
     }
 
     /// 混合三类 seed：dual-plane RC（seq0）+ ST（seq1，带 gate7 GCL）+ BE（seq2），
-    /// 全部 es1→es2、count=2000×500us（sim=1s、每流实发 2001）。
+    /// 全部 es01→es02、count=2000×500us（sim=1s、每流实发 2001）。
     async fn seed_mixed_three_classes(pool: &sqlx::Pool<sqlx::Sqlite>, base_dir: &std::path::Path) {
         seed_dual_plane_rc(pool, RC_PATHS).await;
         sqlx::query("INSERT INTO flow_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener, max_latency_us) VALUES ('s1', 1, 'ST', 7, 500, 512, 2000, '1', '2', 400)")
             .execute(pool).await.unwrap();
         sqlx::query("INSERT INTO flow_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener) VALUES ('s1', 2, 'BE', 0, 500, 512, 2000, '1', '2')")
             .execute(pool).await.unwrap();
-        seed_gcl_archive(base_dir, &gate_par_lines("sw1", 1, 7, "[300us, 700us]"));
+        seed_gcl_archive(base_dir, &gate_par_lines("sw01", 1, 7, "[300us, 700us]"));
     }
 
-    /// 三个 sink（es2.app[0]=RC、app[1]=ST、app[2]=BE）全健康的 CSV；ST sink 抖动可注坏样本。
+    /// 三个 sink（es02.app[0]=RC、app[1]=ST、app[2]=BE）全健康的 CSV；ST sink 抖动可注坏样本。
     fn mixed_csv(st_jitter_breach: bool) -> String {
-        let mut csv = healthy_csv("TsnAgentFlowTasNetwork.es2.app[0].sink", 2001);
-        let st = healthy_csv("TsnAgentFlowTasNetwork.es2.app[1].sink", 2001);
+        let mut csv = healthy_csv("TsnAgentFlowTasNetwork.es02.app[0].sink", 2001);
+        let st = healthy_csv("TsnAgentFlowTasNetwork.es02.app[1].sink", 2001);
         // healthy_csv 自带表头，拼接时剥掉后两份的表头行。
         csv.push_str(st.strip_prefix(&header()).unwrap());
         if st_jitter_breach {
             // 追加一行非首位 2us 抖动样本（首样本被 skip_first 跳过，须放后位才生效）。
             csv.push_str(
-                "TsnAgentFlowTasNetwork.es2.app[1].sink,packetJitter:vector,0 0,0.0000001 0.000002\n",
+                "TsnAgentFlowTasNetwork.es02.app[1].sink,packetJitter:vector,0 0,0.0000001 0.000002\n",
             );
         }
-        let be = healthy_csv("TsnAgentFlowTasNetwork.es2.app[2].sink", 2001);
+        let be = healthy_csv("TsnAgentFlowTasNetwork.es02.app[2].sink", 2001);
         csv.push_str(be.strip_prefix(&header()).unwrap());
         csv
     }
@@ -2596,7 +2596,7 @@ mod tests {
 
             // 收一半：sim=1500us → 实发 4，收 2 → 送达率 0.5；带 2us 抖动样本仍 PASS（不判）。
             let csv = format!(
-                "{}TsnAgentFlowTasNetwork.es2.app[0].sink,packetLifeTime:vector,0 0,0.0001 0.00012\nTsnAgentFlowTasNetwork.es2.app[0].sink,packetJitter:vector,0 0,0.0000001 0.000002\n",
+                "{}TsnAgentFlowTasNetwork.es02.app[0].sink,packetLifeTime:vector,0 0,0.0001 0.00012\nTsnAgentFlowTasNetwork.es02.app[0].sink,packetJitter:vector,0 0,0.0000001 0.000002\n",
                 header()
             );
             let r = verify_tas_inner(
@@ -2626,14 +2626,14 @@ mod tests {
             seed_dual_plane_rc(&pool, RC_PATHS).await;
             sqlx::query("INSERT INTO flow_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener, max_latency_us) VALUES ('s1', 1, 'ST', 7, 500, 512, 2000, '1', '2', 400)")
                 .execute(&pool).await.unwrap();
-            seed_gcl_archive(dir.path(), &gate_par_lines("sw1", 1, 7, "[300us, 700us]"));
-            let mut healthy = healthy_csv("TsnAgentFlowTasNetwork.es2.app[0].sink", 2001);
-            let st = healthy_csv("TsnAgentFlowTasNetwork.es2.app[1].sink", 2001);
+            seed_gcl_archive(dir.path(), &gate_par_lines("sw01", 1, 7, "[300us, 700us]"));
+            let mut healthy = healthy_csv("TsnAgentFlowTasNetwork.es02.app[0].sink", 2001);
+            let st = healthy_csv("TsnAgentFlowTasNetwork.es02.app[1].sink", 2001);
             healthy.push_str(st.strip_prefix(&header()).unwrap());
             // 断A轮：RC 健康、ST 劣化（时延 1ms 超窗 + 丢到只剩 3 帧——若被判必挂）。
-            let mut fault = healthy_csv("TsnAgentFlowTasNetwork.es2.app[0].sink", 2001);
+            let mut fault = healthy_csv("TsnAgentFlowTasNetwork.es02.app[0].sink", 2001);
             fault.push_str(
-                "TsnAgentFlowTasNetwork.es2.app[1].sink,packetLifeTime:vector,0 0 0,0.001 0.001 0.001\nTsnAgentFlowTasNetwork.es2.app[1].sink,packetJitter:vector,0 0 0,0.0000001 0.000005 0.000004\n",
+                "TsnAgentFlowTasNetwork.es02.app[1].sink,packetLifeTime:vector,0 0 0,0.001 0.001 0.001\nTsnAgentFlowTasNetwork.es02.app[1].sink,packetJitter:vector,0 0 0,0.0000001 0.000005 0.000004\n",
             );
             let runner = ScriptedRunner::new(vec![
                 Ok(outcome(Some(&healthy))),
@@ -2662,10 +2662,10 @@ mod tests {
     fn fault_round_untested_rc_reported_not_judged() {
         tauri::async_runtime::block_on(async {
             let (pool, dir) = fresh_pool().await;
-            // 两条 RC 不共向（es1→es2、es3→es1）：断A断点只覆盖流 1，流 0 未测。
+            // 两条 RC 不共向（es01→es02、es03→es01）：断A断点只覆盖流 1，流 0 未测。
             seed_dual_plane_two_rc(&pool, ("4", "1")).await;
-            let mut csv = healthy_csv("TsnAgentFlowTasNetwork.es2.app[0].sink", 2001);
-            let second = healthy_csv("TsnAgentFlowTasNetwork.es1.app[1].sink", 2001);
+            let mut csv = healthy_csv("TsnAgentFlowTasNetwork.es02.app[0].sink", 2001);
+            let second = healthy_csv("TsnAgentFlowTasNetwork.es01.app[1].sink", 2001);
             csv.push_str(second.strip_prefix(&header()).unwrap());
             let runner = ScriptedRunner::new(vec![
                 Ok(outcome(Some(&csv))),
@@ -2718,7 +2718,7 @@ mod tests {
             // 故障轮空向量 → 该轮被覆盖 RC FAIL（健康轮不受影响）。
             let (pool, dir) = fresh_pool().await;
             seed_dual_plane_rc(&pool, RC_PATHS).await;
-            let full = healthy_csv("TsnAgentFlowTasNetwork.es2.app[0].sink", 2001);
+            let full = healthy_csv("TsnAgentFlowTasNetwork.es02.app[0].sink", 2001);
             let runner = ScriptedRunner::new(vec![
                 Ok(outcome(Some(&full))),
                 Ok(outcome(Some(&bare))),
@@ -2735,32 +2735,32 @@ mod tests {
         });
     }
 
-    /// 线性 seed（GM=es1）版 clock 序列：sw1=500ns 收敛、es2=1500ns 未收敛（缺省阈值 1000ns）。
+    /// 线性 seed（GM=es01）版 clock 序列：sw01=500ns 收敛、es02=1500ns 未收敛（缺省阈值 1000ns）。
     /// R15 顶层诊断行（无 rounds 会话）夹具用。
-    fn clock_csv_rows_gm_es1() -> &'static str {
-        "TsnAgentFlowTasNetwork.es1.clock,timeChanged:vector,0 1,0 1\n\
-         TsnAgentFlowTasNetwork.sw1.clock,timeChanged:vector,0 0.6 1,0 0.6000005 1.0000005\n\
-         TsnAgentFlowTasNetwork.es2.clock,timeChanged:vector,0 0.6 1,0 0.6000015 1.0000015\n"
+    fn clock_csv_rows_gm_es01() -> &'static str {
+        "TsnAgentFlowTasNetwork.es01.clock,timeChanged:vector,0 1,0 1\n\
+         TsnAgentFlowTasNetwork.sw01.clock,timeChanged:vector,0 0.6 1,0 0.6000005 1.0000005\n\
+         TsnAgentFlowTasNetwork.es02.clock,timeChanged:vector,0 0.6 1,0 0.6000015 1.0000015\n"
     }
 
-    /// GM sw1 + 三个 clock 序列（sw2=500ns、es2=1500ns、esb1=100ns，稳态窗为 sim 后半程）。
-    /// esb1 是双宿拆分内嵌桥——不在 node_ned_names，单列计数、阈值走缺省（最小惊讶口径）。
+    /// GM sw01 + 三个 clock 序列（sw02=500ns、es02=1500ns、esb01=100ns，稳态窗为 sim 后半程）。
+    /// esb01 是双宿拆分内嵌桥——不在 node_ned_names，单列计数、阈值走缺省（最小惊讶口径）。
     fn clock_csv_rows() -> &'static str {
-        "TsnAgentFlowTasNetwork.sw1.clock,timeChanged:vector,0 1,0 1\n\
-         TsnAgentFlowTasNetwork.sw2.clock,timeChanged:vector,0 0.6 1,0 0.6000005 1.0000005\n\
-         TsnAgentFlowTasNetwork.es2.clock,timeChanged:vector,0 0.6 1,0 0.6000015 1.0000015\n\
-         TsnAgentFlowTasNetwork.esb1.clock,timeChanged:vector,0 0.6 1,0 0.6000001 1.0000001\n"
+        "TsnAgentFlowTasNetwork.sw01.clock,timeChanged:vector,0 1,0 1\n\
+         TsnAgentFlowTasNetwork.sw02.clock,timeChanged:vector,0 0.6 1,0 0.6000005 1.0000005\n\
+         TsnAgentFlowTasNetwork.es02.clock,timeChanged:vector,0 0.6 1,0 0.6000015 1.0000015\n\
+         TsnAgentFlowTasNetwork.esb01.clock,timeChanged:vector,0 0.6 1,0 0.6000001 1.0000001\n"
     }
 
     /// Covers U7⑥（R15）：夹具 CSV 带 clock 向量 → 每轮 gPTP 诊断行——缺省阈值 1000ns 回退、
-    /// converged N/M 与最差节点正确、拆分桥（esb1）单列计数；故障轮照实报告（诊断行仍在）；
-    /// 诊断不参与 verdict（流全绿不受 es2 时钟未收敛影响）。
+    /// converged N/M 与最差节点正确、拆分桥（esb01）单列计数；故障轮照实报告（诊断行仍在）；
+    /// 诊断不参与 verdict（流全绿不受 es02 时钟未收敛影响）。
     #[test]
     fn gptp_diag_default_threshold_counts_and_worst_node() {
         tauri::async_runtime::block_on(async {
             let (pool, dir) = fresh_pool().await;
             seed_dual_plane_rc(&pool, RC_PATHS).await;
-            let mut csv = healthy_csv("TsnAgentFlowTasNetwork.es2.app[0].sink", 2001);
+            let mut csv = healthy_csv("TsnAgentFlowTasNetwork.es02.app[0].sink", 2001);
             csv.push_str(clock_csv_rows());
             let runner = ScriptedRunner::new(vec![
                 Ok(outcome(Some(&csv))),
@@ -2774,9 +2774,9 @@ mod tests {
             let rounds = r.rounds.as_ref().unwrap();
             let d = rounds[0].gptp_diag.as_ref().expect("健康轮应有诊断行");
             assert_eq!(d.total_nodes, 3, "{d:?}");
-            assert_eq!(d.converged_nodes, 2, "es2 1500ns > 缺省 1000ns：{d:?}");
+            assert_eq!(d.converged_nodes, 2, "es02 1500ns > 缺省 1000ns：{d:?}");
             assert_eq!(d.threshold_summary, "1000ns", "{d:?}");
-            assert_eq!(d.worst_node, "es2", "{d:?}");
+            assert_eq!(d.worst_node, "es02", "{d:?}");
             assert!((d.worst_offset_ns - 1500.0).abs() < 0.5, "{d:?}");
             // 故障轮照实报告（KTD2：断链下游劣化属预期，诊断行不缺席）。
             assert!(rounds[1].gptp_diag.is_some(), "{rounds:?}");
@@ -2786,7 +2786,7 @@ mod tests {
         });
     }
 
-    /// Covers U7⑥（R15）：timesync_nodes.offset_threshold 配置后逐节点阈值生效——es2 阈值
+    /// Covers U7⑥（R15）：timesync_nodes.offset_threshold 配置后逐节点阈值生效——es02 阈值
     /// 放宽到 2000ns → 3/3 收敛，阈值概览显示逐节点区间；无 clock 向量的轮 → 诊断行缺席。
     #[test]
     fn gptp_diag_per_node_threshold_applies_and_absent_without_clock_rows() {
@@ -2799,9 +2799,9 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-            let mut with_clock = healthy_csv("TsnAgentFlowTasNetwork.es2.app[0].sink", 2001);
+            let mut with_clock = healthy_csv("TsnAgentFlowTasNetwork.es02.app[0].sink", 2001);
             with_clock.push_str(clock_csv_rows());
-            let without_clock = healthy_csv("TsnAgentFlowTasNetwork.es2.app[0].sink", 2001);
+            let without_clock = healthy_csv("TsnAgentFlowTasNetwork.es02.app[0].sink", 2001);
             let runner = ScriptedRunner::new(vec![
                 Ok(outcome(Some(&with_clock))),
                 Ok(outcome(Some(&without_clock))),
@@ -2814,7 +2814,7 @@ mod tests {
             let d = rounds[0].gptp_diag.as_ref().unwrap();
             assert_eq!(
                 d.converged_nodes, 3,
-                "es2 1500ns ≤ 逐节点阈值 2000ns：{d:?}"
+                "es02 1500ns ≤ 逐节点阈值 2000ns：{d:?}"
             );
             assert_eq!(d.total_nodes, 3, "{d:?}");
             assert_eq!(d.threshold_summary, "1000–2000ns", "{d:?}");
@@ -2856,11 +2856,11 @@ mod tests {
             }
         }
 
-        /// 回 sw1 eth[1] gate7（ST 门）.sca 的捕获客户端——线性与双平面 seed 里 sw1 都是
-        /// ST 平面 A 路径上的交换机（ned sw1 → mid 0）。
+        /// 回 sw01 eth[1] gate7（ST 门）.sca 的捕获客户端——线性与双平面 seed 里 sw01 都是
+        /// ST 平面 A 路径上的交换机（ned sw01 → mid 0）。
         fn plan_gate7() -> CapturingPlan {
             CapturingPlan {
-                sca: "par N.sw1.eth[1].macLayer.queue.transmissionGate[7] initiallyOpen true\npar N.sw1.eth[1].macLayer.queue.transmissionGate[7] offset 0s\npar N.sw1.eth[1].macLayer.queue.transmissionGate[7] durations \"[300us, 700us]\"\n".into(),
+                sca: "par N.sw01.eth[1].macLayer.queue.transmissionGate[7] initiallyOpen true\npar N.sw01.eth[1].macLayer.queue.transmissionGate[7] offset 0s\npar N.sw01.eth[1].macLayer.queue.transmissionGate[7] durations \"[300us, 700us]\"\n".into(),
                 ini: std::sync::Mutex::new(None),
             }
         }
@@ -2905,8 +2905,8 @@ mod tests {
                 assert!(synth.contains("pcp: 7"), "{synth}");
                 assert_eq!(gcl_archive_count(dir.path()), 1, "plan 产物=GCL 落库");
 
-                let mut csv = healthy_csv("TsnAgentFlowTasNetwork.es2.app[0].sink", 3);
-                csv.push_str(clock_csv_rows_gm_es1());
+                let mut csv = healthy_csv("TsnAgentFlowTasNetwork.es02.app[0].sink", 3);
+                csv.push_str(clock_csv_rows_gm_es01());
                 let runner = ScriptedRunner::new(vec![Ok(outcome(Some(&csv)))]);
                 let r = verify_tas_inner(&pool, dir.path(), "s1", &runner)
                     .await
@@ -2963,8 +2963,8 @@ mod tests {
                 assert_eq!(gcl_archive_count(dir.path()), 1);
 
                 // ST=app[0]、BE=app[1]（specs 按 stream_seq 序）。
-                let mut csv = healthy_csv("TsnAgentFlowTasNetwork.es2.app[0].sink", 3);
-                let be = healthy_csv("TsnAgentFlowTasNetwork.es2.app[1].sink", 3);
+                let mut csv = healthy_csv("TsnAgentFlowTasNetwork.es02.app[0].sink", 3);
+                let be = healthy_csv("TsnAgentFlowTasNetwork.es02.app[1].sink", 3);
                 csv.push_str(be.strip_prefix(&header()).unwrap());
                 let runner = ScriptedRunner::new(vec![Ok(outcome(Some(&csv)))]);
                 let r = verify_tas_inner(&pool, dir.path(), "s1", &runner)
@@ -3014,8 +3014,8 @@ mod tests {
                 assert_eq!(gcl_archive_count(dir.path()), 1);
 
                 // RC=app[0]、ST=app[1]。
-                let mut csv = healthy_csv("TsnAgentFlowTasNetwork.es2.app[0].sink", 2001);
-                let st = healthy_csv("TsnAgentFlowTasNetwork.es2.app[1].sink", 2001);
+                let mut csv = healthy_csv("TsnAgentFlowTasNetwork.es02.app[0].sink", 2001);
+                let st = healthy_csv("TsnAgentFlowTasNetwork.es02.app[1].sink", 2001);
                 csv.push_str(st.strip_prefix(&header()).unwrap());
                 let runner = ScriptedRunner::new(vec![
                     Ok(outcome(Some(&csv))),
@@ -3123,7 +3123,7 @@ mod tests {
                 let (pool, dir) = fresh_pool().await;
                 seed_dual_plane_rc(&pool, RC_PATHS).await;
                 // 存量旧 GCL 存档（上一轮 ST 规划残留）——no_gating 应清掉，verify 不得 pin 它。
-                seed_gcl_archive(dir.path(), &gate_par_lines("sw1", 1, 7, "[300us, 700us]"));
+                seed_gcl_archive(dir.path(), &gate_par_lines("sw01", 1, 7, "[300us, 700us]"));
                 let plan = plan_gate7();
                 let pr = crate::flow_plan_command::plan_tas_inner(
                     &pool,
@@ -3138,7 +3138,7 @@ mod tests {
                 assert!(plan.ini.lock().unwrap().is_none(), "无 ST 不进 Z3");
                 assert_eq!(gcl_archive_count(dir.path()), 0, "no_gating 清表");
 
-                let mut csv = healthy_csv("TsnAgentFlowTasNetwork.es2.app[0].sink", 2001);
+                let mut csv = healthy_csv("TsnAgentFlowTasNetwork.es02.app[0].sink", 2001);
                 csv.push_str(clock_csv_rows());
                 let runner = ScriptedRunner::new(vec![
                     Ok(outcome(Some(&csv))),
@@ -3204,8 +3204,8 @@ mod tests {
                 assert!(plan.ini.lock().unwrap().is_none(), "无 ST 不进 Z3");
                 assert_eq!(gcl_archive_count(dir.path()), 0, "no_gating 清掉存量 GCL");
 
-                let mut csv = healthy_csv("TsnAgentFlowTasNetwork.es2.app[0].sink", 3);
-                csv.push_str(clock_csv_rows_gm_es1());
+                let mut csv = healthy_csv("TsnAgentFlowTasNetwork.es02.app[0].sink", 3);
+                csv.push_str(clock_csv_rows_gm_es01());
                 let runner = ScriptedRunner::new(vec![Ok(outcome(Some(&csv)))]);
                 let r = verify_tas_inner(&pool, dir.path(), "s1", &runner)
                     .await

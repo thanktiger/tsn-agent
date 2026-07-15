@@ -17,9 +17,7 @@ use serde::Serialize;
 use sqlx::Row;
 use std::collections::BTreeMap;
 
-use crate::flow_route::{
-    Route, RouteRequest, resolve_flow_path, single_path_plane, system_paths_json,
-};
+use crate::flow_route::{RouteRequest, paths_json, resolve_flow_path, single_path_plane};
 use crate::gcl_synth::{
     FlowMatchStream, GclWindowRow, match_flows_to_st_windows, parse_all_gates_from_sca,
     parse_production_offsets_from_sca, synthesize_gate_windows,
@@ -81,9 +79,8 @@ pub(crate) struct DbStream {
     /// KTD6 凭证列（U2 录入时落）：仅展示，装配一律重推导（verify 侧重跑不相交断言）。
     #[allow(dead_code)]
     pub(crate) redundant: i64,
-    /// paths 列（KTD12 统一形状）：RC=系统凭证（装配仍重推导）；ST/BE origin=user=
-    /// 显式指定事实源、origin=system=录入沉淀凭证（复验直用/失效静默刷新），
-    /// 经 resolve_flow_path 进 pathFragments（R16）。
+    /// paths 列（KTD12 裸数组凭证）：RC=系统凭证（装配仍重推导）；ST/BE=路径凭证
+    /// （复验直用/失效静默重推导+回写刷新），经 resolve_flow_path 进 pathFragments（R16）。
     pub(crate) paths: Option<String>,
 }
 
@@ -133,9 +130,9 @@ type PortGateIntervals = BTreeMap<(String, usize), BTreeMap<usize, Vec<(u64, u64
 ///
 /// 失败态（solver_failed/unreachable）**不走本函数**——不写不清，保留上一次规划（R10/KTD1）。
 ///
-/// `path_writebacks`：路径凭证沉淀/刷新（(stream_seq, system paths JSON)），与规划写同一
-/// 事务——存量 NULL 流规划一次即沉淀、过期 system 凭证自动刷新。origin=user 由调用方
-/// 过滤，永不回写。
+/// `path_writebacks`：路径凭证沉淀/刷新（(stream_seq, paths JSON 裸数组)），与规划写同一
+/// 事务——存量 NULL 流规划一次即沉淀、失效凭证自动刷新；有效凭证不回写（由调用方
+/// credential_needs_refresh 过滤，保住用户绕路选择的稳定性）。
 #[allow(clippy::too_many_arguments)]
 async fn write_gcl_plan(
     pool: &sqlx::Pool<sqlx::Sqlite>,
@@ -210,20 +207,26 @@ where
 }
 
 /// 路径凭证回写判定：paths 为 NULL（存量未沉淀）或不可解析（自愈）→ 回写；
-/// origin=system 且 link_seqs 与本次实际路径不一致（拓扑变更后凭证过期）→ 刷新；
-/// origin=user 永不回写（用户事实源）。
-fn credential_needs_refresh(paths_json: Option<&str>, route: &Route) -> bool {
-    let Some(json) = paths_json else {
+/// 凭证复验失败（拓扑变更后失效，resolve 已静默重推导）→ 回写刷新。
+/// 凭证有效 → **不回写不比对**——resolve 直用凭证，用户指定的绕路（非最短路）在
+/// 拓扑不变时保持稳定，不被每次规划的最短路推导反复覆盖。
+fn credential_needs_refresh(
+    stream_paths: Option<&str>,
+    talker: &str,
+    listener: &str,
+    links: &[crate::topology_verify::VerifyLink],
+) -> bool {
+    let Some(json) = stream_paths else {
         return true;
     };
-    match crate::flow_route::parse_flow_paths(json) {
-        None => true,
-        Some(fp) => {
-            fp.origin == "system"
-                && fp.routes.first().map(|r| r.link_seqs.as_slice())
-                    != Some(route.link_seqs.as_slice())
-        }
-    }
+    let Some(routes) = crate::flow_route::parse_flow_paths(json) else {
+        return true;
+    };
+    let Some(first) = routes.first() else {
+        return true;
+    };
+    crate::flow_route::build_route_from_link_seqs(&first.link_seqs, talker, listener, links)
+        .is_err()
 }
 
 /// 可测内核：注入 `InetSimPlanClient`，编排 流集 → 路径 → synth bundle → 跑配置器 → 解析 → 落库。
@@ -266,9 +269,9 @@ pub async fn plan_tas_inner<P: InetSimPlanClient>(
             },
             &nodes,
             &links,
-        ) && credential_needs_refresh(s.paths.as_deref(), &route)
+        ) && credential_needs_refresh(s.paths.as_deref(), &s.talker, &s.listener, &links)
         {
-            path_writebacks.push((s.stream_seq, system_paths_json(&route)));
+            path_writebacks.push((s.stream_seq, paths_json(std::slice::from_ref(&route))));
         }
     }
 
@@ -316,8 +319,8 @@ pub async fn plan_tas_inner<P: InetSimPlanClient>(
     let mut egress_of: Vec<Vec<(String, usize)>> = Vec::new();
     let mut route_failures: Vec<String> = Vec::new();
     for s in &st_streams {
-        // KTD11 统一路径解析出口：user 显式指定优先（失效 PATH_STALE 响亮）；system
-        // 沉淀凭证复验直用、失效静默重推导；NULL 沿最短路推导。
+        // KTD11 统一路径解析出口：凭证复验直用（用户绕路稳定沿用）、失效静默重推导；
+        // NULL 沿最短路推导。
         let route = resolve_flow_path(
             s.paths.as_deref(),
             &RouteRequest {
@@ -330,9 +333,9 @@ pub async fn plan_tas_inner<P: InetSimPlanClient>(
         );
         let path_fragments = match route {
             Ok(r) => {
-                // 回写沉淀：NULL 首次规划落凭证 / system 凭证过期刷新（user 永不回写）。
-                if credential_needs_refresh(s.paths.as_deref(), &r) {
-                    path_writebacks.push((s.stream_seq, system_paths_json(&r)));
+                // 回写沉淀：NULL 首次规划落凭证 / 失效凭证刷新（有效凭证不回写）。
+                if credential_needs_refresh(s.paths.as_deref(), &s.talker, &s.listener, &links) {
+                    path_writebacks.push((s.stream_seq, paths_json(std::slice::from_ref(&r))));
                 }
                 egress_of.push(r.egress);
                 Some(r.node_path)
@@ -634,8 +637,8 @@ mod tests {
     }
 
     fn ok_plan_result() -> Result<HttpPlanResult, String> {
-        // sw1 gate7 的 .sca（ST 门；ned sw1 → mid 0）。
-        let sca = "par N.sw1.eth[1].macLayer.queue.transmissionGate[7] initiallyOpen true\npar N.sw1.eth[1].macLayer.queue.transmissionGate[7] offset 0s\npar N.sw1.eth[1].macLayer.queue.transmissionGate[7] durations \"[300us, 700us]\"\n";
+        // sw01 gate7 的 .sca（ST 门；ned sw01 → mid 0）。
+        let sca = "par N.sw01.eth[1].macLayer.queue.transmissionGate[7] initiallyOpen true\npar N.sw01.eth[1].macLayer.queue.transmissionGate[7] offset 0s\npar N.sw01.eth[1].macLayer.queue.transmissionGate[7] durations \"[300us, 700us]\"\n";
         Ok(HttpPlanResult {
             exit_code: 0,
             output_tail: "ok".into(),
@@ -663,7 +666,7 @@ mod tests {
     }
 
     async fn seed_linear(pool: &sqlx::Pool<sqlx::Sqlite>) {
-        // es1(1) — sw1(0) — es2(2)。GM=1。
+        // es01(1) — sw01(0) — es02(2)。GM=1。
         for (mid, ty, ord) in [
             ("0", "switch", 0),
             ("1", "endSystem", 1),
@@ -720,8 +723,8 @@ mod tests {
             // KTD14：预置 stale=1 的旧行——规划成功须复位为 0（覆盖式重写）。
             sqlx::query("INSERT INTO flow_gcl_plan (session_id, provider, status, cycle_ns, algorithm, stale, created_at, windows_json) VALUES ('s1', 'inet-z3', 'ok', 1000000, 'Z3', 1, 'now', '[]')")
                 .execute(&pool).await.unwrap();
-            // mock 服务回 sw1 gate 的 .sca（node ned sw1 → mid 0）。
-            let sca = "par N.sw1.eth[1].macLayer.queue.transmissionGate[0] initiallyOpen true\npar N.sw1.eth[1].macLayer.queue.transmissionGate[0] offset 0s\npar N.sw1.eth[1].macLayer.queue.transmissionGate[0] durations \"[300us, 700us]\"\n";
+            // mock 服务回 sw01 gate 的 .sca（node ned sw01 → mid 0）。
+            let sca = "par N.sw01.eth[1].macLayer.queue.transmissionGate[0] initiallyOpen true\npar N.sw01.eth[1].macLayer.queue.transmissionGate[0] offset 0s\npar N.sw01.eth[1].macLayer.queue.transmissionGate[0] durations \"[300us, 700us]\"\n";
             let client = MockPlanClient {
                 result: Ok(HttpPlanResult {
                     exit_code: 0,
@@ -866,9 +869,9 @@ mod tests {
         });
     }
 
-    /// 回写沉淀：NULL paths 的 ST/BE 流规划成功后落 origin=system 凭证（与规划同事务）。
+    /// 回写沉淀：NULL paths 的 ST/BE 流规划成功后落裸数组凭证（与规划同事务）。
     #[test]
-    fn plan_tas_writes_back_system_credential_for_null_paths() {
+    fn plan_tas_writes_back_credential_for_null_paths() {
         tauri::async_runtime::block_on(async {
             let pool = fresh_pool().await;
             let dir = tempfile::tempdir().unwrap();
@@ -891,28 +894,26 @@ mod tests {
             for (seq, paths) in rows {
                 let p: serde_json::Value =
                     serde_json::from_str(paths.as_deref().expect("规划后应沉淀凭证")).unwrap();
-                assert_eq!(p["origin"], serde_json::json!("system"), "seq {seq}");
+                assert!(p.is_array(), "seq {seq}: 应为裸数组: {p}");
                 // seed_linear：1→0→2，link_seqs [0,1]。
-                assert_eq!(
-                    p["routes"][0]["node_path"],
-                    serde_json::json!(["1", "0", "2"])
-                );
-                assert_eq!(p["routes"][0]["link_seqs"], serde_json::json!([0, 1]));
+                assert_eq!(p[0]["node_path"], serde_json::json!(["1", "0", "2"]));
+                assert_eq!(p[0]["link_seqs"], serde_json::json!([0, 1]));
             }
         });
     }
 
-    /// origin=user 凭证规划成功后**不被回写**（用户事实源，字节不动）。
+    /// 有效凭证规划成功后**不被回写**（凭证语义：拓扑不变即字节不动；兼收旧包装形状）。
     #[test]
-    fn plan_tas_does_not_rewrite_user_credential() {
+    fn plan_tas_does_not_rewrite_valid_credential() {
         tauri::async_runtime::block_on(async {
             let pool = fresh_pool().await;
             let dir = tempfile::tempdir().unwrap();
             seed_linear(&pool).await;
             add_stream(&pool, 0, "ST", 7).await;
-            let user_json = r#"{"version":1,"origin":"user","routes":[{"node_path":["1","0","2"],"link_seqs":[0,1]}]}"#;
+            // 旧包装形状（库内存量行）：凭证有效 → 读兼容直用，也不被改写成裸数组。
+            let wrapped_json = r#"{"version":1,"origin":"user","routes":[{"node_path":["1","0","2"],"link_seqs":[0,1]}]}"#;
             sqlx::query("UPDATE flow_streams SET paths=? WHERE session_id='s1' AND stream_seq=0")
-                .bind(user_json)
+                .bind(wrapped_json)
                 .execute(&pool)
                 .await
                 .unwrap();
@@ -929,19 +930,71 @@ mod tests {
             .fetch_one(&pool)
             .await
             .unwrap();
-            assert_eq!(paths.as_deref(), Some(user_json), "user 凭证不得被回写");
+            assert_eq!(paths.as_deref(), Some(wrapped_json), "有效凭证不得被回写");
         });
     }
 
-    /// 过期 system 凭证（引用已不存在的链路）→ 静默重推导规划成功 + 凭证刷新为实际路径。
+    /// 绕路凭证有效时不被回写覆盖：非最短路（1-0-3-2 三跳，最短为 1-0-2 两跳）凭证
+    /// 在完整拓扑上复验通过 → plan 后凭证字节不变（用户绕路选择稳定）。
     #[test]
-    fn plan_tas_refreshes_stale_system_credential() {
+    fn plan_tas_keeps_valid_detour_credential() {
+        tauri::async_runtime::block_on(async {
+            let pool = fresh_pool().await;
+            let dir = tempfile::tempdir().unwrap();
+            seed_linear(&pool).await; // 1—0—2（link 0/1）
+            // 加节点 3 与链路 0—3（seq 2）、3—2（seq 3）：绕路 1-0-3-2 可复验。
+            sqlx::query("INSERT INTO topology_nodes (session_id, mid, name, x, y, node_type, port_count, queue_count, insert_order) VALUES ('s1', '3', NULL, 0, 0, 'switch', 8, 8, 3)")
+                .execute(&pool)
+                .await
+                .unwrap();
+            sqlx::query("INSERT INTO timesync_nodes (session_id, mid, master_port, slave_port) VALUES ('s1', '3', '[]', '[]')")
+                .execute(&pool)
+                .await
+                .unwrap();
+            for (seq, src, sp, dst, dp) in [(2i64, "0", 2i64, "3", 0i64), (3, "3", 1, "2", 1)] {
+                sqlx::query("INSERT INTO topology_links (session_id, link_seq, src_node, src_port, dst_node, dst_port, speed, styles_json) VALUES ('s1', ?, ?, ?, ?, ?, 1000, '{}')")
+                    .bind(seq).bind(src).bind(sp).bind(dst).bind(dp)
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+            }
+            add_stream(&pool, 0, "ST", 7).await;
+            let detour_json = r#"[{"node_path":["1","0","3","2"],"link_seqs":[0,2,3]}]"#;
+            sqlx::query("UPDATE flow_streams SET paths=? WHERE session_id='s1' AND stream_seq=0")
+                .bind(detour_json)
+                .execute(&pool)
+                .await
+                .unwrap();
+            let client = MockPlanClient {
+                result: ok_plan_result(),
+            };
+            let r = plan_tas_inner(&pool, dir.path(), "s1", &client, "http://x")
+                .await
+                .unwrap();
+            assert_eq!(r.status, "ok", "{r:?}");
+            let paths: Option<String> = sqlx::query_scalar(
+                "SELECT paths FROM flow_streams WHERE session_id='s1' AND stream_seq=0",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(
+                paths.as_deref(),
+                Some(detour_json),
+                "绕路凭证有效时不得被最短路推导覆盖"
+            );
+        });
+    }
+
+    /// 失效凭证（引用已不存在的链路）→ 静默重推导规划成功 + 凭证刷新为实际路径（裸数组）。
+    #[test]
+    fn plan_tas_refreshes_stale_credential() {
         tauri::async_runtime::block_on(async {
             let pool = fresh_pool().await;
             let dir = tempfile::tempdir().unwrap();
             seed_linear(&pool).await;
             add_stream(&pool, 0, "ST", 7).await;
-            let stale_json = r#"{"version":1,"origin":"system","routes":[{"node_path":["1","9","2"],"link_seqs":[0,99]}]}"#;
+            let stale_json = r#"[{"node_path":["1","9","2"],"link_seqs":[0,99]}]"#;
             sqlx::query("UPDATE flow_streams SET paths=? WHERE session_id='s1' AND stream_seq=0")
                 .bind(stale_json)
                 .execute(&pool)
@@ -961,9 +1014,9 @@ mod tests {
             .await
             .unwrap();
             let p: serde_json::Value = serde_json::from_str(paths.as_deref().unwrap()).unwrap();
-            assert_eq!(p["origin"], serde_json::json!("system"));
+            assert!(p.is_array(), "刷新应写裸数组: {p}");
             assert_eq!(
-                p["routes"][0]["link_seqs"],
+                p[0]["link_seqs"],
                 serde_json::json!([0, 1]),
                 "过期凭证应刷新为实际路径"
             );
@@ -1121,15 +1174,15 @@ mod tests {
             // 周期 = 门控周期（单实例），frame 512 → tx = (512+58)*8 = 4560ns。
             sqlx::query("INSERT INTO flow_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener) VALUES ('s1', 0, 'ST', 7, 1000, 512, 100, '1', '2')")
                 .execute(&pool).await.unwrap();
-            // es1（talker mid 1）eth0 ST 窗 [0,4.56us)；sw1（mid 0）eth1 ST 窗
+            // es01（talker mid 1）eth0 ST 窗 [0,4.56us)；sw01（mid 0）eth1 ST 窗
             // [10us,14.56us)（窗长 = tx 指纹）；talker 偏移 0（裸秒 dump 形态）。
-            let sca = "par N.es1.eth[0].macLayer.queue.transmissionGate[7] initiallyOpen true\n\
-                par N.es1.eth[0].macLayer.queue.transmissionGate[7] offset 0s\n\
-                par N.es1.eth[0].macLayer.queue.transmissionGate[7] durations \"[4.56us, 995.44us]\"\n\
-                par N.sw1.eth[1].macLayer.queue.transmissionGate[7] initiallyOpen false\n\
-                par N.sw1.eth[1].macLayer.queue.transmissionGate[7] offset 0s\n\
-                par N.sw1.eth[1].macLayer.queue.transmissionGate[7] durations \"[10us, 4.56us, 985.44us]\"\n\
-                par N.es1.app[0].source initialProductionOffset 0\n";
+            let sca = "par N.es01.eth[0].macLayer.queue.transmissionGate[7] initiallyOpen true\n\
+                par N.es01.eth[0].macLayer.queue.transmissionGate[7] offset 0s\n\
+                par N.es01.eth[0].macLayer.queue.transmissionGate[7] durations \"[4.56us, 995.44us]\"\n\
+                par N.sw01.eth[1].macLayer.queue.transmissionGate[7] initiallyOpen false\n\
+                par N.sw01.eth[1].macLayer.queue.transmissionGate[7] offset 0s\n\
+                par N.sw01.eth[1].macLayer.queue.transmissionGate[7] durations \"[10us, 4.56us, 985.44us]\"\n\
+                par N.es01.app[0].source initialProductionOffset 0\n";
             let client = MockPlanClient {
                 result: Ok(HttpPlanResult {
                     exit_code: 0,
@@ -1148,14 +1201,14 @@ mod tests {
                     .find(|w| w.node == node && w.eth_n == eth && w.entry_idx == idx)
                     .unwrap()
             };
-            // sw1(mid 0) eth1：三窗，开窗（idx1）带 derived 引用。
+            // sw01(mid 0) eth1：三窗，开窗（idx1）带 derived 引用。
             let w = find("0", 1, 1);
             assert_eq!(w.gate_states, 0x80);
             assert_eq!(
                 w.flow_refs.as_deref(),
                 Some(r#"[{"seq":0,"source":"derived"}]"#)
             );
-            // es1(mid 1) eth0：首窗（首跳锚定）带 derived 引用。
+            // es01(mid 1) eth0：首窗（首跳锚定）带 derived 引用。
             let w = find("1", 0, 0);
             assert_eq!(w.gate_states, 0x80);
             assert_eq!(
@@ -1208,7 +1261,8 @@ mod tests {
                     exit_code: 0,
                     output_tail: "ok".into(),
                     sca_gcl: Some(
-                        "par N.sw1.eth[0].macLayer.queue.transmissionGate[0] durations []\n".into(),
+                        "par N.sw01.eth[0].macLayer.queue.transmissionGate[0] durations []\n"
+                            .into(),
                     ),
                     solver: Some("Z3".into()),
                 }),
@@ -1320,7 +1374,7 @@ mod tests {
                 if class == "BE" {
                     let p: serde_json::Value =
                         serde_json::from_str(paths.as_deref().expect("BE 应沉淀凭证")).unwrap();
-                    assert_eq!(p["origin"], serde_json::json!("system"));
+                    assert!(p.is_array(), "应为裸数组: {p}");
                 } else {
                     assert!(paths.is_none(), "RC 不在 BE 回写循环：{paths:?}");
                 }
@@ -1335,7 +1389,7 @@ mod tests {
         tauri::async_runtime::block_on(async {
             let pool = fresh_pool().await;
             let dir = tempfile::tempdir().unwrap();
-            // es1(0) =A= sw1(2) =A= es2(1)；es1 =B= sw2(3) =B= es2。GM=0。
+            // es01(0) =A= sw01(2) =A= es02(1)；es01 =B= sw02(3) =B= es02。GM=0。
             for (mid, ty, ord) in [
                 ("0", "endSystem", 0),
                 ("1", "endSystem", 1),
@@ -1364,7 +1418,7 @@ mod tests {
                 sqlx::query("INSERT INTO timesync_nodes (session_id, mid, master_port, slave_port) VALUES ('s1', ?, '[]', '[]')")
                     .bind(mid).execute(&pool).await.unwrap();
             }
-            // ST 流 es1(0) → es2(1)（add_stream helper 固定 1→2，与此拓扑不符，直插）。
+            // ST 流 es01(0) → es02(1)（add_stream helper 固定 1→2，与此拓扑不符，直插）。
             sqlx::query("INSERT INTO flow_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener) VALUES ('s1', 0, 'ST', 7, 500, 512, 10000, '0', '1')")
                 .execute(&pool).await.unwrap();
             let client = CapturingPlanClient {
@@ -1377,8 +1431,8 @@ mod tests {
             assert_eq!(r.status, "ok", "双平面不该 AMBIGUOUS_ROUTE：{r:?}");
             let ini = client.ini.lock().unwrap().clone().unwrap();
             assert!(
-                ini.contains(r#"pathFragments: [["es1", "sw1", "es2"]]"#),
-                "应锁平面 A（es1→sw1→es2）：{ini}"
+                ini.contains(r#"pathFragments: [["es01", "sw01", "es02"]]"#),
+                "应锁平面 A（es01→sw01→es02）：{ini}"
             );
             // 唯一一条 pathFragments（上面已断言其为 A 路）→ 没有第二条走平面 B 的路径。
             assert_eq!(ini.matches("pathFragments").count(), 1, "{ini}");

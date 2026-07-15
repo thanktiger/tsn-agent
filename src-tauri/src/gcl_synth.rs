@@ -372,12 +372,12 @@ mod tests {
 
     /// 真机 dump 形态的一段 .sca（含被调度门 + 未调度门）。
     const SAMPLE_SCA: &str = r#"
-par TsnAgentFlowTasNetwork.sw1.eth[0].macLayer.queue.transmissionGate[0] initiallyOpen false
-par TsnAgentFlowTasNetwork.sw1.eth[0].macLayer.queue.transmissionGate[0] offset 0s
-par TsnAgentFlowTasNetwork.sw1.eth[0].macLayer.queue.transmissionGate[0] durations []
-par TsnAgentFlowTasNetwork.sw1.eth[1].macLayer.queue.transmissionGate[1] initiallyOpen true
-par TsnAgentFlowTasNetwork.sw1.eth[1].macLayer.queue.transmissionGate[1] offset 2.947e-05s
-par TsnAgentFlowTasNetwork.sw1.eth[1].macLayer.queue.transmissionGate[1] durations "[205.36us, 84.64us]"
+par TsnAgentFlowTasNetwork.sw01.eth[0].macLayer.queue.transmissionGate[0] initiallyOpen false
+par TsnAgentFlowTasNetwork.sw01.eth[0].macLayer.queue.transmissionGate[0] offset 0s
+par TsnAgentFlowTasNetwork.sw01.eth[0].macLayer.queue.transmissionGate[0] durations []
+par TsnAgentFlowTasNetwork.sw01.eth[1].macLayer.queue.transmissionGate[1] initiallyOpen true
+par TsnAgentFlowTasNetwork.sw01.eth[1].macLayer.queue.transmissionGate[1] offset 2.947e-05s
+par TsnAgentFlowTasNetwork.sw01.eth[1].macLayer.queue.transmissionGate[1] durations "[205.36us, 84.64us]"
 "#;
 
     #[test]
@@ -391,19 +391,19 @@ par TsnAgentFlowTasNetwork.sw1.eth[1].macLayer.queue.transmissionGate[1] duratio
 
     #[test]
     fn parse_module_extracts_node_eth_gate() {
-        let m = "TsnAgentFlowTasNetwork.sw1.eth[2].macLayer.queue.transmissionGate[3]";
-        assert_eq!(parse_module(m), Some(("sw1".to_string(), 2, 3)));
+        let m = "TsnAgentFlowTasNetwork.sw01.eth[2].macLayer.queue.transmissionGate[3]";
+        assert_eq!(parse_module(m), Some(("sw01".to_string(), 2, 3)));
     }
 
     #[test]
     fn parse_gcl_skips_unscheduled_and_maps_ned_to_mid() {
         let mut ned_to_mid = BTreeMap::new();
-        ned_to_mid.insert("sw1".to_string(), "0".to_string());
+        ned_to_mid.insert("sw01".to_string(), "0".to_string());
         let gcl = parse_gcl_from_sca(SAMPLE_SCA, &ned_to_mid, "Z3");
         // 只 1 个被调度门（eth[1] gate[1]）；eth[0] gate[0] durations [] 跳过。
         assert_eq!(gcl.len(), 1);
         let g = &gcl[0];
-        assert_eq!(g.node, "0"); // ned sw1 → mid 0
+        assert_eq!(g.node, "0"); // ned sw01 → mid 0
         assert_eq!(g.eth_n, 1);
         assert_eq!(g.gate_index, 1);
         assert!(g.initially_open);
@@ -416,7 +416,7 @@ par TsnAgentFlowTasNetwork.sw1.eth[1].macLayer.queue.transmissionGate[1] duratio
     #[test]
     fn parse_all_gates_keeps_unscheduled_constant_gates() {
         let mut ned_to_mid = BTreeMap::new();
-        ned_to_mid.insert("sw1".to_string(), "0".to_string());
+        ned_to_mid.insert("sw01".to_string(), "0".to_string());
         let all = parse_all_gates_from_sca(SAMPLE_SCA, &ned_to_mid, "Z3");
         assert_eq!(all.len(), 2);
         let constant = all
@@ -434,14 +434,14 @@ par TsnAgentFlowTasNetwork.sw1.eth[1].macLayer.queue.transmissionGate[1] duratio
     #[test]
     fn parse_production_offsets_bare_seconds_and_units() {
         let sca = "par N.es0.app[0].source initialProductionOffset 4.2e-05\n\
-                   par N.es1.app[2].source initialProductionOffset 10us\n\
-                   par N.sw1.eth[1].macLayer.queue.transmissionGate[7] offset 0s\n";
+                   par N.es01.app[2].source initialProductionOffset 10us\n\
+                   par N.sw01.eth[1].macLayer.queue.transmissionGate[7] offset 0s\n";
         let offs = parse_production_offsets_from_sca(sca);
         assert_eq!(
             offs,
             vec![
                 ("es0".to_string(), 0, 42_000),
-                ("es1".to_string(), 2, 10_000)
+                ("es01".to_string(), 2, 10_000)
             ]
         );
     }

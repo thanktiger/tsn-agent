@@ -207,7 +207,7 @@ pub struct ListFlowStreamRow {
     pub dst_l4_port: Option<i64>,
     pub l4_protocol: Option<String>,
     pub node_path: Vec<String>,
-    /// paths 列原文（KTD12 统一 JSON 形状；NULL=系统推导）。弹窗解析 origin=user 的
+    /// paths 列原文（KTD12 裸数组凭证；NULL=未沉淀）。弹窗解析凭证的
     /// link_seqs 匹配候选选中项；RC 只读展示双路径。
     pub paths: Option<String>,
 }
@@ -435,7 +435,7 @@ pub async fn get_flow_route_map_inner(
                 listener: &listener,
                 plane,
             };
-            // KTD11 统一出口（显式指定优先）；路由失败/PATH_STALE → 跳过高亮，不 panic
+            // KTD11 统一出口（凭证复验直用、失效静默重推导）；路由失败 → 跳过高亮，不 panic
             // （详情弹窗与规划路径各自响亮报错，画布高亮只做尽力展示）。
             if let Ok(route) = crate::flow_route::resolve_flow_path(
                 r.get::<Option<String>, _>("paths").as_deref(),
@@ -681,7 +681,9 @@ pub async fn update_flow_stream_inner(
             )
         };
         match route {
-            Ok(r) => Some(Some(crate::flow_route::explicit_paths_json(&r))),
+            Ok(r) => Some(Some(crate::flow_route::paths_json(std::slice::from_ref(
+                &r,
+            )))),
             Err(errors) => {
                 let msgs: Vec<String> = errors.iter().map(|e| e.message_zh.clone()).collect();
                 return Err(format!("路径校验不通过：{}", msgs.join("；")));

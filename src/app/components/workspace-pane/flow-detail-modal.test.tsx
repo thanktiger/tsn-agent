@@ -211,11 +211,7 @@ describe("FlowDetailModal", () => {
   it("R16：已有显式路径（匹配候选）→ 初始选中该候选；选回系统自动保存 → clearPath", async () => {
     const user = userEvent.setup();
     vi.mocked(invokeUpdateFlowStream).mockResolvedValueOnce({ planningFieldsChanged: true });
-    const paths = JSON.stringify({
-      version: 1,
-      origin: "user",
-      routes: [{ node_path: ["1", "3", "2"], link_seqs: [2, 3] }],
-    });
+    const paths = JSON.stringify([{ node_path: ["1", "3", "2"], link_seqs: [2, 3] }]);
     render(
       <FlowDetailModal
         stream={makeStream({ paths })}
@@ -257,14 +253,10 @@ describe("FlowDetailModal", () => {
 
   it("R16：RC 流路径区只读展示双冗余路径 + 不可手选说明，不拉候选", async () => {
     const getPathCandidates = vi.fn(async () => twoCandidates());
-    const paths = JSON.stringify({
-      version: 1,
-      origin: "system",
-      routes: [
-        { node_path: ["0", "2", "1"], link_seqs: [0, 1] },
-        { node_path: ["0", "3", "1"], link_seqs: [2, 3] },
-      ],
-    });
+    const paths = JSON.stringify([
+      { node_path: ["0", "2", "1"], link_seqs: [0, 1] },
+      { node_path: ["0", "3", "1"], link_seqs: [2, 3] },
+    ]);
     render(
       <FlowDetailModal
         stream={makeStream({ class: "RC", redundant: true, paths })}

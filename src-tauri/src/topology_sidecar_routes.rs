@@ -369,8 +369,8 @@ async fn persist_initialized_topology(
     }
 
     // KTD14 拓扑写手：initialize 全量重建会重发 link_seq，既有门控规划随之过期
-    // ——同事务置 flow_gcl_plan.stale（无行 no-op）。指定路径不级联清（KTD11 惰性
-    // PATH_STALE 防线），只置过期标记。
+    // ——同事务置 flow_gcl_plan.stale（无行 no-op）。指定路径不级联清（KTD11 消费期
+    // 凭证复验、失效静默重推导的惰性防线），只置过期标记。
     crate::flow_plan_command::mark_gcl_stale(&mut *conn, session_id)
         .await
         .map_err(|e| format!("mark gcl stale failed: {e}"))?;

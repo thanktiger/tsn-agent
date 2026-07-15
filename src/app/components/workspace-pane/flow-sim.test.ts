@@ -529,42 +529,42 @@ describe("buildGclOverview（R15 八项指标）", () => {
 });
 
 describe("parseExplicitPathLinkSeqs / parseRedundantNodePaths（R16 paths 解析）", () => {
-  it("origin=user 单条路由 → link_seqs；system/垃圾/null → null", () => {
-    const user = JSON.stringify({
+  it("裸数组凭证首条路由 → link_seqs；垃圾/空/null → null", () => {
+    const bare = JSON.stringify([{ node_path: ["1", "0", "2"], link_seqs: [0, 1] }]);
+    expect(parseExplicitPathLinkSeqs(bare)).toEqual([0, 1]);
+    expect(parseExplicitPathLinkSeqs("not-json")).toBeNull();
+    expect(parseExplicitPathLinkSeqs(JSON.stringify({ origin: "user" }))).toBeNull();
+    expect(parseExplicitPathLinkSeqs("[]")).toBeNull();
+    expect(parseExplicitPathLinkSeqs(null)).toBeNull();
+  });
+
+  it("读兼容旧形状（同 Rust 口径）：{routes} 包装与 RC {a,b} 都解析", () => {
+    const wrapped = JSON.stringify({
       version: 1,
       origin: "user",
       routes: [{ node_path: ["1", "0", "2"], link_seqs: [0, 1] }],
     });
-    expect(parseExplicitPathLinkSeqs(user)).toEqual([0, 1]);
-    const system = JSON.stringify({
-      version: 1,
-      origin: "system",
-      routes: [{ node_path: ["1", "0", "2"], link_seqs: [0, 1] }],
+    expect(parseExplicitPathLinkSeqs(wrapped)).toEqual([0, 1]);
+    const legacyAb = JSON.stringify({
+      a: { node_path: ["0", "2", "1"], link_seqs: [0, 1] },
+      b: { node_path: ["0", "3", "1"], link_seqs: [2, 3] },
     });
-    expect(parseExplicitPathLinkSeqs(system)).toBeNull();
-    expect(parseExplicitPathLinkSeqs("not-json")).toBeNull();
-    expect(parseExplicitPathLinkSeqs(JSON.stringify({ origin: "user" }))).toBeNull();
-    expect(parseExplicitPathLinkSeqs(null)).toBeNull();
+    expect(parseRedundantNodePaths(legacyAb)).toEqual([
+      ["0", "2", "1"],
+      ["0", "3", "1"],
+    ]);
   });
 
   it("RC 双路由 → [A 节点序列, B 节点序列]；单条/形状不符 → null", () => {
-    const rc = JSON.stringify({
-      version: 1,
-      origin: "system",
-      routes: [
-        { node_path: ["0", "2", "1"], link_seqs: [0, 1] },
-        { node_path: ["0", "3", "1"], link_seqs: [2, 3] },
-      ],
-    });
+    const rc = JSON.stringify([
+      { node_path: ["0", "2", "1"], link_seqs: [0, 1] },
+      { node_path: ["0", "3", "1"], link_seqs: [2, 3] },
+    ]);
     expect(parseRedundantNodePaths(rc)).toEqual([
       ["0", "2", "1"],
       ["0", "3", "1"],
     ]);
-    const single = JSON.stringify({
-      version: 1,
-      origin: "user",
-      routes: [{ node_path: ["0", "2", "1"], link_seqs: [0, 1] }],
-    });
+    const single = JSON.stringify([{ node_path: ["0", "2", "1"], link_seqs: [0, 1] }]);
     expect(parseRedundantNodePaths(single)).toBeNull();
     expect(parseRedundantNodePaths(null)).toBeNull();
   });
