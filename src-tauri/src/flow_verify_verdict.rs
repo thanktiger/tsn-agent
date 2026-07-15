@@ -1,5 +1,18 @@
 //! `verify_tas` 判决簇：CSV-R 解析、逐流分级判决、gPTP 收敛诊断
 //! （自 `flow_verify_command` 拆出；消费方：`flow_verify_command`）。
+//!
+//! 向量名（U1 spike 钉死）：时延 `packetLifeTime:vector`、抖动 `packetJitter:vector`（均落
+//! `.vec`、现 scavetool 路径可取）。**丢包判据（U10 收口 plan Open Question）**：INET
+//! ActivePacketSource 无「产 N 个就停」参数、按 productionInterval 持续产到 sim 结束，故
+//! sim 时长按 `count×period` 推导（`flow_sim_time_s`），「实发」由 `floor(sim/period)+1`
+//! 确定性反推（`flow_expected_sent`，无需服务回传发送数）。判 `实发 - 收 ≤ 在途容差`
+//! （容差=⌈实测max时延/period⌉+1）——自由产包源 sim 结束时总有在途尾巴，故不能要求精确相等。
+//!
+//! **U7 分级判据（R11–R13）+ gPTP 收敛诊断行（R15）**：classify 按类分叉——ST 三项仅健康轮判
+//! （FAIL reason 附「重新规划」提示，KTD4）；RC 每轮判去重后收=实发±在途容差（容差逐轮自计），
+//! 收>实发即重复帧 FAIL，故障轮只判被断链覆盖的流；BE 仅健康轮判 received>0，送达率随行报告。
+//! 故障轮 ST/BE 与未覆盖 RC 只报告不判（judged=false + note）。每轮 CSV 另过
+//! `parse_timechanged_csv` 生成 gPTP 收敛诊断（只报告不参与任何 verdict）。
 
 use std::collections::{BTreeMap, HashSet};
 

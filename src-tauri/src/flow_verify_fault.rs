@@ -1,5 +1,9 @@
 //! `verify_tas` 断链故障计划簇：断点选择与守卫小函数
 //! （自 `flow_verify_command` 拆出；消费方：`flow_verify_command`）。
+//!
+//! 断点=各平面上覆盖最多 RC 流的**有向**链路占用（KTD8，平手优先避开 ST 路由、再取最小
+//! link_seq；时钟树边/ST 路由重叠响亮标注不改选，KTD2）；`t_break = max(0.4×最小 RC 活跃窗,
+//! 200ms 收敛下限)`，断后被覆盖流应发帧数 <20 整体响亮报错（KTD7）。
 
 use std::collections::{BTreeMap, HashSet};
 
