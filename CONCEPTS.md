@@ -38,6 +38,9 @@
 ### 流量类别（Stream Class：ST / RC / BE）
 一张流表用 `class` 判别器区分的三类流，PCP 固定映射 ST=7、RC=6、BE=0。ST 是 Z3 门控调度的确定性流（零丢包、抖动<1us、时延有界）；RC 是 802.1CB FRER 冗余流——源端帧复制到双平面 A/B 两条不相交路径、目的端帧消除，通过标准是重复帧正确消除与单路故障零丢包，不是限速流（TTE 的 rate-constrained 语义在本产品不适用）；BE 是尽力而为流，只判连通。
 
+### 求解器来源（Solver Provider）
+门控规划结果的产出方维度，进 `flow_gcl_plan` 主键与 raw 文件名。现役唯一值 `inet-z3`（INET 内置 Z3 配置器）；`open-planner` 为预留值，对应后续对接的外部调度规划 API（castup），接入前在求解器选择 UI 中置灰标「预留」。同一工程按 provider 各存一份规划结果。
+
 ### 互补关窗（Complementary Gating）
 pin 仿真时从 ST 门控表按端口推导 BE/RC 门补集窗的混流保护机制：ST 开窗期间关低优先级门、其余时间开，配合 INET 隐式保护带防止低优先级帧占端口跨入 ST 窗。是确定性后处理，不进 Z3 约束面。
 

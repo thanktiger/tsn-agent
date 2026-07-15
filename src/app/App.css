@@ -2488,6 +2488,35 @@ textarea:focus-visible {
   margin-bottom: 12px;
 }
 
+/* U1（plan 2026-07-15-001）：门控求解器选择区（仅初始态；open-planner 置灰预留）。
+   flex 不用 grid（WebKit grid+overflow 行塌陷坑）。 */
+.solver-picker {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 10px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.solver-picker__label {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.solver-picker__option {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+}
+
+.solver-picker__option--reserved {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 .sim-override-toggle {
   border: 0;
   padding: 4px 0;
@@ -2688,6 +2717,18 @@ textarea:focus-visible {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  /* boss 真机反馈：判定条与命令栏按钮之间要有间距。 */
+  margin-top: 10px;
+}
+
+/* 门控详情=重要查看入口，主题色描边轻强调（boss 定）。 */
+.btn.btn-accent {
+  border-color: rgba(250, 84, 28, 0.45);
+  color: var(--accent);
+}
+
+.btn.btn-accent:hover:not(:disabled) {
+  border-color: var(--accent);
 }
 
 /* sim-overall 判定条内的求解器出处徽章（R8/KTD7 诚实边界）。 */

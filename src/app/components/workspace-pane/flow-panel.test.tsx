@@ -960,3 +960,150 @@ describe("FlowPanel", () => {
     expect(onSelectFlowSeq).toHaveBeenCalledWith(3);
   });
 });
+
+// plan 2026-07-15-001：求解器选择区（U1）+ 重新规划两步流程（U2）+ stale 禁验证（U3）。
+describe("FlowPanel 求解器选择 + 两步重新规划 + stale 禁验证", () => {
+  it("U1/AE2：无规划态渲染选择区——inet-z3 选中、open-planner 置灰标预留", async () => {
+    const { unmount } = render(<FlowPanel {...baseProps()} />);
+    await screen.findByRole("button", { name: "规划门控表" });
+    const group = screen.getByRole("group", { name: "求解器选择" });
+    const inetZ3 = within(group).getByRole("radio", { name: "inet-z3" });
+    expect((inetZ3 as HTMLInputElement).checked).toBe(true);
+    expect(inetZ3.hasAttribute("disabled")).toBe(false);
+    const openPlanner = within(group).getByRole("radio", { name: /open-planner（预留）/ });
+    expect(openPlanner.hasAttribute("disabled")).toBe(true);
+    // 点击置灰项无效果：选中值仍为 inet-z3。
+    fireEvent.click(openPlanner);
+    expect((inetZ3 as HTMLInputElement).checked).toBe(true);
+    unmount();
+    // 选择区存在不影响既有 CTA 行为。
+    const props = baseProps();
+    render(<FlowPanel {...props} />);
+    fireEvent.click(await screen.findByRole("button", { name: "规划门控表" }));
+    await waitFor(() => expect(props.planTas).toHaveBeenCalledWith("s1"));
+  });
+
+  it("U1：已有规划态不渲染选择区（结果态判定条已有求解器徽章）", async () => {
+    const getGclDetail = vi.fn(async () => gclDetailPlanned());
+    render(<FlowPanel {...baseProps({ getGclDetail })} />);
+    await screen.findByText(/门控表 · 5 条目/);
+    expect(screen.queryByRole("group", { name: "求解器选择" })).toBeNull();
+  });
+
+  it("U2/AE3：点「重新规划」回初始视图不重跑——planTas 未调、头行/八卡/门控详情消失", async () => {
+    const planTas = vi.fn(async () => planOk());
+    const getGclDetail = vi.fn(async () => gclDetailPlanned());
+    render(<FlowPanel {...baseProps({ planTas, getGclDetail })} />);
+    // 已规划态：头行 + 八卡 + 门控详情按钮在。
+    await screen.findByText(/门控表 · 5 条目/);
+    expect(screen.getByRole("button", { name: "门控详情" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "重新规划" }));
+    // 不重跑，回初始视图（CTA + 选择区）。
+    expect(planTas).not.toHaveBeenCalled();
+    expect(await screen.findByRole("button", { name: "规划门控表" })).toBeTruthy();
+    expect(screen.getByRole("group", { name: "求解器选择" })).toBeTruthy();
+    // 判定头行、概览八卡（gcl-overview）与「门控详情」「重新规划」按钮均不渲染。
+    expect(screen.queryByText(/门控表 · 5 条目/)).toBeNull();
+    expect(screen.queryByText("调度状态")).toBeNull();
+    expect(screen.queryByRole("button", { name: "门控详情" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "重新规划" })).toBeNull();
+  });
+
+  it("U2/AE3：Armed 态点「规划门控表」才执行——planTas 调一次、成功后回结果视图", async () => {
+    const planTas = vi.fn(async () => planOk());
+    const getGclDetail = vi.fn(async () => gclDetailPlanned());
+    // 复刻 App 级 planState 受控（done 后经 effect 刷明细回结果视图）。
+    function Harness() {
+      const [planState, setPlanState] = useState<PlanUiState>({ status: "idle" });
+      return (
+        <FlowPanel
+          {...baseProps({ planTas, getGclDetail })}
+          planState={planState}
+          onPlanStateChange={setPlanState}
+        />
+      );
+    }
+    render(<Harness />);
+    await screen.findByText(/门控表 · 5 条目/);
+    fireEvent.click(screen.getByRole("button", { name: "重新规划" }));
+    fireEvent.click(await screen.findByRole("button", { name: "规划门控表" }));
+    await waitFor(() => expect(planTas).toHaveBeenCalledTimes(1));
+    // 规划成功 → armed 清除，回结果视图（planState done 头行）。
+    expect(await screen.findByText(/已综合 4 个门控条目/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "规划门控表" })).toBeNull();
+  });
+
+  it("U2/KTD2：切工程后 armed 失效——回落到常规推导（结果视图）", async () => {
+    const getGclDetail = vi.fn(async () => gclDetailPlanned());
+    const { rerender } = render(<FlowPanel {...baseProps({ getGclDetail, sessionId: "s1" })} />);
+    await screen.findByText(/门控表 · 5 条目/);
+    fireEvent.click(screen.getByRole("button", { name: "重新规划" }));
+    await screen.findByRole("button", { name: "规划门控表" });
+    // 切到 s2（同实例 rerender，armed 快照挂 s1 → 立即失效）。
+    rerender(<FlowPanel {...baseProps({ getGclDetail, sessionId: "s2" })} />);
+    expect(await screen.findByText(/门控表 · 5 条目/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "规划门控表" })).toBeNull();
+  });
+
+  it("U3/AE4：stale=true → 验证按钮禁用 + title 提示；点击不触发 verifyTas", async () => {
+    const verifyTas = vi.fn(async () => verifyResult());
+    const getGclDetail = vi.fn(async () =>
+      gclDetailPlanned({
+        meta: { status: "ok", cycleNs: 1_000_000, algorithm: "Z3", stale: true },
+      }),
+    );
+    render(<FlowPanel {...baseProps({ activeFlowSubTab: "soft-sim", getGclDetail, verifyTas })} />);
+    const btn = screen.getByRole("button", { name: "软仿验证" });
+    await waitFor(() => expect(btn.hasAttribute("disabled")).toBe(true));
+    expect(btn.getAttribute("title")).toBe("流量参数已变更，请重新规划后再验证");
+    fireEvent.click(btn);
+    expect(verifyTas).not.toHaveBeenCalled();
+  });
+
+  it("U3：stale=false → 验证按钮可用（回归）；重新规划成功落表 stale 复位后恢复", async () => {
+    // 第一拍 stale=true，规划 done 后 refetch 返回 stale=false → 按钮恢复。
+    const getGclDetail = vi
+      .fn()
+      .mockResolvedValueOnce(
+        gclDetailPlanned({
+          meta: { status: "ok", cycleNs: 1_000_000, algorithm: "Z3", stale: true },
+        }),
+      )
+      .mockResolvedValue(gclDetailPlanned());
+    function Harness() {
+      const [planState, setPlanState] = useState<PlanUiState>({ status: "idle" });
+      return (
+        <FlowPanel
+          {...baseProps({ activeFlowSubTab: "soft-sim", getGclDetail })}
+          planState={planState}
+          onPlanStateChange={setPlanState}
+        />
+      );
+    }
+    const { rerender } = render(<Harness />);
+    const btn = screen.getByRole("button", { name: "软仿验证" });
+    await waitFor(() => expect(btn.hasAttribute("disabled")).toBe(true));
+    // 经 App 级 planState=done 触发 refetch（模拟重新规划成功）：这里直接用 done 态 rerender
+    // 等价驱动 done effect。
+    rerender(
+      <FlowPanel
+        {...baseProps({ activeFlowSubTab: "soft-sim", getGclDetail })}
+        planState={{ status: "done", result: planOk() }}
+        onPlanStateChange={vi.fn()}
+      />,
+    );
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "软仿验证" }).hasAttribute("disabled")).toBe(false),
+    );
+  });
+
+  it("综合中不显示上一次结果：头行与概览八卡隐藏，仅进度行（boss 真机反馈）", async () => {
+    const getGclDetail = vi.fn(async () => gclDetailPlanned());
+    render(<FlowPanel {...baseProps({ getGclDetail, planState: { status: "running" } })} />);
+    expect(await screen.findByText(/正在跑 Z3 门控综合/)).toBeTruthy();
+    // 库里有旧规划（planned 夹具），但 running 态不画旧头行/旧八卡。
+    await waitFor(() => expect(getGclDetail).toHaveBeenCalled());
+    expect(screen.queryByText(/门控表 · 5 条目/)).toBeNull();
+    expect(screen.queryByText("调度状态")).toBeNull();
+  });
+});
