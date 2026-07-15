@@ -4,7 +4,6 @@ import { describe, expect, it, vi } from "vitest";
 
 import { FlowPanel, type FlowPanelProps } from "./flow-panel";
 import type {
-  FlowPlanDetail,
   GclDetail,
   GclWindowRow,
   ListFlowStreamRow,
@@ -126,46 +125,6 @@ function roundsResult(): VerifyTasResult {
   });
 }
 
-/** U2 门控明细夹具：默认未规划（entries=[] 且有 ST 流）。 */
-function planDetail(overrides: Partial<FlowPlanDetail> = {}): FlowPlanDetail {
-  return {
-    cycleNs: 1_000_000,
-    solver: "Z3",
-    stCount: 1,
-    rcCount: 0,
-    beCount: 0,
-    entries: [],
-    ...overrides,
-  };
-}
-
-/** 已规划夹具：两个端口各一条 ST 门条目（es2 开窗起点 0 在前、sw1 在后，阶梯错位）。 */
-function planDetailWithGcl(): FlowPlanDetail {
-  return planDetail({
-    beCount: 1,
-    entries: [
-      {
-        node: "0",
-        nodeName: "sw1",
-        ethN: 1,
-        gateIndex: 7,
-        initiallyOpen: false,
-        offsetNs: 0,
-        durationsNs: [472_390, 4_560, 523_050],
-      },
-      {
-        node: "2",
-        nodeName: "es2",
-        ethN: 0,
-        gateIndex: 7,
-        initiallyOpen: true,
-        offsetNs: 0,
-        durationsNs: [300_000, 700_000],
-      },
-    ],
-  });
-}
-
 /** U4 流集夹具：默认一条 ST 流。 */
 function makeFlowStream(overrides: Partial<ListFlowStreamRow> = {}): ListFlowStreamRow {
   return {
@@ -201,11 +160,23 @@ function streamsResult(streams: ListFlowStreamRow[] = []): ListFlowStreamsResult
   return { streams };
 }
 
-// ——— U9 门控明细（新表 get_gcl_detail）夹具 ———
+// ——— 门控明细（get_gcl_detail 单查询）夹具 ———
 
-/** 空明细（未规划/老工程）。 */
+/** 空明细（未规划/老工程）→ unplanned CTA。 */
 function gclDetailEmpty(): GclDetail {
   return { windows: [], meta: null, streams: [] };
+}
+
+/** 无 ST 流集（纯 BE）→ no-gating；传 windows 可构造「存量门控表与流集不符」矛盾态。 */
+function gclDetailNoGating(windows: GclWindowRow[] = []): GclDetail {
+  return {
+    windows,
+    meta: null,
+    streams: [
+      makeFlowStream({ streamSeq: 0, class: "BE", pcp: 0 }),
+      makeFlowStream({ streamSeq: 1, class: "BE", pcp: 0 }),
+    ],
+  };
 }
 
 function gclWindow(overrides: Partial<GclWindowRow> = {}): GclWindowRow {
@@ -297,7 +268,6 @@ function baseProps(overrides: Partial<FlowPanelProps> = {}): FlowPanelProps {
     onSelectFlowSeq: vi.fn(),
     planTas: vi.fn(async () => planOk()),
     verifyTas: vi.fn(async () => verifyResult()),
-    getFlowPlan: vi.fn(async () => planDetail()),
     listFlowStreams: vi.fn(async () => streamsResult()),
     getGclDetail: vi.fn(async () => gclDetailEmpty()),
     ...overrides,
@@ -574,23 +544,23 @@ describe("FlowPanel", () => {
   });
 
   it("U2②（boss 精简）：已规划 → 只渲染判定头行，时序图/明细表并入弹窗不再重复", async () => {
-    const getFlowPlan = vi.fn(async () => planDetailWithGcl());
-    render(<FlowPanel {...baseProps({ getFlowPlan })} />);
-    // 头行（凭数据合成：条目数 + 求解器徽章）。
-    expect(await screen.findByText(/门控表 · 2 条目/)).toBeTruthy();
+    const getGclDetail = vi.fn(async () => gclDetailPlanned());
+    render(<FlowPanel {...baseProps({ getGclDetail })} />);
+    // 头行（凭数据合成：窗口行数 + 求解器徽章）。
+    expect(await screen.findByText(/门控表 · 5 条目/)).toBeTruthy();
     // 面板不再渲染时序图与门控明细折叠表。
     expect(screen.queryByRole("img", { name: "门控时序图" })).toBeNull();
     expect(screen.queryByRole("button", { name: /门控明细/ })).toBeNull();
   });
 
   it("U2③：no_gating（流集无 ST 流）→ 蓝色信息条、不画空图", async () => {
-    const getFlowPlan = vi.fn(async () => planDetail({ stCount: 0, beCount: 2 }));
+    const getGclDetail = vi.fn(async () => gclDetailNoGating());
     // gate-plan 子 tab：蓝色信息条可见、无时序图。
-    const { rerender } = render(<FlowPanel {...baseProps({ getFlowPlan })} />);
+    const { rerender } = render(<FlowPanel {...baseProps({ getGclDetail })} />);
     expect(await screen.findByText(/流集无 ST 流，无需门控/)).toBeTruthy();
     expect(screen.queryByRole("img", { name: "门控时序图" })).toBeNull();
     // soft-sim 子 tab：无 ST 无需门控 → 验证按钮放行（查询三态非未规划）。
-    rerender(<FlowPanel {...baseProps({ activeFlowSubTab: "soft-sim", getFlowPlan })} />);
+    rerender(<FlowPanel {...baseProps({ activeFlowSubTab: "soft-sim", getGclDetail })} />);
     expect(screen.getByRole("button", { name: "软仿验证" }).hasAttribute("disabled")).toBe(false);
   });
 
@@ -602,59 +572,59 @@ describe("FlowPanel", () => {
     expect(screen.queryByRole("button", { name: "重新规划" })).toBeNull();
     unmount();
     // 已规划（库里有门控表）：gate-plan 子 tab：CTA 消失、重新规划进命令栏。
-    const getFlowPlan = vi.fn(async () => planDetailWithGcl());
-    const { rerender } = render(<FlowPanel {...baseProps({ getFlowPlan })} />);
+    const getGclDetail = vi.fn(async () => gclDetailPlanned());
+    const { rerender } = render(<FlowPanel {...baseProps({ getGclDetail })} />);
     expect(await screen.findByRole("button", { name: "重新规划" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "规划门控表" })).toBeNull();
-    // 切会话回来凭数据恢复展示（KTD1）：头行合成条目数 + 求解器徽章。
-    expect(screen.getByText(/门控表 · 2 条目/)).toBeTruthy();
+    // 切会话回来凭数据恢复展示（KTD1）：头行合成窗口行数 + 求解器徽章。
+    expect(screen.getByText(/门控表 · 5 条目/)).toBeTruthy();
     expect(screen.getByText(/Z3·带可调度性保证/)).toBeTruthy();
     // soft-sim 子 tab：验证放行（planState 仍 idle 但库里有门控表）。
-    rerender(<FlowPanel {...baseProps({ activeFlowSubTab: "soft-sim", getFlowPlan })} />);
+    rerender(<FlowPanel {...baseProps({ activeFlowSubTab: "soft-sim", getGclDetail })} />);
     expect(screen.getByRole("button", { name: "软仿验证" }).hasAttribute("disabled")).toBe(false);
   });
 
   it("U2/item5：planState→done 经 effect 刷新明细（非 handlePlan 内联，切 tab 重挂后完成也刷新）", async () => {
-    const getFlowPlan = vi
+    const getGclDetail = vi
       .fn()
-      .mockResolvedValueOnce(planDetail()) // 挂载（模拟切回 tab、命令仍在跑）：未规划、无图。
-      .mockResolvedValue(planDetailWithGcl()); // done 刷新：已规划、出图。
+      .mockResolvedValueOnce(gclDetailEmpty()) // 挂载（模拟切回 tab、命令仍在跑）：未规划、无图。
+      .mockResolvedValue(gclDetailPlanned()); // done 刷新：已规划、出图。
     // 以 running 挂载、从不点击规划按钮——刷新只可能来自 done effect。
     const { rerender } = render(
-      <FlowPanel {...baseProps({ getFlowPlan, planState: { status: "running" } })} />,
+      <FlowPanel {...baseProps({ getGclDetail, planState: { status: "running" } })} />,
     );
-    await waitFor(() => expect(getFlowPlan).toHaveBeenCalledTimes(1));
-    expect(screen.queryByText(/门控表 · 2 条目/)).toBeNull();
+    await waitFor(() => expect(getGclDetail).toHaveBeenCalledTimes(1));
+    expect(screen.queryByText(/门控表 · 5 条目/)).toBeNull();
     rerender(
       <FlowPanel
-        {...baseProps({ getFlowPlan, planState: { status: "done", result: planOk() } })}
+        {...baseProps({ getGclDetail, planState: { status: "done", result: planOk() } })}
       />,
     );
     // done → effect 重拉明细 → 重新规划按钮进命令栏（明细已刷新的可见信号）。
     expect(await screen.findByRole("button", { name: "重新规划" })).toBeTruthy();
-    expect(getFlowPlan).toHaveBeenCalledTimes(2);
+    expect(getGclDetail).toHaveBeenCalledTimes(2);
   });
 
   it("item6①：挂载取数失败 → CTA 仍渲染（回退未规划）、不抛未处理拒绝", async () => {
-    const getFlowPlan = vi.fn(async () => {
+    const getGclDetail = vi.fn(async () => {
       throw new Error("db down");
     });
-    render(<FlowPanel {...baseProps({ getFlowPlan })} />);
+    render(<FlowPanel {...baseProps({ getGclDetail })} />);
     expect(await screen.findByRole("button", { name: "规划门控表" })).toBeTruthy();
   });
 
   it("item6②：plan 成功后明细刷新失败 → planState 仍 done、显不可用态不画旧图", async () => {
-    const getFlowPlan = vi
+    const getGclDetail = vi
       .fn()
-      .mockResolvedValueOnce(planDetail()) // 挂载：未规划。
+      .mockResolvedValueOnce(gclDetailEmpty()) // 挂载：未规划。
       .mockRejectedValue(new Error("db down")); // done 刷新：失败。
     const { rerender } = render(
-      <FlowPanel {...baseProps({ getFlowPlan, planState: { status: "idle" } })} />,
+      <FlowPanel {...baseProps({ getGclDetail, planState: { status: "idle" } })} />,
     );
     await screen.findByRole("button", { name: "规划门控表" });
     rerender(
       <FlowPanel
-        {...baseProps({ getFlowPlan, planState: { status: "done", result: planOk() } })}
+        {...baseProps({ getGclDetail, planState: { status: "done", result: planOk() } })}
       />,
     );
     // 明细读取失败：出显式「不可用」提示、不画旧/空图；planState 成功判定不被改写成 error。
@@ -664,37 +634,35 @@ describe("FlowPanel", () => {
   });
 
   it("item7：挂载取数未回（loading）时不渲染 CTA（防已规划会话 CTA 闪现被误点）", () => {
-    // getFlowPlan 永不 resolve → planQuery 恒 loading。
-    const getFlowPlan = vi.fn(() => new Promise<FlowPlanDetail>(() => {}));
-    render(<FlowPanel {...baseProps({ getFlowPlan })} />);
+    // getGclDetail 永不 resolve → gclQuery 恒 loading。
+    const getGclDetail = vi.fn(() => new Promise<GclDetail>(() => {}));
+    render(<FlowPanel {...baseProps({ getGclDetail })} />);
     expect(screen.queryByRole("button", { name: "规划门控表" })).toBeNull();
     expect(screen.queryByRole("button", { name: "重新规划" })).toBeNull();
   });
 
   it("item8：flow domain 变更（onChange）→ 二次取数（照 timesync 消费先例）", async () => {
-    const getFlowPlan = vi.fn(async () => planDetail());
-    render(<FlowPanel {...baseProps({ getFlowPlan })} />);
-    await waitFor(() => expect(getFlowPlan).toHaveBeenCalledTimes(1));
+    const getGclDetail = vi.fn(async () => gclDetailEmpty());
+    render(<FlowPanel {...baseProps({ getGclDetail })} />);
+    await waitFor(() => expect(getGclDetail).toHaveBeenCalledTimes(1));
     await act(async () => {
       dbListenerOnChange.current?.();
     });
-    await waitFor(() => expect(getFlowPlan).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(getGclDetail).toHaveBeenCalledTimes(2));
   });
 
   it("item4：流集无 ST 但库里残留门控表（矛盾态）→ 蓝条『验证不会消费』、不画旧图", async () => {
-    const getFlowPlan = vi.fn(async () =>
-      planDetail({ stCount: 0, beCount: 2, entries: planDetailWithGcl().entries }),
-    );
-    render(<FlowPanel {...baseProps({ getFlowPlan })} />);
+    const getGclDetail = vi.fn(async () => gclDetailNoGating(gclDetailPlanned().windows));
+    render(<FlowPanel {...baseProps({ getGclDetail })} />);
     expect(await screen.findByText(/存量门控表与当前流集不符，验证不会消费/)).toBeTruthy();
     expect(screen.queryByRole("img", { name: "门控时序图" })).toBeNull();
   });
 
   it("item10.7：error 态 × 库里有旧门控表 → 不画旧图（态未定、避误导）", async () => {
-    const getFlowPlan = vi.fn(async () => planDetailWithGcl()); // 有 ST + 旧 GCL。
+    const getGclDetail = vi.fn(async () => gclDetailPlanned()); // 有 ST + 旧 GCL。
     render(
       <FlowPanel
-        {...baseProps({ getFlowPlan, planState: { status: "error", message: "boom" } })}
+        {...baseProps({ getGclDetail, planState: { status: "error", message: "boom" } })}
       />,
     );
     expect(await screen.findByText(/规划失败：boom/)).toBeTruthy();
@@ -708,10 +676,10 @@ describe("FlowPanel", () => {
       gateCount: 0,
       overall: "门控综合失败：约束不可行或配置器出错，未产出门控表。",
     });
-    const getFlowPlan = vi.fn(async () => planDetailWithGcl());
+    const getGclDetail = vi.fn(async () => gclDetailPlanned());
     render(
       <FlowPanel
-        {...baseProps({ getFlowPlan, planState: { status: "done", result: solverFailed } })}
+        {...baseProps({ getGclDetail, planState: { status: "done", result: solverFailed } })}
       />,
     );
     expect(await screen.findByText(/门控综合失败/)).toBeTruthy();
@@ -741,10 +709,10 @@ describe("FlowPanel", () => {
   // 与 App.tsx setFlowPlanStateGuarded 同形（会话绑定 + 当前会话 ref 比对）。
   function AppGuardHarness({
     planTas,
-    getFlowPlan,
+    getGclDetail,
   }: {
     planTas: (sessionId: string) => Promise<PlanResult>;
-    getFlowPlan: (sessionId: string) => Promise<FlowPlanDetail>;
+    getGclDetail: (sessionId: string) => Promise<GclDetail>;
   }) {
     const [sessionId, setSessionId] = useState("s1");
     const [planState, setPlanState] = useState<PlanUiState>({ status: "idle" });
@@ -780,7 +748,7 @@ describe("FlowPanel", () => {
           onSelectFlowSeq={() => {}}
           planTas={planTas}
           verifyTas={vi.fn(async () => verifyResult())}
-          getFlowPlan={getFlowPlan}
+          getGclDetail={getGclDetail}
         />
       </>
     );
@@ -789,8 +757,8 @@ describe("FlowPanel", () => {
   it("item9：生产 key 重挂 + App 会话守卫——旧会话迟到 done 不污染新会话", async () => {
     let resolvePlan: (r: PlanResult) => void = () => {};
     const planTas = vi.fn(() => new Promise<PlanResult>((res) => (resolvePlan = res)));
-    const getFlowPlan = vi.fn(async () => planDetail()); // 两会话都未规划 → CTA。
-    render(<AppGuardHarness planTas={planTas} getFlowPlan={getFlowPlan} />);
+    const getGclDetail = vi.fn(async () => gclDetailEmpty()); // 两会话都未规划 → CTA。
+    render(<AppGuardHarness planTas={planTas} getGclDetail={getGclDetail} />);
     // s1：点规划（handlePlan 捕获 s1 绑定的守卫 setter）。
     fireEvent.click(await screen.findByRole("button", { name: "规划门控表" }));
     await waitFor(() => expect(planTas).toHaveBeenCalledTimes(1));
@@ -808,16 +776,15 @@ describe("FlowPanel", () => {
   // ——— U5 门控详情弹窗入口 ———
 
   it("U5：无规划数据（no-gating）→ 门控详情按钮禁用", async () => {
-    const getFlowPlan = vi.fn(async () => planDetail({ stCount: 0, beCount: 2 }));
-    render(<FlowPanel {...baseProps({ getFlowPlan })} />);
+    const getGclDetail = vi.fn(async () => gclDetailNoGating());
+    render(<FlowPanel {...baseProps({ getGclDetail })} />);
     const btn = await screen.findByRole("button", { name: "门控详情" });
     expect(btn.hasAttribute("disabled")).toBe(true);
   });
 
   it("U5：有门控表 → 门控详情按钮可点，点击开弹窗", async () => {
-    const getFlowPlan = vi.fn(async () => planDetailWithGcl());
-    const getGclDetail = vi.fn(async () => ({ windows: [], meta: null, streams: [] }));
-    render(<FlowPanel {...baseProps({ getFlowPlan, getGclDetail })} />);
+    const getGclDetail = vi.fn(async () => gclDetailPlanned());
+    render(<FlowPanel {...baseProps({ getGclDetail })} />);
     const btn = await screen.findByRole("button", { name: "门控详情" });
     expect(btn.hasAttribute("disabled")).toBe(false);
     fireEvent.click(btn);
@@ -827,11 +794,10 @@ describe("FlowPanel", () => {
 
   // ——— U9 门控概览八卡（R15/AE7）———
 
-  /** 已规划态渲染基座：planQuery=planned（时序图口径）+ gclDetail 两流夹具。 */
+  /** 已规划态渲染基座：gclDetail 两流夹具（三态 + 概览同一查询）。 */
   function renderOverview(detail: GclDetail = gclDetailPlanned()) {
-    const getFlowPlan = vi.fn(async () => planDetailWithGcl());
     const getGclDetail = vi.fn(async () => detail);
-    return render(<FlowPanel {...baseProps({ getFlowPlan, getGclDetail })} />);
+    return render(<FlowPanel {...baseProps({ getGclDetail })} />);
   }
 
   /** 按标签定位概览卡（label 唯一）。 */
@@ -915,7 +881,7 @@ describe("FlowPanel", () => {
   });
 
   it("U9：未规划态不渲染概览卡片区（CTA 现状不变）", async () => {
-    render(<FlowPanel {...baseProps()} />); // getFlowPlan=未规划、getGclDetail=空。
+    render(<FlowPanel {...baseProps()} />); // getGclDetail=空（未规划）。
     expect(await screen.findByRole("button", { name: "规划门控表" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: /门控概览/ })).toBeNull();
     expect(screen.queryByText("调度状态")).toBeNull();

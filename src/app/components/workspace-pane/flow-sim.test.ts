@@ -1,11 +1,6 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  buildGateTimelineRows,
-  type FlowPlanEntry,
-  flowPlanPresentation,
-  gclDutyCycle,
-  gclOpenIntervals,
   gptpDiagLine,
   isZ3Guaranteed,
   nsToUs,
@@ -218,120 +213,13 @@ describe("flow-sim helpers", () => {
   });
 });
 
-// ---------- U2：门控表明细纯函数 ----------
-
-const CYCLE = 1_000_000; // 1ms 门周期（ns）。
-
-function entry(overrides: Partial<FlowPlanEntry> = {}): FlowPlanEntry {
-  return {
-    node: "0",
-    nodeName: "sw1",
-    ethN: 1,
-    gateIndex: 7,
-    initiallyOpen: true,
-    offsetNs: 0,
-    durationsNs: [],
-    ...overrides,
-  };
-}
-
-describe("gclOpenIntervals（U2①，与后端 gcl_open_intervals 同语义）", () => {
-  it("durations 空 → 恒 initiallyOpen（开=整周期，关=无窗）", () => {
-    expect(gclOpenIntervals(entry({ initiallyOpen: true }), CYCLE)).toEqual([[0, CYCLE]]);
-    expect(gclOpenIntervals(entry({ initiallyOpen: false }), CYCLE)).toEqual([]);
-  });
-
-  it("initiallyOpen 两态：首段状态由其决定、durations 交替翻转", () => {
-    // 开 300µs / 关 700µs。
-    expect(
-      gclOpenIntervals(entry({ initiallyOpen: true, durationsNs: [300_000, 700_000] }), CYCLE),
-    ).toEqual([[0, 300_000]]);
-    // 关 472.39µs / 开 4.56µs / 关 523.05µs（Z3 真机形态）。
-    expect(
-      gclOpenIntervals(
-        entry({ initiallyOpen: false, durationsNs: [472_390, 4_560, 523_050] }),
-        CYCLE,
-      ),
-    ).toEqual([[472_390, 476_950]]);
-  });
-
-  it("offset 回绕：state(t)=seq((t+offset) mod cycle)，序列坐标 p 落在 (p-offset) mod cycle", () => {
-    // 后端夹具同款：offset 29470ns，开窗序列坐标 [0, 205360) → 绝对时间从 cycle-29470 起回绕。
-    const g = entry({
-      initiallyOpen: true,
-      offsetNs: 29_470,
-      durationsNs: [205_360, 794_640],
-    });
-    expect(gclOpenIntervals(g, CYCLE)).toEqual([
-      [970_530, 1_000_000],
-      [0, 175_890],
-    ]);
-  });
-
-  it("跨周期边界拆段：开窗尾段 + 头段（手算 ns）", () => {
-    // offset 100µs：开窗 [0,300µs) 序列坐标 → 绝对 [900µs,1000µs)+[0,200µs)。
-    const g = entry({
-      initiallyOpen: true,
-      offsetNs: 100_000,
-      durationsNs: [300_000, 700_000],
-    });
-    expect(gclOpenIntervals(g, CYCLE)).toEqual([
-      [900_000, 1_000_000],
-      [0, 200_000],
-    ]);
-  });
-});
+// ---------- U2：门控表明细展示辅助 ----------
 
 describe("门控明细展示辅助（U2⑤）", () => {
-  it("gclDutyCycle：开窗总时长 / 门周期", () => {
-    expect(
-      gclDutyCycle(entry({ initiallyOpen: true, durationsNs: [300_000, 700_000] }), CYCLE),
-    ).toBe(0.3);
-    expect(
-      gclDutyCycle(entry({ initiallyOpen: false, durationsNs: [472_390, 4_560, 523_050] }), CYCLE),
-    ).toBeCloseTo(0.00456, 8);
-    expect(gclDutyCycle(entry({ initiallyOpen: false }), CYCLE)).toBe(0);
-  });
-
   it("nsToUs：两位小数 µs 显示", () => {
     expect(nsToUs(472_390)).toBe("472.39");
     expect(nsToUs(4_560)).toBe("4.56");
     expect(nsToUs(0)).toBe("0.00");
-  });
-
-  it("buildGateTimelineRows：按 (节点,端口) 分组、行按首个开窗起点升序", () => {
-    const rows = buildGateTimelineRows(
-      [
-        entry({
-          node: "0",
-          nodeName: "sw1",
-          ethN: 1,
-          initiallyOpen: false,
-          durationsNs: [472_390, 4_560, 523_050],
-        }),
-        entry({ node: "2", nodeName: "es2", ethN: 0, durationsNs: [300_000, 700_000] }),
-      ],
-      CYCLE,
-    );
-    expect(rows.map((r) => `${r.nodeName}·eth${r.ethN}`)).toEqual(["es2·eth0", "sw1·eth1"]);
-    expect(rows[0].windows).toEqual([[0, 300_000]]);
-    expect(rows[1].windows).toEqual([[472_390, 476_950]]);
-  });
-
-  it("flowPlanPresentation（KTD1 三态）：entries 非空=planned；空且有流无 ST=no-gating；其余=unplanned", () => {
-    const base = { cycleNs: CYCLE, stCount: 0, rcCount: 0, beCount: 0, entries: [] };
-    expect(
-      flowPlanPresentation({
-        ...base,
-        stCount: 1,
-        entries: [entry({ durationsNs: [1, 999_999] })],
-      }),
-    ).toBe("planned");
-    expect(flowPlanPresentation({ ...base, beCount: 2 })).toBe("no-gating");
-    expect(flowPlanPresentation({ ...base, rcCount: 1 })).toBe("no-gating");
-    expect(flowPlanPresentation({ ...base, stCount: 1 })).toBe("unplanned");
-    // 空流集（还没录流）→ 未规划 CTA（点规划会得到 no_streams 引导）。
-    expect(flowPlanPresentation(base)).toBe("unplanned");
   });
 });
 
@@ -450,17 +338,23 @@ function twoFlowDetail(): GclDetail {
   };
 }
 
-describe("gclPresentation（新表三态）", () => {
-  it("meta=null（从未规划/老工程）→ unplanned 空态", () => {
+describe("gclPresentation（KTD1 三态，数据推导）", () => {
+  it("空流集（从未规划/老工程）→ unplanned 空态", () => {
     expect(gclPresentation({ windows: [], meta: null, streams: [] })).toBe("unplanned");
   });
 
-  it("status=no_gating → no-gating；ok+窗口行 → planned；ok 无窗 → unplanned", () => {
-    const meta = { status: "no_gating", cycleNs: 1_000_000, algorithm: "Z3", stale: false };
-    expect(gclPresentation({ windows: [], meta, streams: [] })).toBe("no-gating");
+  it("有 ST + 窗口行 → planned；有 ST 无窗 → unplanned（待规划）", () => {
     const detail = twoFlowDetail();
     expect(gclPresentation(detail)).toBe("planned");
     expect(gclPresentation({ ...detail, windows: [] })).toBe("unplanned");
+  });
+
+  it("无 ST 且流集非空 → no-gating（即便库里残留存量门控表也不得呈现已规划）", () => {
+    const be = stStream({ class: "BE", pcp: 0 });
+    expect(gclPresentation({ windows: [], meta: null, streams: [be] })).toBe("no-gating");
+    // 矛盾态：存量窗口行 + 无 ST 流集 → 仍 no-gating（面板追加「验证不会消费」文案）。
+    const detail = twoFlowDetail();
+    expect(gclPresentation({ ...detail, streams: [be] })).toBe("no-gating");
   });
 });
 

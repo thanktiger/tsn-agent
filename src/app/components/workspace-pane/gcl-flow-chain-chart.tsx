@@ -1,5 +1,6 @@
 import type * as ECharts from "echarts";
-import { useEffect, useMemo, useRef } from "react";
+import { useMemo, useRef } from "react";
+import { useEChartsOption } from "../../hooks/use-echarts";
 import { CHART_COLORS } from "./chart-palette";
 import {
   degradedFlowSeqs,
@@ -281,59 +282,10 @@ export function buildChainOption(chain: FlowChain, cycleNs: number): ECharts.ECh
   };
 }
 
-/** ECharts 画布（照 time-sync-offset-chart.tsx 先例：动态 import / init / dispose / resize / setOption）。 */
+/** ECharts 画布（共享 hook：动态 import / init / dispose / resize / setOption）。 */
 function ChainCanvas({ option }: { option: ECharts.EChartsOption }) {
   const chartElementRef = useRef<HTMLDivElement | null>(null);
-  const chartInstanceRef = useRef<ECharts.ECharts | undefined>(undefined);
-  const latestOptionRef = useRef(option);
-
-  useEffect(() => {
-    latestOptionRef.current = option;
-    chartInstanceRef.current?.setOption(option, { notMerge: true, lazyUpdate: true });
-  }, [option]);
-
-  useEffect(() => {
-    const el = chartElementRef.current;
-    if (!el) {
-      return undefined;
-    }
-    let disposed = false;
-    let chart: ECharts.ECharts | undefined;
-    let observer: ResizeObserver | undefined;
-
-    void import("echarts")
-      .then((echarts) => {
-        // import 异步——StrictMode 双挂载 / HMR 会在 import 解析前就 cleanup，此时直接退出不 init。
-        if (disposed || chartElementRef.current !== el) {
-          return;
-        }
-        // 同一 dom 重复 init 会返回旧实例（随后被前一个 effect 的 cleanup dispose → 空白画布），
-        // 先清残留实例确保拿到全新实例（time-sync-offset-chart 同型坑）。
-        echarts.getInstanceByDom(el)?.dispose();
-        chart = echarts.init(el, undefined, { renderer: "canvas" });
-        chartInstanceRef.current = chart;
-        chart.setOption(latestOptionRef.current, { notMerge: true, lazyUpdate: true });
-        // init 可能在容器完成布局前读到 0 宽/高（Tauri WebKit 时序）——立即 resize +
-        // ResizeObserver 盯容器本身（弹窗布局变化不触发 window resize）。
-        chart.resize();
-        if (typeof ResizeObserver !== "undefined") {
-          observer = new ResizeObserver(() => chart?.resize());
-          observer.observe(el);
-        }
-      })
-      .catch((err) => {
-        console.error("[gcl-flow-chain-chart] echarts 渲染失败:", err);
-      });
-
-    return () => {
-      disposed = true;
-      observer?.disconnect();
-      chart?.dispose();
-      if (chartInstanceRef.current === chart) {
-        chartInstanceRef.current = undefined;
-      }
-    };
-  }, []);
+  useEChartsOption(chartElementRef, option, { logTag: "gcl-flow-chain-chart" });
 
   return (
     <div

@@ -1,5 +1,6 @@
 import type * as ECharts from "echarts";
-import { useEffect, useRef } from "react";
+import { useMemo, useRef } from "react";
+import { useEChartsOption } from "../../hooks/use-echarts";
 import { CHART_COLORS } from "./chart-palette";
 import type { GclDisplayModel } from "./flow-sim";
 
@@ -304,66 +305,11 @@ export function GclGanttChart({ model, cycleNs, degradedSeqs }: GclGanttChartPro
 
 function GanttCanvas({ model, cycleNs, degradedSeqs }: GclGanttChartProps) {
   const chartElementRef = useRef<HTMLDivElement | null>(null);
-  const chartInstanceRef = useRef<ECharts.ECharts | undefined>(undefined);
-  const latestOptionRef = useRef<ECharts.EChartsOption>(
-    buildGanttOption(model, cycleNs, degradedSeqs),
+  const option = useMemo(
+    () => buildGanttOption(model, cycleNs, degradedSeqs),
+    [model, cycleNs, degradedSeqs],
   );
-
-  useEffect(() => {
-    latestOptionRef.current = buildGanttOption(model, cycleNs, degradedSeqs);
-    chartInstanceRef.current?.setOption(latestOptionRef.current, {
-      notMerge: true,
-      lazyUpdate: true,
-    });
-  }, [model, cycleNs, degradedSeqs]);
-
-  useEffect(() => {
-    const el = chartElementRef.current;
-    if (!el) {
-      return undefined;
-    }
-    let disposed = false;
-    let chart: ECharts.ECharts | undefined;
-    let observer: ResizeObserver | undefined;
-
-    void import("echarts")
-      .then((echarts) => {
-        // import 是异步的——StrictMode 双挂载 / HMR 会在 import 解析前就 cleanup，此时直接退出不 init。
-        if (disposed || chartElementRef.current !== el) {
-          return;
-        }
-        // 同一 dom 重复 init 时 echarts 会返回旧实例并告警，随后前一个 effect 的 cleanup 把这个
-        // 共享实例 dispose 掉 → setOption 打在已 disposed 的实例上 → 空白画布。先清残留实例，确保
-        // 每次都拿到全新实例；cleanup 只 dispose 本 effect 自己的 chart（局部变量，非共享 ref）。
-        echarts.getInstanceByDom(el)?.dispose();
-        chart = echarts.init(el, undefined, { renderer: "canvas" });
-        chartInstanceRef.current = chart;
-        chart.setOption(latestOptionRef.current, {
-          notMerge: true,
-          lazyUpdate: true,
-        });
-        // init 可能在容器完成布局前读到 0 宽/高（Tauri WebKit 时序）——立即 resize 读真实尺寸，
-        // 并用 ResizeObserver 盯容器本身（弹窗/分栏布局变化不会触发 window resize，必须盯元素）。
-        chart.resize();
-        if (typeof ResizeObserver !== "undefined") {
-          observer = new ResizeObserver(() => chart?.resize());
-          observer.observe(el);
-        }
-      })
-      .catch((err) => {
-        // 把被 promise 吞掉的 echarts import/init/setOption 报错暴露出来（排查空白画布）。
-        console.error("[gcl-gantt-chart] echarts 渲染失败:", err);
-      });
-
-    return () => {
-      disposed = true;
-      observer?.disconnect();
-      chart?.dispose();
-      if (chartInstanceRef.current === chart) {
-        chartInstanceRef.current = undefined;
-      }
-    };
-  }, []);
+  useEChartsOption(chartElementRef, option, { logTag: "gcl-gantt-chart" });
 
   return (
     <div
