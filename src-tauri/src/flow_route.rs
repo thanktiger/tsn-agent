@@ -301,7 +301,8 @@ fn assert_disjoint(a: &Route, b: &Route) -> Vec<VerifyError> {
 /// `flow_streams.paths` 列的统一 JSON 形状（KTD12，v1）：
 /// `{"version":1,"origin":"user"|"system","routes":[{node_path,link_seqs},...]}`。
 /// RC 恒两条（routes[0]=A 平面、routes[1]=B 平面，origin=system 凭证）；
-/// ST/BE 显式指定恒一条（origin=user 事实源）。NULL=系统推导。
+/// ST/BE 恒一条：origin=user 显式指定（事实源，失效响亮）/ origin=system 系统沉淀凭证
+/// （录入落库 + 规划期回写刷新，失效静默重推导）。NULL=未沉淀（存量），现推导。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FlowPaths {
     pub version: u32,
@@ -427,8 +428,13 @@ pub fn build_route_from_link_seqs(
     })
 }
 
-/// 统一路径解析出口（KTD11）：ST/BE 显式指定（origin=user）优先——消费前复验，
-/// 失效响亮 `PATH_STALE`（绝不静默回退最短路）；未指定走 `derive_route` 现状推导。
+/// 统一路径解析出口（KTD11）。paths 列三态语义：
+/// - `origin=user`：用户显式指定 = 事实源——消费前复验，失效**响亮** `PATH_STALE`
+///   （绝不静默回退最短路）。
+/// - `origin=system`：系统沉淀凭证——复验成功即用；失效**静默** `derive_route` 重推导
+///   （凭证过期自动跟随拓扑，不报 PATH_STALE——那是 user 专属）。
+/// - `NULL`（或不可解析）：未沉淀，走 `derive_route` 现推导。
+///
 /// RC 不经此出口（双路径凭证由 derive_redundant_routes 重推导）。
 pub fn resolve_flow_path(
     paths_json: Option<&str>,
@@ -438,20 +444,39 @@ pub fn resolve_flow_path(
 ) -> Result<Route, Vec<VerifyError>> {
     if let Some(json) = paths_json
         && let Some(fp) = parse_flow_paths(json)
-        && fp.origin == "user"
         && let Some(route) = fp.routes.first()
     {
-        return build_route_from_link_seqs(&route.link_seqs, req.talker, req.listener, links)
-            .map_err(|es| {
-                let detail = es.first().map(|e| e.message_zh.clone()).unwrap_or_default();
-                vec![err(
-                    "PATH_STALE",
-                    format!("指定路径已失效（{detail}），请重新指定或改回系统自动。"),
-                    None,
-                )]
-            });
+        if fp.origin == "user" {
+            return build_route_from_link_seqs(&route.link_seqs, req.talker, req.listener, links)
+                .map_err(|es| {
+                    let detail = es.first().map(|e| e.message_zh.clone()).unwrap_or_default();
+                    vec![err(
+                        "PATH_STALE",
+                        format!("指定路径已失效（{detail}），请重新指定或改回系统自动。"),
+                        None,
+                    )]
+                });
+        }
+        if fp.origin == "system"
+            && let Ok(r) =
+                build_route_from_link_seqs(&route.link_seqs, req.talker, req.listener, links)
+        {
+            return Ok(r);
+        }
+        // system 凭证失效 → 静默落到重推导。
     }
     derive_route(req, nodes, links)
+}
+
+/// 单路径流（ST/BE）的推导平面锁：双平面拓扑（存在带 plane 键的链路）锁平面 "A"
+/// （plane=None 必然双路歧义，docx Qbv 用例同路径），单平面 None（全链路）。
+/// 录入沉淀（add_stream）与规划（plan_tas）共用，保证凭证与规划期推导同口径。
+pub fn single_path_plane(links: &[VerifyLink]) -> Option<&'static str> {
+    if links.iter().any(|l| link_plane(l).is_some()) {
+        Some("A")
+    } else {
+        None
+    }
 }
 
 /// 候选简单路径枚举（弹窗路径下拉用）：DFS 有界，按（跳数, link_seq 字典序）排序，
@@ -673,6 +698,20 @@ pub fn explicit_paths_json(route: &Route) -> String {
     serde_json::to_string(&FlowPaths {
         version: 1,
         origin: "user".to_string(),
+        routes: vec![PathRoute {
+            node_path: route.node_path.clone(),
+            link_seqs: route.link_seqs.clone(),
+        }],
+    })
+    .expect("FlowPaths 序列化不可失败")
+}
+
+/// 系统沉淀凭证的 paths 列 JSON（origin=system，单 route）：录入落库与规划期回写共用，
+/// 形状照 `explicit_paths_json`。
+pub fn system_paths_json(route: &Route) -> String {
+    serde_json::to_string(&FlowPaths {
+        version: 1,
+        origin: "system".to_string(),
         routes: vec![PathRoute {
             node_path: route.node_path.clone(),
             link_seqs: route.link_seqs.clone(),
@@ -965,12 +1004,63 @@ mod tests {
             links.iter().filter(|l| l.link_seq != 1).cloned().collect();
         let err = resolve_flow_path(Some(json), &req, &nodes, &links_after_delete).unwrap_err();
         assert_eq!(err[0].code, "PATH_STALE");
-        // origin=system（RC 凭证形状）不进显式分支 → 走推导。
+    }
+
+    /// system 凭证三态：复验成功直用（歧义拓扑上不报 AMBIGUOUS）；失效（删链）静默
+    /// 重推导成功（对比 user 的 PATH_STALE）；失效后重推导仍歧义 → AMBIGUOUS_ROUTE。
+    #[test]
+    fn resolve_flow_path_system_credential_semantics() {
+        let nodes: Vec<_> = ["0", "1", "2", "3"].iter().map(|m| node(m)).collect();
+        // 菱形：0-2-1（seq 0/1）与 0-3-1（seq 2/3）等长——现推导必歧义。
+        let links = vec![
+            link(0, "0", 0, "2", 0, None),
+            link(1, "2", 1, "1", 0, None),
+            link(2, "0", 1, "3", 0, None),
+            link(3, "3", 1, "1", 1, None),
+        ];
+        let req = RouteRequest {
+            talker: "0",
+            listener: "1",
+            plane: None,
+        };
+        // ① 凭证有效 → 复验成功直用，消解歧义。
         let sys_json = r#"{"version":1,"origin":"system","routes":[{"node_path":["0","2","1"],"link_seqs":[0,1]}]}"#;
-        assert_eq!(
-            resolve_flow_path(Some(sys_json), &req, &nodes, &links).unwrap_err()[0].code,
-            "AMBIGUOUS_ROUTE"
-        );
+        let r = resolve_flow_path(Some(sys_json), &req, &nodes, &links).unwrap();
+        assert_eq!(r.node_path, vec!["0", "2", "1"]);
+        assert_eq!(r.link_seqs, vec![0, 1]);
+        // ② 凭证失效（链路 1 被删）→ 静默重推导：剩唯一路径 0-3-1，成功不报 PATH_STALE。
+        let links_after_delete: Vec<_> =
+            links.iter().filter(|l| l.link_seq != 1).cloned().collect();
+        let r = resolve_flow_path(Some(sys_json), &req, &nodes, &links_after_delete).unwrap();
+        assert_eq!(r.node_path, vec!["0", "3", "1"]);
+        // ③ 凭证失效（引用不存在链路）且重推导仍歧义 → AMBIGUOUS_ROUTE（非 PATH_STALE）。
+        let dead_json = r#"{"version":1,"origin":"system","routes":[{"node_path":["0","2","1"],"link_seqs":[0,99]}]}"#;
+        let errs = resolve_flow_path(Some(dead_json), &req, &nodes, &links).unwrap_err();
+        assert_eq!(errs[0].code, "AMBIGUOUS_ROUTE");
+    }
+
+    /// system_paths_json 形状照 explicit_paths_json（仅 origin 不同）；single_path_plane
+    /// 双平面锁 A、单平面 None。
+    #[test]
+    fn system_paths_json_shape_and_plane_lock() {
+        let route = Route {
+            egress: vec![("0".to_string(), 0)],
+            node_path: vec!["0".to_string(), "1".to_string()],
+            link_seqs: vec![0],
+        };
+        let v: serde_json::Value = serde_json::from_str(&system_paths_json(&route)).unwrap();
+        assert_eq!(v["version"], 1);
+        assert_eq!(v["origin"], "system");
+        assert_eq!(v["routes"][0]["node_path"], serde_json::json!(["0", "1"]));
+        assert_eq!(v["routes"][0]["link_seqs"], serde_json::json!([0]));
+
+        let single = vec![link(0, "0", 0, "1", 0, None)];
+        assert_eq!(single_path_plane(&single), None);
+        let dual = vec![
+            link(0, "0", 0, "1", 0, Some("A")),
+            link(1, "0", 1, "1", 1, Some("B")),
+        ];
+        assert_eq!(single_path_plane(&dual), Some("A"));
     }
 
     /// 候选枚举：等长两条 + 更长一条全部列出、有序；limit 截断置位。
