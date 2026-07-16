@@ -1214,6 +1214,127 @@ pub(crate) fn flow_warmup_offset_s(timing: &[SimNodeTiming]) -> f64 {
     (FLOW_WARMUP_SYNC_MULTIPLIER * effective_ms / 1000.0).max(FLOW_WARMUP_FLOOR_S)
 }
 
+/// talker 裸口错峰（gcl-multihop 根因治法）：Z3 只建模 ST、talker 出口无门，同 talker 的
+/// 非 ST 源（BE/RC）与 ST 同瞬间产包时帧顶帧——ST 被顶出零余量首跳窗后，每窗恰发一帧、
+/// 积压永不排空 → 全部包稳态 +1 周期，并经共享 ST 队列（同 gate 单 FIFO）传染其它流
+/// （真机实证：仅错开 BE 相位即 10/10 ST 恒时延零抖动）。本函数为 ST talker 上的非 ST 源
+/// 确定性挑选发送偏移 δ（写入 production_offset_ns，与暖机叠加），使其发送窗在门控周期内
+/// 避开该 talker 全部 ST 发送窗与先前已放置的非 ST 窗（防 BE 顶 BE 连锁）。
+/// δ=0 已安全 → 保持 None（产物字节稳定）；周期不整除门控周期或搜索无解 → 保持 None
+/// （回退现状，不阻断验证）。ST 流的偏移一律不动。
+const STAGGER_STEP_NS: u64 = 1_000;
+const STAGGER_MARGIN_NS: u64 = 2_000;
+
+pub(crate) fn stagger_non_st_offsets(
+    specs: &mut [FlowStreamSpec],
+    links: &[VerifyLink],
+    has_rc: bool,
+) {
+    // talker 出口速率：端点挂的链路取最小速率（保守放大帧时长）。
+    let mut rate_of: BTreeMap<String, u32> = BTreeMap::new();
+    for l in links {
+        let r = link_rate(l);
+        for node in [&l.src_node, &l.dst_node] {
+            rate_of
+                .entry(node.clone())
+                .and_modify(|v| *v = (*v).min(r))
+                .or_insert(r);
+        }
+    }
+    let overhead = flow_frame_overhead_bytes(has_rc);
+    let dur_ns = |frame_bytes: i64, rate_mbps: u32| -> u64 {
+        ((frame_bytes + overhead).max(1) as u64 * 8 * 1_000).div_ceil(rate_mbps.max(1) as u64)
+    };
+    // [0,cycle) 上的区间登记（带回绕拆段）。
+    fn push_mod(set: &mut Vec<(u64, u64)>, start: u64, len: u64) {
+        let s = start % GATE_CYCLE_NS;
+        if s + len <= GATE_CYCLE_NS {
+            set.push((s, s + len));
+        } else {
+            set.push((s, GATE_CYCLE_NS));
+            set.push((0, (s + len) - GATE_CYCLE_NS));
+        }
+    }
+
+    let st_talkers: std::collections::BTreeSet<String> = specs
+        .iter()
+        .filter(|s| s.class == "ST")
+        .map(|s| s.talker.clone())
+        .collect();
+    for talker in &st_talkers {
+        let rate = rate_of
+            .get(talker)
+            .copied()
+            .unwrap_or(DEFAULT_DATARATE_MBPS);
+        // busy = 该 talker 全部 ST 发送窗（Z3 偏移，None 视作 0）± MARGIN。任一 ST 周期
+        // 不整除门控周期 → 窗相位逐周期漂移、无法静态避让，整个 talker 跳过（回退现状）。
+        let mut busy: Vec<(u64, u64)> = vec![];
+        let mut feasible = true;
+        for s in specs
+            .iter()
+            .filter(|s| s.class == "ST" && &s.talker == talker)
+        {
+            let per = s.period_us.max(0) as u64 * 1_000;
+            if per == 0 || !GATE_CYCLE_NS.is_multiple_of(per) {
+                feasible = false;
+                break;
+            }
+            let d = dur_ns(s.frame_bytes, rate);
+            let off = s.production_offset_ns.unwrap_or(0) % per;
+            for k in 0..(GATE_CYCLE_NS / per) {
+                let start = (off + k * per + GATE_CYCLE_NS - STAGGER_MARGIN_NS) % GATE_CYCLE_NS;
+                push_mod(&mut busy, start, d + 2 * STAGGER_MARGIN_NS);
+            }
+        }
+        if !feasible {
+            continue;
+        }
+        // 非 ST 源按 stream_seq 序放置（确定性）。
+        let mut non_st: Vec<usize> = (0..specs.len())
+            .filter(|&i| specs[i].class != "ST" && &specs[i].talker == talker)
+            .collect();
+        non_st.sort_by_key(|&i| specs[i].stream_seq);
+        for idx in non_st {
+            let per = specs[idx].period_us.max(0) as u64 * 1_000;
+            if per == 0 || !GATE_CYCLE_NS.is_multiple_of(per) {
+                continue;
+            }
+            let d = dur_ns(specs[idx].frame_bytes, rate);
+            let n = GATE_CYCLE_NS / per;
+            let clear = |delta: u64, busy: &[(u64, u64)]| -> bool {
+                let mut cand: Vec<(u64, u64)> = vec![];
+                for m in 0..n {
+                    push_mod(&mut cand, delta + m * per, d);
+                }
+                cand.iter()
+                    .all(|&(c0, c1)| busy.iter().all(|&(b0, b1)| c1 <= b0 || b1 <= c0))
+            };
+            let delta = if clear(0, &busy) {
+                0
+            } else {
+                let mut found = 0u64; // 搜索无解 → 回退 0（现状不动）。
+                let mut c = STAGGER_STEP_NS;
+                while c < per {
+                    if clear(c, &busy) {
+                        found = c;
+                        break;
+                    }
+                    c += STAGGER_STEP_NS;
+                }
+                found
+            };
+            if delta > 0 {
+                specs[idx].production_offset_ns = Some(delta);
+            }
+            // 无论移动与否都登记占用（后续源须避开它）。
+            for m in 0..n {
+                let start = (delta + m * per + GATE_CYCLE_NS - STAGGER_MARGIN_NS) % GATE_CYCLE_NS;
+                push_mod(&mut busy, start, d + 2 * STAGGER_MARGIN_NS);
+            }
+        }
+    }
+}
+
 pub(crate) fn plan_flow_traffic(
     streams: &[FlowStreamSpec],
 ) -> (
@@ -2249,6 +2370,99 @@ mod tests {
             pin_links: None,
             production_offset_ns: None,
         }
+    }
+
+    /// stagger 测试链路：各 talker 一条 1000Mbps 链路（速率查表用）。
+    fn stagger_links() -> Vec<VerifyLink> {
+        ["1", "2", "3", "9"]
+            .iter()
+            .enumerate()
+            .map(|(i, n)| VerifyLink {
+                link_seq: i as i64,
+                src_node: (*n).into(),
+                dst_node: "0".into(),
+                src_port: Some(1),
+                dst_port: Some((i + 1) as i64),
+                speed: Some(1000),
+                styles_json: "{}".into(),
+            })
+            .collect()
+    }
+
+    /// stagger：BE 与 ST 同瞬间产包（z3off=0/None）→ BE 被错开，发送窗避开 ST 窗（含边距）。
+    #[test]
+    fn stagger_moves_colliding_be_off_st_window() {
+        let links = stagger_links();
+        let mut specs = vec![
+            spec(0, "ST", 7, "1", "2", 500, 512, 10000),
+            spec(1, "BE", 0, "1", "3", 1000, 300, 10000),
+        ];
+        stagger_non_st_offsets(&mut specs, &links, false);
+        assert_eq!(specs[0].production_offset_ns, None, "ST 偏移不得改动");
+        let delta = specs[1]
+            .production_offset_ns
+            .expect("同瞬间碰撞的 BE 应被错开");
+        // ST 窗 [0, 4560ns]（(512+58)B@1Gbps）+2us 边距 → δ ≥ 6560ns；
+        // 且 BE 窗 [δ, δ+2864ns] 不得触及 k=1 的 ST 窗 [498000, 506560]（含边距）。
+        assert!(delta >= 6_560, "delta={delta}");
+        assert!(
+            delta + 2_864 <= 498_000 || delta >= 506_560,
+            "delta={delta}"
+        );
+    }
+
+    /// stagger：BE 在 δ=0 已避开 ST 窗（ST 带 Z3 偏移）→ 保持 None（产物字节稳定）。
+    #[test]
+    fn stagger_keeps_clear_be_as_none() {
+        let links = stagger_links();
+        let mut specs = vec![
+            FlowStreamSpec {
+                production_offset_ns: Some(250_000),
+                ..spec(0, "ST", 7, "1", "2", 500, 512, 10000)
+            },
+            spec(1, "BE", 0, "1", "3", 1000, 300, 10000),
+        ];
+        stagger_non_st_offsets(&mut specs, &links, false);
+        assert_eq!(
+            specs[0].production_offset_ns,
+            Some(250_000),
+            "ST 偏移不得改动"
+        );
+        assert_eq!(specs[1].production_offset_ns, None, "δ=0 已安全的 BE 不动");
+    }
+
+    /// stagger：同 talker 两条 BE 相互也须错开（防 BE 顶 BE 连锁滑入 ST 窗）。
+    #[test]
+    fn stagger_separates_collocated_be_sources() {
+        let links = stagger_links();
+        let mut specs = vec![
+            FlowStreamSpec {
+                production_offset_ns: Some(250_000),
+                ..spec(0, "ST", 7, "1", "2", 500, 512, 10000)
+            },
+            spec(1, "BE", 0, "1", "3", 1000, 1500, 10000),
+            spec(2, "BE", 0, "1", "2", 1000, 1500, 10000),
+        ];
+        stagger_non_st_offsets(&mut specs, &links, false);
+        // BE1 在 δ=0 安全（ST 窗在 250us、750us 处）→ None；BE2 与 BE1 碰撞 → 错开到
+        // BE1 窗 [0, 12464ns]（(1500+58)B@1Gbps）+2us 边距之后。
+        assert_eq!(specs[1].production_offset_ns, None);
+        let d2 = specs[2].production_offset_ns.expect("BE2 应避开 BE1");
+        assert!(d2 >= 14_464, "d2={d2}");
+    }
+
+    /// stagger：纯 BE talker（无 ST 同宿）不动；ST 周期不整除门控周期 → 该 talker 整体回退。
+    #[test]
+    fn stagger_skips_pure_be_talker_and_non_dividing_st_period() {
+        let links = stagger_links();
+        let mut specs = vec![
+            spec(0, "ST", 7, "1", "2", 300, 512, 10000), // 1ms % 300us ≠ 0 → talker "1" 回退
+            spec(1, "BE", 0, "1", "3", 1000, 300, 10000),
+            spec(2, "BE", 0, "9", "2", 1000, 300, 10000), // talker "9" 无 ST
+        ];
+        stagger_non_st_offsets(&mut specs, &links, false);
+        assert_eq!(specs[1].production_offset_ns, None);
+        assert_eq!(specs[2].production_offset_ns, None);
     }
 
     /// pin 模式：写死 GCL → transmissionGate 参数逐值写入；配置器不实例化。

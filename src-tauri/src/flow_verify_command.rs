@@ -311,6 +311,10 @@ pub async fn verify_tas_inner<R: RemoteRunner>(
                 st_j += 1;
             }
         }
+        // talker 裸口错峰（gcl-multihop 根因治法）：ST talker 上的非 ST 源与 ST 发送窗
+        // 同瞬间产包会帧顶帧 → ST 错过零余量首跳窗 → 稳态 +1 周期并传染共享队列的他流。
+        // 须在 ST 偏移回填之后调用（避让以 Z3 偏移为准）。
+        crate::inet_sim_bundle::stagger_non_st_offsets(&mut specs, &links, has_rc);
     }
 
     let gm_mid: Option<String> =
