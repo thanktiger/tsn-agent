@@ -170,6 +170,21 @@ pub const DEFAULT_VLAN_ID: i64 = 0;
 pub const DEFAULT_EARLIEST_SEND_OFFSET_NS: i64 = 0;
 pub const DEFAULT_LATEST_SEND_OFFSET_NS: i64 = 100;
 pub const DEFAULT_JITTER_NS: i64 = 50;
+/// ST 流 maxLatency（端到端时延上界，µs）默认值：录入未填时沉淀进 `max_latency_us` 列、
+/// 规划直接读列（不再退化成周期——周期太宽等于没约束，让 Z3 把门放周期内任意处）。
+/// 取值 500µs（对齐 INET gatescheduling showcase，我方各流实测端到端 4~23µs 远在其内、
+/// 恒可满足）。仅 ST 生效：RC/BE 不进 Z3 综合（synth 排除），给它们塞时延上界无规划意义。
+pub const DEFAULT_ST_MAX_LATENCY_US: i64 = 500;
+
+/// 录入/编辑落库时解析 ST 流的 maxLatency 默认：未填且 class==ST → 沉淀默认值；其余透传原值
+/// （BE/RC 保持 None，显式值不动）。新增与编辑两条写路径共用，保证「库里的值」单一口径。
+pub fn resolve_max_latency_us(class: &str, provided: Option<i64>) -> Option<i64> {
+    match provided {
+        Some(v) => Some(v),
+        None if class == "ST" => Some(DEFAULT_ST_MAX_LATENCY_US),
+        None => None,
+    }
+}
 
 /// 流名称默认值：`{class}流{seq}`（如 "ST流0"），详情弹窗可改。
 pub fn default_stream_name(class: &str, stream_seq: i64) -> String {
@@ -652,6 +667,9 @@ pub async fn update_flow_stream_inner(
     // 2b. R16 路径变更三态：set（link_seqs 或节点引用）/ clear / 不变。
     // RC 拒绝（双路径系统推导）。set 时解析+校验并把新 paths 带进 verify_flow。
     let class: String = row.get("class");
+    // ST 未填 maxLatency → 沉淀默认值（新增/编辑同源）。变更判定与写入共用此解析值，
+    // 否则「留空提交」会因 None≠已沉淀的 500 被误判成规划字段变更、无谓置 stale。
+    let resolved_max_latency = resolve_max_latency_us(&class, req.max_latency_us);
     let path_change: Option<Option<String>> = if req.clear_path {
         if req.path_link_seqs.is_some() || req.path_node_refs.is_some() {
             return Err("clear_path 与指定路径参数不能同时使用。".to_string());
@@ -699,10 +717,14 @@ pub async fn update_flow_stream_inner(
 
     // 2c. KTD14 规划字段变更判定（服务端 diff，弹窗/agent 双通道同源）：
     // period/frame/count/max_latency 任一与旧值不同，或有路径变更 → 置 stale。
+    // maxLatency 两边都过 resolve：老库 NULL 与沉淀后的默认 500 视作同一值——编辑非规划字段
+    // （如改名）时静默把列补成 500 但不误判成规划变更、不无谓置 stale。
+    let old_max_latency =
+        resolve_max_latency_us(&class, row.get::<Option<i64>, _>("max_latency_us"));
     let planning_fields_changed = req.period_us != row.get::<i64, _>("period_us")
         || req.frame_bytes != row.get::<i64, _>("frame_bytes")
         || req.count != row.get::<i64, _>("count")
-        || req.max_latency_us != row.get::<Option<i64>, _>("max_latency_us")
+        || resolved_max_latency != old_max_latency
         || path_change.is_some();
 
     // 3. 结构校验（class/pcp 不变，重跑以防节点已删或周期越界）。
@@ -740,7 +762,7 @@ pub async fn update_flow_stream_inner(
     .bind(req.period_us)
     .bind(req.frame_bytes)
     .bind(req.count)
-    .bind(req.max_latency_us)
+    .bind(resolved_max_latency)
     .bind(&req.src_mac)
     .bind(&req.dst_mac)
     .bind(req.vlan_id)
@@ -802,6 +824,19 @@ pub async fn update_flow_stream(
 mod tests {
     use super::*;
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+
+    /// ST 未填 → 沉淀 500µs 默认；显式值透传；BE/RC 未填保持 None（不进 Z3、无规划意义）。
+    #[test]
+    fn resolve_max_latency_defaults_only_for_st() {
+        assert_eq!(
+            resolve_max_latency_us("ST", None),
+            Some(DEFAULT_ST_MAX_LATENCY_US)
+        );
+        assert_eq!(resolve_max_latency_us("ST", Some(120)), Some(120));
+        assert_eq!(resolve_max_latency_us("BE", None), None);
+        assert_eq!(resolve_max_latency_us("RC", None), None);
+        assert_eq!(resolve_max_latency_us("RC", Some(400)), Some(400));
+    }
 
     async fn fresh_pool() -> sqlx::Pool<sqlx::Sqlite> {
         let opts = SqliteConnectOptions::new()
@@ -1467,7 +1502,8 @@ mod tests {
         });
     }
 
-    /// U7④：可空列 max_latency_us/src_mac 均 None → DB 写 NULL（覆盖原有非空值）。
+    /// U7④：可空列 None 处理——src_mac None → NULL；ST 的 max_latency_us None →
+    /// 沉淀默认 500（清空显式值即回默认，不是写 NULL；BE/RC 才 → NULL）。
     #[test]
     fn update_flow_stream_null_optional_cols() {
         tauri::async_runtime::block_on(async {
@@ -1490,9 +1526,10 @@ mod tests {
             .fetch_one(&pool)
             .await
             .unwrap();
-            assert!(
-                row.get::<Option<i64>, _>("max_latency_us").is_none(),
-                "max_latency_us 应为 NULL"
+            assert_eq!(
+                row.get::<Option<i64>, _>("max_latency_us"),
+                Some(DEFAULT_ST_MAX_LATENCY_US),
+                "ST 清空 maxLatency 应回默认 500，非 NULL"
             );
             assert!(
                 row.get::<Option<String>, _>("src_mac").is_none(),

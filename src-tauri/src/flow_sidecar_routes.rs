@@ -112,7 +112,7 @@ pub async fn insert_stream(
     .bind(src_l4_port)
     .bind(dst_l4_port)
     .bind(&l4_protocol)
-    .bind(s.max_latency_us)
+    .bind(fq::resolve_max_latency_us(&s.class, s.max_latency_us))
     .bind(s.redundant)
     .bind(&s.paths)
     .bind(fq::default_mac_for_mid(&s.talker))
