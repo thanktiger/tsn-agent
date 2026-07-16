@@ -69,6 +69,25 @@ async fn load_gcl(
     ))
 }
 
+/// 读存档的每源 Z3 发送偏移 `(ned, synth_app_idx, offset_ns)`（多跳踩空修复：pin 重放回放
+/// Z3 协同算的源相位）。无存档 → 空。与 `load_gcl` 读同一 raw 文件，仅解析 initialProductionOffset 行。
+async fn load_production_offsets(
+    base_dir: &std::path::Path,
+    session_id: &str,
+) -> Result<Vec<(String, usize, u64)>, String> {
+    let Some(par_lines) = crate::gcl_raw_store::read_raw(
+        base_dir,
+        session_id,
+        crate::flow_plan_command::GCL_PROVIDER,
+    )?
+    else {
+        return Ok(vec![]);
+    };
+    Ok(crate::gcl_synth::parse_production_offsets_from_sca(
+        &par_lines,
+    ))
+}
+
 /// 单轮机器词 → overall 串联用的摘要（ok/fail 给达标计数，其余给状态词本身）。
 /// U7：只计该轮**下判**的流；报告态（judged=false）单列尾注，不混进达标/未达标。
 fn round_summary(status: &str, per_stream: &[StreamVerdict]) -> String {
@@ -260,8 +279,40 @@ pub async fn verify_tas_inner<R: RemoteRunner>(
             path_fragments: None, // pin 模式不需 pathFragments（门已写死、配置器禁）。
             frer_trees,
             pin_links,
+            production_offset_ns: None, // 下方从存档回填 Z3 源偏移。
         });
     }
+
+    // Z3 源偏移重放（多跳踩空修复）：Z3 综合门表时协同算的每源发送偏移存于 .par，pin 重放须回放
+    // （否则各源相位错、包踩空极窄 ST 门）。按 ST-only 合成放置（与 synth 同源）把偏移关联到流。
+    if has_st {
+        let offsets = load_production_offsets(base_dir, session_id).await?;
+        if !offsets.is_empty() {
+            let offset_by_key: BTreeMap<(String, usize), u64> = offsets
+                .into_iter()
+                .map(|(ned, app, off)| ((ned, app), off))
+                .collect();
+            let mid_to_ned = crate::inet_sim_bundle::node_ned_names(&nodes);
+            let st_specs: Vec<FlowStreamSpec> =
+                specs.iter().filter(|s| s.class == "ST").cloned().collect();
+            let (_c, st_placements, _n) = crate::inet_sim_bundle::plan_flow_traffic(&st_specs);
+            let mut st_j = 0usize;
+            for s in specs.iter_mut() {
+                if s.class != "ST" {
+                    continue;
+                }
+                let talker_ned = mid_to_ned
+                    .get(&s.talker)
+                    .cloned()
+                    .unwrap_or(s.talker.clone());
+                s.production_offset_ns = offset_by_key
+                    .get(&(talker_ned, st_placements[st_j].talker_app))
+                    .copied();
+                st_j += 1;
+            }
+        }
+    }
+
     let gm_mid: Option<String> =
         sqlx::query_scalar("SELECT gm_mid FROM timesync_domain WHERE session_id = ?")
             .bind(session_id)

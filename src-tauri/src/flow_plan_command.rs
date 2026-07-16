@@ -367,6 +367,7 @@ pub async fn plan_tas_inner<P: InetSimPlanClient>(
             path_fragments,
             frer_trees: None, // synth 无 FRER 段（RC 不进 bundle）；has_rc 只影响帧开销。
             pin_links: None,
+            production_offset_ns: None, // synth：Z3 现算自设，不预置。
         });
     }
     if !route_failures.is_empty() {
