@@ -182,6 +182,10 @@ pub async fn verify_tas_inner<R: RemoteRunner>(
     // ST 路由避让/标注（KTD2）的输入，与装配同一份推导、绝不二算。
     let mut rc_routes: Vec<(i64, crate::flow_route::Route, crate::flow_route::Route)> = Vec::new();
     let mut st_links: HashSet<i64> = HashSet::new();
+    // KTD13：无 RC 流集时逐条 ST/BE 经 resolve_flow_path（凭证复验优先/失效或 NULL 静默重推导，
+    // 与规划侧同一出口）收集 (seq, Route) → 传 bundle 生成静态转发钉死；含 RC 会话不收集
+    // （FRER 单写入者，routes 空 → bundle 与现状字节一致，R2/AE2）。
+    let mut forward_routes: Vec<(i64, crate::flow_route::Route)> = Vec::new();
     for s in &db_streams {
         let (frer_trees, pin_links) = if s.class == "RC" {
             match crate::flow_route::derive_redundant_routes(&s.talker, &s.listener, &nodes, &links)
@@ -193,26 +197,55 @@ pub async fn verify_tas_inner<R: RemoteRunner>(
                 }
                 Err(errs) => return Ok(route_fail(s.stream_seq, errs)),
             }
-        } else if dual_plane && (!has_rc || s.class == "ST") {
-            match crate::flow_route::derive_route(
+        } else if has_rc {
+            // 含 RC 会话的非 RC 流：一行不动（R2 字节一致）。双平面 ST 喂 frer_trees + st_links；
+            // RC 会话 BE / 单平面沿现状（凭证在 RC 会话被忽略属本期已知行为，Deferred）。
+            if dual_plane && s.class == "ST" {
+                match crate::flow_route::derive_route(
+                    &crate::flow_route::RouteRequest {
+                        talker: &s.talker,
+                        listener: &s.listener,
+                        plane: Some("A"),
+                    },
+                    &nodes,
+                    &links,
+                ) {
+                    Ok(r) => {
+                        st_links.extend(r.link_seqs.iter().copied());
+                        (Some(vec![r.node_path]), None)
+                    }
+                    Err(errs) => return Ok(route_fail(s.stream_seq, errs)),
+                }
+            } else {
+                (None, None) // RC 会话 BE 留在 FRER 之外（untagged pcp0）。
+            }
+        } else {
+            // 无 RC：凭证优先解析 Route 供转发钉死；双平面锁平面 A、单平面全链路
+            // （single_path_plane 与规划侧同口径）。单平面等长多路径未消歧 → AMBIGUOUS_ROUTE
+            // 响亮失败（口径修正：规划侧早已拒绝，验证侧此前沉默通过是漏洞）。
+            let plane = crate::flow_route::single_path_plane(&links);
+            match crate::flow_route::resolve_flow_path(
+                s.paths.as_deref(),
                 &crate::flow_route::RouteRequest {
                     talker: &s.talker,
                     listener: &s.listener,
-                    plane: Some("A"),
+                    plane,
                 },
                 &nodes,
                 &links,
             ) {
-                Ok(r) if has_rc => {
-                    // 该分支在 has_rc 下只有 ST 流进得来（BE 落 else 分支）。
-                    st_links.extend(r.link_seqs.iter().copied());
-                    (Some(vec![r.node_path]), None)
+                Ok(r) => {
+                    // 双平面 L3 出口平面选择仍归 pin_kit（pin_links）；两机制互补（KTD1）。
+                    let pin = if dual_plane {
+                        Some(r.link_seqs.clone())
+                    } else {
+                        None
+                    };
+                    forward_routes.push((s.stream_seq, r));
+                    (None, pin)
                 }
-                Ok(r) => (None, Some(r.link_seqs)),
                 Err(errs) => return Ok(route_fail(s.stream_seq, errs)),
             }
-        } else {
-            (None, None) // 单平面沿现状；RC 会话的 BE 留在 FRER 之外（untagged pcp0）。
         };
         specs.push(FlowStreamSpec {
             stream_seq: s.stream_seq,
@@ -336,7 +369,7 @@ pub async fn verify_tas_inner<R: RemoteRunner>(
                 ..Default::default()
             },
             &specs,
-            FlowTasSchedule::Pin(&gcl),
+            FlowTasSchedule::Pin(&gcl, &forward_routes),
             session_id,
             0,
         ) {
@@ -1211,6 +1244,221 @@ mod tests {
                 runner.ini.lock().unwrap().is_none(),
                 "断言失败不得装配/提交软仿"
             );
+        });
+    }
+
+    // ---------- U3（KTD13）：验证侧接路径凭证 → 转发钉死 ----------
+
+    /// 三角单平面 seed：es01(1)—sw01(0)—sw03(4)—es02(2) 直路 + sw01—sw02(3)—sw03 绕路。
+    /// GM=es01(1)。ST 门 raw 存档在 sw01 eth1 gate7。flow_streams 由测试自插（控制 paths/BE）。
+    async fn seed_triangle(pool: &sqlx::Pool<sqlx::Sqlite>, base_dir: &std::path::Path) {
+        for (mid, ty, ord) in [
+            ("0", "switch", 0),
+            ("3", "switch", 1),
+            ("4", "switch", 2),
+            ("1", "endSystem", 3),
+            ("2", "endSystem", 4),
+        ] {
+            sqlx::query("INSERT INTO topology_nodes (session_id, mid, name, x, y, node_type, port_count, queue_count, insert_order) VALUES ('s1', ?, NULL, 0, 0, ?, 8, 8, ?)")
+                .bind(mid).bind(ty).bind(ord).execute(pool).await.unwrap();
+        }
+        for (seq, src, sp, dst, dp) in [
+            (0, "1", 0, "0", 0), // talker—sw01
+            (1, "0", 1, "4", 0), // sw01—sw03 直连
+            (2, "4", 1, "2", 0), // sw03—listener
+            (3, "0", 2, "3", 0), // sw01—sw02 绕路
+            (4, "3", 1, "4", 2), // sw02—sw03 绕路
+        ] {
+            sqlx::query("INSERT INTO topology_links (session_id, link_seq, name, src_node, dst_node, src_port, dst_port, speed, styles_json) VALUES ('s1', ?, NULL, ?, ?, ?, ?, 1000, '{}')")
+                .bind(seq).bind(src).bind(dst).bind(sp).bind(dp).execute(pool).await.unwrap();
+        }
+        sqlx::query("INSERT INTO timesync_domain (session_id, gm_mid) VALUES ('s1', '1')")
+            .execute(pool)
+            .await
+            .unwrap();
+        for mid in ["0", "1", "2", "3", "4"] {
+            sqlx::query("INSERT INTO timesync_nodes (session_id, mid, master_port, slave_port) VALUES ('s1', ?, '[]', '[]')")
+                .bind(mid).execute(pool).await.unwrap();
+        }
+        seed_gcl_archive(base_dir, &gate_par_lines("sw01", 1, 7, "[300us, 700us]"));
+    }
+
+    /// 凭证在库（绕路）：CapturingRunner 捕获的 ini 含绕路交换机 sw02 的 forwardingTable 条目，
+    /// sw01 正向出口指向绕路端口 eth2；关配置器行在。
+    #[test]
+    fn verify_pin_emits_forwarding_for_credential_detour() {
+        tauri::async_runtime::block_on(async {
+            let (pool, dir) = fresh_pool().await;
+            seed_triangle(&pool, dir.path()).await;
+            let paths = r#"[{"node_path":["1","0","3","4","2"],"link_seqs":[0,3,4,2]}]"#;
+            sqlx::query("INSERT INTO flow_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener, max_latency_us, paths) VALUES ('s1', 0, 'ST', 7, 500, 512, 3, '1', '2', 400, ?)")
+                .bind(paths).execute(&pool).await.unwrap();
+            let runner = CapturingRunner {
+                outcome: outcome(None),
+                ini: std::sync::Mutex::new(None),
+            };
+            let r = verify_tas_inner(&pool, dir.path(), "s1", &runner)
+                .await
+                .unwrap();
+            assert_ne!(r.status, "route_error", "{r:?}");
+            assert_ne!(r.status, "bundle_error", "{r:?}");
+            let ini = runner.ini.lock().unwrap().clone().unwrap();
+            assert!(
+                ini.contains("*.macForwardingTableConfigurator.typename = \"\""),
+                "{ini}"
+            );
+            assert!(
+                ini.contains("*.sw02.macTable.forwardingTable"),
+                "绕路交换机应在表里：{ini}"
+            );
+            assert!(
+                ini.contains("{address: \"es02%eth0\", interface: \"eth2\"}"),
+                "sw01 正向应指向绕路端口 eth2：{ini}"
+            );
+        });
+    }
+
+    /// 凭证 NULL 存量流：重推导成功、bundle 含最短路（直连 sw03）条目，不含绕路 sw02，不报错。
+    #[test]
+    fn verify_pin_null_credential_uses_shortest() {
+        tauri::async_runtime::block_on(async {
+            let (pool, dir) = fresh_pool().await;
+            seed_triangle(&pool, dir.path()).await;
+            sqlx::query("INSERT INTO flow_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener, max_latency_us) VALUES ('s1', 0, 'ST', 7, 500, 512, 3, '1', '2', 400)")
+                .execute(&pool).await.unwrap();
+            let runner = CapturingRunner {
+                outcome: outcome(None),
+                ini: std::sync::Mutex::new(None),
+            };
+            let r = verify_tas_inner(&pool, dir.path(), "s1", &runner)
+                .await
+                .unwrap();
+            assert_ne!(r.status, "route_error", "{r:?}");
+            assert_ne!(r.status, "bundle_error", "{r:?}");
+            let ini = runner.ini.lock().unwrap().clone().unwrap();
+            assert!(ini.contains("*.sw01.macTable.forwardingTable"), "{ini}");
+            assert!(
+                !ini.contains("*.sw02.macTable.forwardingTable"),
+                "最短路不经绕路交换机 sw02：{ini}"
+            );
+            assert!(
+                ini.contains("{address: \"es02%eth0\", interface: \"eth1\"}"),
+                "sw01 正向应指向直连端口 eth1：{ini}"
+            );
+        });
+    }
+
+    /// 单平面等长多路径（菱形）未消歧流：验证响亮失败 route_error，消息含流名与消歧引导。
+    #[test]
+    fn verify_single_plane_ambiguous_fails_loud() {
+        tauri::async_runtime::block_on(async {
+            let (pool, dir) = fresh_pool().await;
+            // 菱形：1—0，0—4—2 与 0—3—2 两条等长。
+            for (mid, ty, ord) in [
+                ("0", "switch", 0),
+                ("3", "switch", 1),
+                ("4", "switch", 2),
+                ("1", "endSystem", 3),
+                ("2", "endSystem", 4),
+            ] {
+                sqlx::query("INSERT INTO topology_nodes (session_id, mid, name, x, y, node_type, port_count, queue_count, insert_order) VALUES ('s1', ?, NULL, 0, 0, ?, 8, 8, ?)")
+                    .bind(mid).bind(ty).bind(ord).execute(&pool).await.unwrap();
+            }
+            for (seq, src, sp, dst, dp) in [
+                (0, "1", 0, "0", 0),
+                (1, "0", 1, "4", 0),
+                (2, "4", 1, "2", 0),
+                (3, "0", 2, "3", 0),
+                (4, "3", 1, "2", 1),
+            ] {
+                sqlx::query("INSERT INTO topology_links (session_id, link_seq, name, src_node, dst_node, src_port, dst_port, speed, styles_json) VALUES ('s1', ?, NULL, ?, ?, ?, ?, 1000, '{}')")
+                    .bind(seq).bind(src).bind(dst).bind(sp).bind(dp).execute(&pool).await.unwrap();
+            }
+            sqlx::query("INSERT INTO timesync_domain (session_id, gm_mid) VALUES ('s1', '1')")
+                .execute(&pool)
+                .await
+                .unwrap();
+            for mid in ["0", "1", "2", "3", "4"] {
+                sqlx::query("INSERT INTO timesync_nodes (session_id, mid, master_port, slave_port) VALUES ('s1', ?, '[]', '[]')")
+                    .bind(mid).execute(&pool).await.unwrap();
+            }
+            seed_gcl_archive(dir.path(), &gate_par_lines("sw01", 1, 7, "[300us, 700us]"));
+            sqlx::query("INSERT INTO flow_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener, max_latency_us) VALUES ('s1', 0, 'ST', 7, 500, 512, 3, '1', '2', 400)")
+                .execute(&pool).await.unwrap();
+            let r = verify_tas_inner(
+                &pool,
+                dir.path(),
+                "s1",
+                &MockRunner {
+                    outcome: outcome(None),
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(r.status, "route_error", "{r:?}");
+            let msg = r.message.as_deref().unwrap_or_default();
+            assert!(msg.contains("流 0"), "含流名：{msg}");
+            assert!(msg.contains("消歧"), "含消歧引导：{msg}");
+        });
+    }
+
+    /// 跨流冲突（主用例形态 ST 绕路凭证 + BE 最短路）：U1 冲突冒泡为 bundle_error，消息点名
+    /// 冲突流对 + 消解引导。
+    #[test]
+    fn verify_cross_flow_conflict_bubbles() {
+        tauri::async_runtime::block_on(async {
+            let (pool, dir) = fresh_pool().await;
+            seed_triangle(&pool, dir.path()).await;
+            // ST 绕路凭证。
+            let paths = r#"[{"node_path":["1","0","3","4","2"],"link_seqs":[0,3,4,2]}]"#;
+            sqlx::query("INSERT INTO flow_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener, max_latency_us, paths) VALUES ('s1', 0, 'ST', 7, 500, 512, 3, '1', '2', 400, ?)")
+                .bind(paths).execute(&pool).await.unwrap();
+            // BE 无凭证 → 最短路（直连），在 sw01 与 ST 绕路出口冲突。
+            sqlx::query("INSERT INTO flow_streams (session_id, stream_seq, class, pcp, period_us, frame_bytes, count, talker, listener) VALUES ('s1', 1, 'BE', 0, 500, 512, 3, '1', '2')")
+                .execute(&pool).await.unwrap();
+            let r = verify_tas_inner(
+                &pool,
+                dir.path(),
+                "s1",
+                &MockRunner {
+                    outcome: outcome(None),
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(r.status, "bundle_error", "{r:?}");
+            let msg = r.message.as_deref().unwrap_or_default();
+            assert!(
+                msg.contains("流 0") && msg.contains("流 1"),
+                "点名冲突流对：{msg}"
+            );
+            assert!(msg.contains("同侧"), "含消解引导：{msg}");
+        });
+    }
+
+    /// 含 RC 流集：ini 无转发钉死段（FRER 单写入者，R2）；凭证被忽略走重推导。
+    #[test]
+    fn verify_rc_session_has_no_forwarding_pinning() {
+        tauri::async_runtime::block_on(async {
+            let (pool, dir) = fresh_pool().await;
+            let paths = r#"{"a":{"node_path":["1","0","2"],"link_seqs":[0,1]},"b":{"node_path":["1","3","2"],"link_seqs":[2,3]}}"#;
+            seed_dual_plane_rc(&pool, paths).await;
+            let csv = healthy_csv("TsnAgentFlowTasNetwork.es02.app[0].sink", 2001);
+            let runner = CapturingRunner {
+                outcome: outcome(Some(&csv)),
+                ini: std::sync::Mutex::new(None),
+            };
+            let r = verify_tas_inner(&pool, dir.path(), "s1", &runner)
+                .await
+                .unwrap();
+            assert_ne!(r.status, "bundle_error", "{r:?}");
+            let ini = runner.ini.lock().unwrap().clone().unwrap();
+            assert!(!ini.contains("forwardingTable"), "含 RC 不钉死：{ini}");
+            assert!(
+                !ini.contains("*.macForwardingTableConfigurator.typename = \"\""),
+                "{ini}"
+            );
+            assert!(!ini.contains("GlobalArp"), "含 RC 不发 GlobalArp：{ini}");
         });
     }
 

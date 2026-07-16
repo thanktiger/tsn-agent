@@ -13,6 +13,7 @@
 //! `ethg[k]` 还是 `eth[k]`、以及 `.vec` 里 `timeChanged` 的真实 module 路径，再固化 scavetool
 //! filter。端口→k 的换算规则（本模块）不依赖实跑、已固化。
 
+use crate::flow_route::Route;
 use crate::topology_verify::{VerifyError, VerifyLink, VerifyNode};
 use std::collections::BTreeMap;
 
@@ -98,7 +99,9 @@ pub struct FlowStreamSpec {
 #[allow(dead_code)] // 变体由 U7(plan_tas)/U8(verify_tas) 构造。
 pub enum FlowTasSchedule<'a> {
     Synth,
-    Pin(&'a [GclEntry]),
+    /// `Pin(gcl, routes)`：`routes`=每条 ST/BE 流的 `(stream_seq, Route)`（KTD13 转发钉死用，
+    /// 空 slice=不钉死）。含 RC 会话由调用方传空 routes（现状 FRER 单写入者，见 KTD3）。
+    Pin(&'a [GclEntry], &'a [(i64, Route)]),
 }
 
 /// UDP app 端口基址（每流唯一端口 = 基址 + 稠密下标）。
@@ -486,6 +489,129 @@ fn talker_eth0_plane(
                 || (l.dst_node == mid && l.dst_port == Some(min_port))
         })
         .and_then(crate::flow_route::link_plane)
+}
+
+/// 节点在指定链路上的库端口 → ethN（无该端口/无映射 → None）。KTD13：转发表键与 destAddress
+/// 后缀共用它取端点 `%ethN`，保证 L2 转发键与 L3 目的解析落同一接口（防多宿端系统失配泛洪）。
+fn endpoint_eth(
+    link: &VerifyLink,
+    node: &str,
+    port_eth: &BTreeMap<String, BTreeMap<i64, usize>>,
+) -> Option<usize> {
+    let port = if link.src_node == node {
+        link.src_port
+    } else if link.dst_node == node {
+        link.dst_port
+    } else {
+        None
+    }?;
+    port_eth.get(node).and_then(|m| m.get(&port)).copied()
+}
+
+/// 路径 listener 侧末链入口端口 → ethN（KTD13 P2：destAddress `%ethN` 与转发表键同源）。
+fn route_listener_eth(
+    r: &Route,
+    by_seq: &BTreeMap<i64, &VerifyLink>,
+    port_eth: &BTreeMap<String, BTreeMap<i64, usize>>,
+) -> Option<usize> {
+    let listener = r.node_path.last()?;
+    let &last_seq = r.link_seqs.last()?;
+    let last = by_seq.get(&last_seq)?;
+    endpoint_eth(last, listener, port_eth)
+}
+
+/// KTD13：把每条 ST/BE 流的路径凭证翻译成逐交换机静态 L2 转发条目（forward-only）。
+/// 返回 `交换机 ned 名 → Vec<(目的地址 "ned%ethN", 出口 ethN)>`（(ned,dest) 键有序 → Vec 天然
+/// 按 dest 排序，确定性）。每条流沿 `route.egress`（除 talker）每交换机 hop → 去 listener 走该 hop
+/// 出口，目的地址锚 listener 末链入口端口（`route_listener_eth`，与 destAddress `%ethN` 同源，消
+/// 双宿端系统裸名 MAC 解析歧义）。**不写反向（dest=talker）条目**：返回方向的覆盖由返回那条流自己
+/// 的正向条目提供；反向在含环拓扑致伪冲突，纯 talker 的 ARP 单播由 pin bundle 的 GlobalArp 消除、
+/// 非靠反向条目。跨流冲突（两流发往同一 listener 在共享交换机要求不同出口）静态 MAC 转发不分流、
+/// 物理不可满足 → 响亮 `FORWARDING_CONFLICT`（点名两流 + 交换机 + 消解引导，文案照 flow_route 先例）；
+/// 同键同出口去重。终端口从 `link_seqs` + `port_eth` 同源取（凭证已过复验，映射失败属内部不变量
+/// 破坏，`FORWARDING_INTERNAL` 直接 Err）。
+pub(crate) fn build_forwarding_tables(
+    routes: &[(i64, Route)],
+    links: &[VerifyLink],
+    port_eth: &BTreeMap<String, BTreeMap<i64, usize>>,
+    ned_names: &BTreeMap<String, String>,
+    switch_mids: &std::collections::BTreeSet<String>,
+) -> Result<BTreeMap<String, Vec<(String, usize)>>, VerifyError> {
+    let by_seq: BTreeMap<i64, &VerifyLink> = links.iter().map(|l| (l.link_seq, l)).collect();
+    let internal_err = |seq: i64, what: &str| VerifyError {
+        code: "FORWARDING_INTERNAL".to_string(),
+        message_zh: format!("流 {seq} 转发表构造内部不变量破坏：{what}（凭证应已过复验）。"),
+        node_ref: None,
+    };
+    // 键 (交换机 ned, 目的地址) → (出口 ethN, 来源 stream_seq)。冲突/去重据此判。
+    let mut acc: BTreeMap<(String, String), (usize, i64)> = BTreeMap::new();
+    let push = |acc: &mut BTreeMap<(String, String), (usize, i64)>,
+                sw_ned: &str,
+                dest: String,
+                egress: usize,
+                seq: i64|
+     -> Result<(), VerifyError> {
+        match acc.get(&(sw_ned.to_string(), dest.clone())) {
+            Some(&(prev_eg, prev_seq)) if prev_eg != egress => Err(VerifyError {
+                code: "FORWARDING_CONFLICT".to_string(),
+                message_zh: format!(
+                    "交换机 {sw_ned} 上流 {prev_seq} 与流 {seq} 对同一目的 {dest} 要求不同出口（eth{prev_eg} vs eth{egress}），静态 MAC 转发无法按流区分。请为共享该端点的流指定与绕路同侧的路径后重试。"
+                ),
+                node_ref: None,
+            }),
+            Some(_) => Ok(()), // 同出口重复 → 去重。
+            None => {
+                acc.insert((sw_ned.to_string(), dest), (egress, seq));
+                Ok(())
+            }
+        }
+    };
+
+    for (seq, r) in routes {
+        let seq = *seq;
+        if r.node_path.len() < 2 {
+            continue;
+        }
+        let talker = &r.node_path[0];
+        let listener = &r.node_path[r.node_path.len() - 1];
+        // 目的地址锚：listener 末链入口端口经 route_listener_eth（destAddress %ethN 同源，消双宿
+        // 裸名歧义）。凭证已过复验，映射失败属内部不变量破坏。
+        let Some(l_eth) = route_listener_eth(r, &by_seq, port_eth) else {
+            return Err(internal_err(seq, "端点端口无法映射到 ethN"));
+        };
+        let ned_of = |mid: &str| {
+            ned_names
+                .get(mid)
+                .cloned()
+                .unwrap_or_else(|| mid.to_string())
+        };
+        let listener_addr = format!("{}%eth{l_eth}", ned_of(listener));
+
+        // 正向：egress 除 talker 每交换机 hop → 去 listener（走该 hop 的 egress 端口）。
+        // 中间转发节点必须是交换机（端系统无 macTable，钉不了）——非交换机响亮 Err，
+        // 不静默跳过（否则漏条目 + 自动配置器已关 → 泛洪）。
+        for (mid, eg) in r.egress.iter() {
+            if mid == talker {
+                continue;
+            }
+            if !switch_mids.contains(mid) {
+                return Err(internal_err(
+                    seq,
+                    "路径中间转发节点非交换机，无 macTable 可钉",
+                ));
+            }
+            let Some(sw_ned) = ned_names.get(mid) else {
+                return Err(internal_err(seq, "交换机无 ned 名"));
+            };
+            push(&mut acc, sw_ned, listener_addr.clone(), *eg, seq)?;
+        }
+    }
+
+    let mut out: BTreeMap<String, Vec<(String, usize)>> = BTreeMap::new();
+    for ((sw_ned, dest), (egress, _seq)) in acc {
+        out.entry(sw_ned).or_default().push((dest, egress));
+    }
+    Ok(out)
 }
 
 /// mid → ned 名（sw{NN}/es{NN}，两位零填充）映射，`map_and_validate` 的命名单一源（按节点
@@ -1144,6 +1270,7 @@ fn build_flow_tas_ini(
     schedule: FlowTasSchedule,
     splits: &BTreeMap<String, SplitEs>,
     links: &[VerifyLink],
+    forwarding: &BTreeMap<String, Vec<(String, usize)>>,
 ) -> String {
     // sim 时长按流量推导（非固定 60s）：INET ActivePacketSource 无「产 N 个就停」参数、按
     // productionInterval 持续产包直到 sim 结束，故 sim 时长决定产包数。取 ST+RC 流 count×period
@@ -1202,7 +1329,7 @@ fn build_flow_tas_ini(
     // 平面==推导平面 A：全部相等 → 零下发（缺省即对齐）；任一不等 → 三件套（`%ethN` 目的地址 +
     // configurator 手工 <route> + addStaticRoutes=false，addStaticRoutes 全局生效故所有流都补
     // route）。macTable 静态下发钉不动平面（决定点在 talker L3 出口，spike 押注⑤实证），不走。
-    let is_pin = matches!(&schedule, FlowTasSchedule::Pin(_));
+    let is_pin = matches!(&schedule, FlowTasSchedule::Pin(..));
     let dual_plane = links
         .iter()
         .any(|l| crate::flow_route::link_plane(l).is_some());
@@ -1212,8 +1339,9 @@ fn build_flow_tas_ini(
         && streams
             .iter()
             .any(|s| talker_eth0_plane(links, port_eth, &s.talker).as_deref() != Some("A"));
-    // stream idx → listener 平面 A 侧接口后缀 "%ethK"；route 行按 (talker,listener) 去重。
-    let mut pin_dest: BTreeMap<usize, String> = BTreeMap::new();
+    // stream_seq → listener 平面 A 侧接口后缀 "%ethK"（与 forward_dest 同键，消费处单一约定）；
+    // route 行按 (talker,listener) 去重。
+    let mut pin_dest: BTreeMap<i64, String> = BTreeMap::new();
     let mut route_lines: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     if pin_kit {
         for &i in &order {
@@ -1249,12 +1377,28 @@ fn build_flow_tas_ini(
             ) else {
                 continue;
             };
-            pin_dest.insert(i, format!("%eth{k_l}"));
+            pin_dest.insert(s.stream_seq, format!("%eth{k_l}"));
             route_lines.insert(format!(
                 "<route hosts='{}' destination='{}%eth{k_l}' netmask='255.255.255.255' interface='eth{k_t}'/>",
                 ned(&s.talker),
                 ned(&s.listener)
             ));
+        }
+    }
+
+    // KTD13 P2：发射静态转发表时，listener destAddress 也须带 `%ethN`——转发表键按 `%ethN`
+    // 编、自动配置器已关无学习兜底，若 destAddress 是裸名（多宿端系统解析到别的接口 MAC）则
+    // 查表 miss → 泛洪。后缀从与转发表同一份 routes 的 listener 末链入口端口取（route_listener_eth
+    // 同源），单宿端系统恒 %eth0 与裸名等价、位级不变。仅 is_pin && !frer && 有转发条目时填。
+    let mut forward_dest: BTreeMap<i64, String> = BTreeMap::new();
+    if is_pin && !frer && !forwarding.is_empty() {
+        let by_seq: BTreeMap<i64, &VerifyLink> = links.iter().map(|l| (l.link_seq, l)).collect();
+        if let FlowTasSchedule::Pin(_, routes) = &schedule {
+            for (seq, r) in *routes {
+                if let Some(l_eth) = route_listener_eth(r, &by_seq, port_eth) {
+                    forward_dest.insert(*seq, format!("%eth{l_eth}"));
+                }
+            }
         }
     }
 
@@ -1271,7 +1415,13 @@ fn build_flow_tas_ini(
             let p = &placements[i];
             let a = p.talker_app;
             let lned = ned(&s.listener);
-            let dest_suffix = pin_dest.get(&i).cloned().unwrap_or_default();
+            // forward_dest（转发表同源）优先——它保证 L3 目的与 L2 转发键落同一接口；
+            // pin_kit 的 pin_dest 在双平面无 RC 场景与之等值，作后备。
+            let dest_suffix = forward_dest
+                .get(&s.stream_seq)
+                .or_else(|| pin_dest.get(&s.stream_seq))
+                .cloned()
+                .unwrap_or_default();
             ini.push_str(&format!("*.{tned}.app[{a}].typename = \"UdpSourceApp\"\n"));
             ini.push_str(&format!(
                 "*.{tned}.app[{a}].io.destAddress = \"{lned}{dest_suffix}\"\n"
@@ -1450,6 +1600,28 @@ fn build_flow_tas_ini(
         ));
     }
 
+    // --- 静态 L2 转发钉死（KTD13，is_pin && !frer）---
+    // 关自动配置器（否则整体覆盖 forwardingTable）+ 显式 GlobalArp + 逐交换机 forwardingTable +
+    // 拉大 agingTime（默认 120s 会淘汰静态条目）——但 fs 精度（simtime-scale -15）下 simtime 上限
+    // ≈9223.37s，不能取任意大值（1e6s 会在 MacForwardingTable 初始化解析时溢出报错）；9000s 远超任何
+    // TAS 软仿时长、静态条目全程不淘汰，且留余量不越界。行序由 BTreeMap 保证确定性。与 pin_kit
+    // （L3 出口平面选择）互补：那锚 talker L3 出口平面，这钉每跳 L2 转发。
+    if is_pin && !frer && !forwarding.is_empty() {
+        ini.push_str("*.macForwardingTableConfigurator.typename = \"\"\n");
+        // GlobalArp：全网 init 解析 IP→MAC、零 ARP 帧上线 → forward-only 只钉 dest=listener，纯
+        // talker（无正向覆盖的目的）也无单播 ARP-reply 命中缺条目泛洪（学习随静态表禁用，环拓扑成风暴）。
+        ini.push_str("**.arp.typename = \"GlobalArp\"\n");
+        for (sw, entries) in forwarding {
+            let items = entries
+                .iter()
+                .map(|(dest, eth)| format!("{{address: \"{dest}\", interface: \"eth{eth}\"}}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            ini.push_str(&format!("*.{sw}.macTable.forwardingTable = [{items}]\n"));
+        }
+        ini.push_str("**.macTable.agingTime = 9000s\n");
+    }
+
     // --- 门控段 ---
     match schedule {
         FlowTasSchedule::Synth => {
@@ -1493,7 +1665,7 @@ fn build_flow_tas_ini(
                 "*.gateScheduleConfigurator.configuration =\n    [{entries}]\n"
             ));
         }
-        FlowTasSchedule::Pin(gcl) => {
+        FlowTasSchedule::Pin(gcl, _) => {
             // 不声明 gateScheduleConfigurator.typename（保持 ""=不实例化）→ 门参数直接生效。
             for g in gcl {
                 let node = ned(&g.node);
@@ -1596,9 +1768,30 @@ pub fn build_flow_tas_sim_bundle(
     // 互补关窗（U5/KTD5，仅 pin）：会话存在 BE/RC 流才从 ST 门表推导补集条目追加进 pin 集；
     // 纯 ST 会话补集恒空、ini 位级不变。BE/RC 存在性从全流集判定（verify 传入全流集；
     // has_rc 兼看 overrides——与帧开销的会话级口径同源）。推导失败（占满/容不下 MTU 帧）响亮返错。
+    // KTD13 静态转发表（仅 pin && 无 RC）：从路径凭证算逐交换机正向（forward-only，dest=listener）
+    // 条目，跨流冲突/歧义响亮 Err。含 RC 会话（FRER 单写入者，KTD3）由调用方传空 routes → 空表 → ini 零改动。
+    let forwarding: BTreeMap<String, Vec<(String, usize)>> = match &schedule {
+        FlowTasSchedule::Pin(_, routes) => {
+            let frer = streams.iter().any(|s| s.class == "RC");
+            if frer || routes.is_empty() {
+                BTreeMap::new()
+            } else {
+                let ned_names = node_ned_names(nodes);
+                let switch_mids: std::collections::BTreeSet<String> = nodes
+                    .iter()
+                    .filter(|n| map_node_type(n.node_type.as_deref()) == Some("TsnSwitch"))
+                    .map(|n| n.mid.clone())
+                    .collect();
+                build_forwarding_tables(routes, links, &port_eth, &ned_names, &switch_mids)
+                    .map_err(|e| vec![e])?
+            }
+        }
+        FlowTasSchedule::Synth => BTreeMap::new(),
+    };
+
     let pin_with_complement: Vec<GclEntry>;
     let schedule = match schedule {
-        FlowTasSchedule::Pin(gcl) => {
+        FlowTasSchedule::Pin(gcl, routes) => {
             let has_rc = overrides.has_rc || streams.iter().any(|s| s.class == "RC");
             let has_be = streams.iter().any(|s| s.class == "BE");
             let queue_counts: BTreeMap<String, i64> = mapped
@@ -1609,14 +1802,23 @@ pub fn build_flow_tas_sim_bundle(
             let comp = complement_gcl(gcl, &queue_counts, &port_rates, has_rc, has_be)
                 .map_err(|e| vec![e])?;
             pin_with_complement = gcl.iter().cloned().chain(comp).collect();
-            FlowTasSchedule::Pin(&pin_with_complement)
+            FlowTasSchedule::Pin(&pin_with_complement, routes)
         }
         FlowTasSchedule::Synth => FlowTasSchedule::Synth,
     };
 
     let gm_ned = &mapped[gm_mid].ned_name;
     let omnetpp_ini = build_flow_tas_ini(
-        &mapped, &port_eth, gm_ned, timing, overrides, streams, schedule, &splits, links,
+        &mapped,
+        &port_eth,
+        gm_ned,
+        timing,
+        overrides,
+        streams,
+        schedule,
+        &splits,
+        links,
+        &forwarding,
     );
 
     let manifest = serde_json::json!({
@@ -2021,7 +2223,7 @@ mod tests {
             &timing,
             &SimOverrides::default(),
             &flow_streams(),
-            FlowTasSchedule::Pin(&gcl),
+            FlowTasSchedule::Pin(&gcl, &[]),
             "s1",
             7,
         )
@@ -2066,6 +2268,128 @@ mod tests {
             "{}",
             b.bundle.network_ned
         );
+    }
+
+    // ---------- U2（KTD13）：ini 发射转发钉死段 ----------
+
+    /// Pin + 纯 ST/BE + 非空 routes：ini 含关配置器行、GlobalArp 行、逐交换机 forwardingTable
+    /// 行（forward-only：仅 dest=listener）、agingTime 行。
+    #[test]
+    fn pin_pure_stbe_emits_forwarding_table() {
+        let (nodes, links, timing) = sample();
+        // 1→2 经 sw0：link_seqs [0,1]，node_path [1,0,2]。
+        let r = crate::flow_route::build_route_from_link_seqs(&[0, 1], "1", "2", &links).unwrap();
+        let routes = vec![(0i64, r.clone()), (1i64, r)]; // BE(seq0)+ST(seq1) 同路 → 去重
+        let b = build_flow_tas_sim_bundle(
+            &nodes,
+            &links,
+            "1",
+            &timing,
+            &SimOverrides::default(),
+            &flow_streams(),
+            FlowTasSchedule::Pin(&[], &routes),
+            "s1",
+            7,
+        )
+        .unwrap();
+        let ini = &b.bundle.omnetpp_ini;
+        assert!(
+            ini.contains("*.macForwardingTableConfigurator.typename = \"\""),
+            "{ini}"
+        );
+        // GlobalArp：坐实零 ARP 帧（forward-only 纯 talker 防泛洪护栏）。
+        assert!(
+            ini.contains("**.arp.typename = \"GlobalArp\""),
+            "pin 段须显式 GlobalArp：{ini}"
+        );
+        // forward-only：sw01 只余去 listener(es02) 的正向条目，无 dest=talker(es01) 反向项。
+        assert!(
+            ini.contains(
+                "*.sw01.macTable.forwardingTable = [{address: \"es02%eth0\", interface: \"eth0\"}]"
+            ),
+            "{ini}"
+        );
+        // fs 精度 simtime 上限 ≈9223.37s：agingTime 须 ≤ 之，否则 INET init 溢出（真机实证）。
+        assert!(ini.contains("**.macTable.agingTime = 9000s"), "{ini}");
+        assert!(
+            !ini.contains("agingTime = 1000000s"),
+            "agingTime 不得越 fs simtime 上限：{ini}"
+        );
+        // P2：发射转发表时 destAddress 也带 %ethN（与转发键同源）——单宿端系统恒 %eth0。
+        assert!(
+            ini.contains("io.destAddress = \"es02%eth0\""),
+            "destAddress 须带 %ethN 后缀与转发键一致：{ini}"
+        );
+    }
+
+    /// P3：路径中间转发节点是端系统（无 macTable）→ 响亮 FORWARDING_INTERNAL，不静默漏条目。
+    #[test]
+    fn forwarding_transit_end_system_errors_loud() {
+        let nodes = vec![
+            node("t", "endSystem"),
+            node("x", "endSystem"), // 多口端系统当中转——无 macTable，钉不了。
+            node("l", "endSystem"),
+        ];
+        let links = vec![plink(0, "t", 0, "x", 0), plink(1, "x", 1, "l", 0)];
+        let port_eth = build_port_eth_map(&links);
+        let ned = node_ned_names(&nodes);
+        let r = route_via(&[0, 1], "t", "l", &links);
+        let err = build_forwarding_tables(&[(0, r)], &links, &port_eth, &ned, &sw_set(&nodes))
+            .unwrap_err();
+        assert_eq!(err.code, "FORWARDING_INTERNAL");
+    }
+
+    /// Pin + 含 RC（即便传了 routes）：转发钉死三类行全不出现（FRER 单写入者），FRER 段仍在。
+    #[test]
+    fn pin_with_rc_omits_forwarding_table() {
+        let (nodes, links, timing) = dual_plane_sample();
+        let r = crate::flow_route::build_route_from_link_seqs(&[0, 1], "1", "2", &links).unwrap();
+        let b = build_flow_tas_sim_bundle(
+            &nodes,
+            &links,
+            "0",
+            &timing,
+            &SimOverrides {
+                has_rc: true,
+                ..Default::default()
+            },
+            &rc_session_streams(),
+            FlowTasSchedule::Pin(&[], &[(0, r)]),
+            "s1",
+            7,
+        )
+        .unwrap();
+        let ini = &b.bundle.omnetpp_ini;
+        assert!(!ini.contains("forwardingTable"), "含 RC 不钉死：{ini}");
+        assert!(
+            !ini.contains("*.macForwardingTableConfigurator.typename = \"\""),
+            "{ini}"
+        );
+        assert!(!ini.contains("GlobalArp"), "含 RC 不发 GlobalArp：{ini}");
+        assert!(
+            ini.contains("*.*.hasStreamRedundancy = true"),
+            "FRER 段仍在：{ini}"
+        );
+    }
+
+    /// Synth 模式：转发钉死段不出现（规划 bundle 零影响）。
+    #[test]
+    fn synth_mode_omits_forwarding_table() {
+        let (nodes, links, timing) = sample();
+        let b = build_flow_tas_sim_bundle(
+            &nodes,
+            &links,
+            "1",
+            &timing,
+            &SimOverrides::default(),
+            &flow_streams(),
+            FlowTasSchedule::Synth,
+            "s1",
+            7,
+        )
+        .unwrap();
+        assert!(!b.bundle.omnetpp_ini.contains("forwardingTable"));
+        assert!(!b.bundle.omnetpp_ini.contains("GlobalArp"));
     }
 
     /// synth 模式：Z3 配置器 + configuration 数组（含 +58B 开销、ST pcp7、pathFragments）。
@@ -2224,6 +2548,238 @@ mod tests {
 
     // ---------- U4：RC FRER 装配 / 双宿拆分 / 平面钉死 ----------
 
+    // ---------- U1（KTD13）：静态转发表构造 ----------
+
+    /// 无 plane 键的单平面链路（转发表构造与平面无关，derive 用 plane=None 全链路）。
+    fn plink(seq: i64, src: &str, sp: i64, dst: &str, dp: i64) -> VerifyLink {
+        VerifyLink {
+            link_seq: seq,
+            src_node: src.into(),
+            dst_node: dst.into(),
+            src_port: Some(sp),
+            dst_port: Some(dp),
+            speed: None,
+            styles_json: "{}".into(),
+        }
+    }
+
+    fn route_via(
+        seqs: &[i64],
+        talker: &str,
+        listener: &str,
+        links: &[VerifyLink],
+    ) -> crate::flow_route::Route {
+        crate::flow_route::build_route_from_link_seqs(seqs, talker, listener, links).unwrap()
+    }
+
+    fn sw_set(nodes: &[VerifyNode]) -> std::collections::BTreeSet<String> {
+        nodes
+            .iter()
+            .filter(|n| map_node_type(n.node_type.as_deref()) == Some("TsnSwitch"))
+            .map(|n| n.mid.clone())
+            .collect()
+    }
+
+    /// 直路 t—s1—s2—l（forward-only）：沿途每交换机只含去 listener 的正向条目，出口 ethN 与
+    /// links 一致，地址带 %ethN；无 dest=talker 反向条目。
+    #[test]
+    fn forwarding_linear_forward_only_entries() {
+        let nodes = vec![
+            node("t", "endSystem"),
+            node("l", "endSystem"),
+            node("s1", "switch"),
+            node("s2", "switch"),
+        ];
+        let links = vec![
+            plink(0, "t", 0, "s1", 0),
+            plink(1, "s1", 1, "s2", 0),
+            plink(2, "s2", 1, "l", 0),
+        ];
+        let port_eth = build_port_eth_map(&links);
+        let ned = node_ned_names(&nodes);
+        let r = route_via(&[0, 1, 2], "t", "l", &links);
+        let fwd =
+            build_forwarding_tables(&[(0, r)], &links, &port_eth, &ned, &sw_set(&nodes)).unwrap();
+        // t=es01, l=es02, s1=sw01, s2=sw02。仅去 listener(es02) 正向条目、无 es01 反向。
+        assert_eq!(
+            fwd.get("sw01").unwrap(),
+            &vec![("es02%eth0".to_string(), 1)]
+        );
+        assert_eq!(
+            fwd.get("sw02").unwrap(),
+            &vec![("es02%eth0".to_string(), 1)]
+        );
+        // talker/listener 不进表。
+        assert!(!fwd.contains_key("es01") && !fwd.contains_key("es02"));
+    }
+
+    /// 绕路流（三角拓扑）：中间交换机 s2 出现；直连口交换机 s1 的正向条目指向绕路端口（eth2）
+    /// 而非直连端口（eth1）。
+    #[test]
+    fn forwarding_detour_uses_detour_port() {
+        let nodes = vec![
+            node("t", "endSystem"),
+            node("l", "endSystem"),
+            node("s1", "switch"),
+            node("s2", "switch"),
+            node("s3", "switch"),
+        ];
+        let links = vec![
+            plink(0, "t", 0, "s1", 0),
+            plink(1, "s1", 1, "s3", 0), // 直连 s1—s3
+            plink(2, "s3", 1, "l", 0),
+            plink(3, "s1", 2, "s2", 0), // 绕路 s1—s2—s3
+            plink(4, "s2", 1, "s3", 2),
+        ];
+        let port_eth = build_port_eth_map(&links);
+        let ned = node_ned_names(&nodes);
+        // 绕路 link_seqs [0,3,4,2]：t-s1-s2-s3-l。
+        let r = route_via(&[0, 3, 4, 2], "t", "l", &links);
+        let fwd =
+            build_forwarding_tables(&[(0, r)], &links, &port_eth, &ned, &sw_set(&nodes)).unwrap();
+        // forward-only：沿途每交换机只含去 listener=es02%eth0 的正向条目（无 dest=talker 反向）。
+        // s1 走绕路口 eth2（非直连 eth1）、s2 走 eth1、s3 走 eth1。
+        assert_eq!(
+            fwd.get("sw01").unwrap(),
+            &vec![("es02%eth0".to_string(), 2)]
+        );
+        assert_eq!(
+            fwd.get("sw02").unwrap(),
+            &vec![("es02%eth0".to_string(), 1)]
+        );
+        assert_eq!(
+            fwd.get("sw03").unwrap(),
+            &vec![("es02%eth0".to_string(), 1)]
+        );
+    }
+
+    /// 两流同 (sw, 目的地址) 同出口（同路径）→ 去重为一条（forward-only 每交换机恰 1 条目）。
+    #[test]
+    fn forwarding_dedup_same_egress() {
+        let nodes = vec![
+            node("t", "endSystem"),
+            node("l", "endSystem"),
+            node("s1", "switch"),
+            node("s2", "switch"),
+        ];
+        let links = vec![
+            plink(0, "t", 0, "s1", 0),
+            plink(1, "s1", 1, "s2", 0),
+            plink(2, "s2", 1, "l", 0),
+        ];
+        let port_eth = build_port_eth_map(&links);
+        let ned = node_ned_names(&nodes);
+        let r0 = route_via(&[0, 1, 2], "t", "l", &links);
+        let r1 = route_via(&[0, 1, 2], "t", "l", &links);
+        let fwd = build_forwarding_tables(
+            &[(0, r0), (1, r1)],
+            &links,
+            &port_eth,
+            &ned,
+            &sw_set(&nodes),
+        )
+        .unwrap();
+        assert_eq!(fwd.get("sw01").unwrap().len(), 1, "去重后每交换机 1 条目");
+        assert_eq!(fwd.get("sw02").unwrap().len(), 1);
+    }
+
+    /// 主用例冲突：同 talker/listener 的绕路流（seq0）+ 最短路流（seq1）→ 正向分叉交换机 s1
+    /// 对同一 listener 目的要求不同出口 → FORWARDING_CONFLICT，点名两流 + 交换机 + 消解引导。
+    #[test]
+    fn forwarding_forward_fork_conflict() {
+        let nodes = vec![
+            node("t", "endSystem"),
+            node("l", "endSystem"),
+            node("s1", "switch"),
+            node("s2", "switch"),
+            node("s3", "switch"),
+        ];
+        let links = vec![
+            plink(0, "t", 0, "s1", 0),
+            plink(1, "s1", 1, "s3", 0), // 直连
+            plink(2, "s3", 1, "l", 0),
+            plink(3, "s1", 2, "s2", 0), // 绕路
+            plink(4, "s2", 1, "s3", 2),
+        ];
+        let port_eth = build_port_eth_map(&links);
+        let ned = node_ned_names(&nodes);
+        let detour = route_via(&[0, 3, 4, 2], "t", "l", &links); // s1 出口 eth2
+        let shortest = route_via(&[0, 1, 2], "t", "l", &links); // s1 出口 eth1
+        let err = build_forwarding_tables(
+            &[(0, detour), (1, shortest)],
+            &links,
+            &port_eth,
+            &ned,
+            &sw_set(&nodes),
+        )
+        .unwrap_err();
+        assert_eq!(err.code, "FORWARDING_CONFLICT");
+        assert!(
+            err.message_zh.contains("流 0") && err.message_zh.contains("流 1"),
+            "{}",
+            err.message_zh
+        );
+        assert!(err.message_zh.contains("sw01"), "{}", err.message_zh);
+        assert!(
+            err.message_zh.contains("同侧"),
+            "含消解引导：{}",
+            err.message_zh
+        );
+    }
+
+    /// 本 session fix 核心回归：同 talker、不同 listener、经环拓扑不同路径汇合于交换机 s。
+    /// 旧代码反向条目在 s 对 dest=talker 伪冲突（挡住合法配置）；forward-only 只钉各自 listener
+    /// → 无冲突，汇合交换机对两个不同 listener 各持一条正向条目。
+    #[test]
+    fn forwarding_shared_talker_ring_no_false_conflict() {
+        let nodes = vec![
+            node("t", "endSystem"),
+            node("l1", "endSystem"),
+            node("l2", "endSystem"),
+            node("s1", "switch"),
+            node("s2", "switch"),
+            node("s", "switch"),
+        ];
+        let links = vec![
+            plink(0, "t", 0, "s1", 0),
+            plink(1, "s1", 1, "s", 0),  // flow A: s1→s 直连
+            plink(2, "s", 1, "l1", 0),  // flow A 终
+            plink(3, "s1", 2, "s2", 0), // flow B: s1→s2
+            plink(4, "s2", 1, "s", 2),  // flow B: s2→s（环：s1-s2-s-s1）
+            plink(5, "s", 3, "l2", 0),  // flow B 终
+        ];
+        let port_eth = build_port_eth_map(&links);
+        let ned = node_ned_names(&nodes);
+        let flow_a = route_via(&[0, 1, 2], "t", "l1", &links); // t-s1-s-l1
+        let flow_b = route_via(&[0, 3, 4, 5], "t", "l2", &links); // t-s1-s2-s-l2
+        // forward-only：无伪冲突（旧代码在此对 dest=es01 反向冲突而失败）。
+        let fwd = build_forwarding_tables(
+            &[(0, flow_a), (1, flow_b)],
+            &links,
+            &port_eth,
+            &ned,
+            &sw_set(&nodes),
+        )
+        .unwrap();
+        // t=es01, l1=es02, l2=es03；s1=sw01, s2=sw02, s=sw03。
+        // sw01：去 l1(es02) 经 eth1、去 l2(es03) 经 eth2（不同 dest 共存）。
+        assert_eq!(
+            fwd.get("sw01").unwrap(),
+            &vec![("es02%eth0".to_string(), 1), ("es03%eth0".to_string(), 2)]
+        );
+        // sw02：只 flow B 经过，去 l2(es03) 经 eth1。
+        assert_eq!(
+            fwd.get("sw02").unwrap(),
+            &vec![("es03%eth0".to_string(), 1)]
+        );
+        // 汇合交换机 sw03：去 l1(es02) 经 eth1、去 l2(es03) 经 eth3——两不同 listener 各一条，
+        // 不再对 dest=talker 伪冲突（fix 核心）。
+        assert_eq!(
+            fwd.get("sw03").unwrap(),
+            &vec![("es02%eth0".to_string(), 1), ("es03%eth0".to_string(), 3)]
+        );
+    }
+
     /// 双平面 fixture：es01(mid1) 双宿 —A— sw01(mid0) —A— es02(mid2)；—B— sw02(mid3) —B—。
     /// GM=sw01(mid0)。es01/es02 端口 {0,1}：0→平面 A、1→平面 B（即 talker eth0 落平面 A）。
     fn dual_plane_sample() -> (Vec<VerifyNode>, Vec<VerifyLink>, Vec<SimNodeTiming>) {
@@ -2296,7 +2852,7 @@ mod tests {
                 ..Default::default()
             },
             &rc_session_streams(),
-            FlowTasSchedule::Pin(&[]),
+            FlowTasSchedule::Pin(&[], &[]),
             "s1",
             7,
         )
@@ -2471,7 +3027,7 @@ mod tests {
             &timing,
             &SimOverrides::default(),
             &streams,
-            FlowTasSchedule::Pin(&[]),
+            FlowTasSchedule::Pin(&[], &[]),
             "s1",
             7,
         )
@@ -2503,7 +3059,7 @@ mod tests {
             &timing,
             &SimOverrides::default(),
             &streams,
-            FlowTasSchedule::Pin(&[]),
+            FlowTasSchedule::Pin(&[], &[]),
             "s1",
             7,
         )
@@ -2706,7 +3262,7 @@ mod tests {
             &timing,
             &SimOverrides::default(),
             &streams,
-            FlowTasSchedule::Pin(&pinned),
+            FlowTasSchedule::Pin(&pinned, &[]),
             "s1",
             7,
         )
@@ -2735,7 +3291,7 @@ mod tests {
             &timing,
             &SimOverrides::default(),
             &flow_streams(), // BE + ST 混流
-            FlowTasSchedule::Pin(&pinned),
+            FlowTasSchedule::Pin(&pinned, &[]),
             "s1",
             7,
         )
@@ -2860,7 +3416,7 @@ mod tests {
                 ..Default::default()
             },
             &rc_session_streams(),
-            FlowTasSchedule::Pin(&[]),
+            FlowTasSchedule::Pin(&[], &[]),
             "s1",
             7,
         )
@@ -2920,7 +3476,7 @@ mod tests {
                 ..Default::default()
             },
             &rc_session_streams(),
-            FlowTasSchedule::Pin(&[]),
+            FlowTasSchedule::Pin(&[], &[]),
             "s1",
             7,
         )
