@@ -1173,10 +1173,41 @@ pub(crate) fn flow_sim_time_s(streams: &[FlowStreamSpec]) -> f64 {
         .max(0.001)
 }
 
-/// 某流在给定 sim 时长下的确定性产包数：floor(sim/period)+1（源在 t=0 也产一个）。
+/// 某流在给定 sim 时长下的确定性产包数：floor(sim/period)+1（源在产包起点也产一个）。
 pub(crate) fn flow_expected_sent(sim_time_s: f64, period_us: i64) -> i64 {
     let period_s = period_us.max(1) as f64 / 1_000_000.0;
     (sim_time_s / period_s).floor() as i64 + 1
+}
+
+/// flow-tas 软仿暖机延迟 W（秒）：所有流量源延后 W 启动（`initialProductionOffset`），让 gPTP
+/// 先收敛再发流，暖机丢包从源头不产生。sim-time-limit 整体加 W，产包窗仍为 `flow_sim_time_s`，
+/// 故判定层实发反推公式不变。
+/// `W = max(N × syncInterval, floor)`。U1 真机实测收敛≈2×syncInterval（pdelay 非驱动因子），
+/// N=5 给 2.5× 余量、floor 兜 syncInterval 极小情形。syncInterval 取全体节点生效值——None 节点
+/// 用 INET 默认 125ms（不得当 0），空 timing 亦回退默认。
+///
+/// **相位不变量（承重）**：W 必须是门控周期 `GATE_CYCLE_NS`（固定 1ms）的整数倍，否则产包起点
+/// 整体错开一个非整周期相位、稳态 ST 包踩空门——正是本延迟要消灭的现象。当前恒成立：syncInterval
+/// 是整数毫秒、N/floor 均整数毫秒 → W 恒整数毫秒 = 1ms 整数倍（`warmup_is_gate_cycle_multiple`
+/// 锁定）。若将来乘子/下限改成非整数毫秒或 syncInterval 支持小数，须重验此不变量。
+const FLOW_WARMUP_SYNC_MULTIPLIER: f64 = 5.0;
+const FLOW_WARMUP_FLOOR_S: f64 = 0.5;
+const INET_DEFAULT_SYNC_INTERVAL_MS: f64 = 125.0;
+
+pub(crate) fn flow_warmup_offset_s(timing: &[SimNodeTiming]) -> f64 {
+    let max_sync_ms = timing
+        .iter()
+        .map(|t| {
+            t.sync_period_ms
+                .map_or(INET_DEFAULT_SYNC_INTERVAL_MS, |v| v as f64)
+        })
+        .fold(0.0_f64, f64::max);
+    let effective_ms = if max_sync_ms > 0.0 {
+        max_sync_ms
+    } else {
+        INET_DEFAULT_SYNC_INTERVAL_MS
+    };
+    (FLOW_WARMUP_SYNC_MULTIPLIER * effective_ms / 1000.0).max(FLOW_WARMUP_FLOOR_S)
 }
 
 pub(crate) fn plan_flow_traffic(
@@ -1276,9 +1307,13 @@ fn build_flow_tas_ini(
     // productionInterval 持续产包直到 sim 结束，故 sim 时长决定产包数。取 ST+RC 流 count×period
     // 最大值（KTD7）→ 源产包数≈count（验证侧按可算的实发数判丢包，见 flow_verify_command）。
     // 允许 overrides 覆盖。
-    let sim_time = overrides
+    // 暖机延迟 W：所有源延后 W 启动（下方 initialProductionOffset）、sim-time-limit 整体加 W，
+    // 产包窗仍为 production_window_s（判定层反推同源，见 flow_verify_command）。故障断链时刻亦加 W。
+    let warmup_s = flow_warmup_offset_s(timing);
+    let production_window_s = overrides
         .sim_time_s
         .unwrap_or_else(|| flow_sim_time_s(streams));
+    let sim_time = warmup_s + production_window_s;
     let mut ini = build_general_header("tsnagent.generated.TsnAgentFlowTasNetwork", sim_time);
     ini.push_str(&build_sync_block(
         mapped, port_eth, gm_ned, timing, overrides, splits,
@@ -1434,6 +1469,10 @@ fn build_flow_tas_ini(
             ini.push_str(&format!(
                 "*.{tned}.app[{a}].source.productionInterval = {}us\n",
                 s.period_us
+            ));
+            // 暖机延迟：收敛后再发首包（ST/RC/BE 统一 W），暖机丢包不产生。
+            ini.push_str(&format!(
+                "*.{tned}.app[{a}].source.initialProductionOffset = {warmup_s}s\n"
             ));
             ini.push_str(&format!(
                 "*.{tned}.app[{a}].source.packetNameFormat = \"%M-%m-%c\"\n"
@@ -1709,9 +1748,11 @@ fn build_flow_tas_ini(
             .unwrap_or_else(|| ned(&f.src_mid));
         // 映射存在性已在 build_flow_tas_sim_bundle 前置校验。
         let eth_n = port_eth[&f.src_mid][&f.src_db_port];
+        // 断链时刻随暖机平移（W + t_break）：断链属流量时间线，t_break 在 verify 侧仍表「产包起点
+        // 偏移」，只此处写绝对仿真时间时加 W，否则断链落在发流前、尾量守卫失真。
+        let break_at_ns = (warmup_s * 1e9) as u64 + f.t_break_ns;
         ini.push_str(&format!(
-            "*.scenarioManager.script = xml(\"<script><at t='{}ns'><disconnect src-module='{module}' src-gate='ethg$o[{eth_n}]'/></at></script>\")\n",
-            f.t_break_ns
+            "*.scenarioManager.script = xml(\"<script><at t='{break_at_ns}ns'><disconnect src-module='{module}' src-gate='ethg$o[{eth_n}]'/></at></script>\")\n",
         ));
     }
 
@@ -2268,6 +2309,135 @@ mod tests {
             "{}",
             b.bundle.network_ned
         );
+    }
+
+    // ---------- U2：暖机延迟 W（延迟发流） ----------
+
+    #[test]
+    fn flow_warmup_offset_formula() {
+        use super::flow_warmup_offset_s;
+        let t = |sync: Option<i64>| SimNodeTiming {
+            mid: "x".into(),
+            master_port: vec![],
+            slave_port: vec![],
+            sync_period_ms: sync,
+            measure_period_ms: None,
+            offset_threshold_ns: None,
+        };
+        // 空 timing → 回退默认 sync=125ms → max(5×0.125, 0.5)=0.625。
+        assert!((flow_warmup_offset_s(&[]) - 0.625).abs() < 1e-9);
+        // 全 None → 各节点用默认 125ms → 0.625。
+        assert!((flow_warmup_offset_s(&[t(None), t(None)]) - 0.625).abs() < 1e-9);
+        // 显式大 sync=300ms → 5×0.3=1.5s（超下限）。
+        assert!((flow_warmup_offset_s(&[t(Some(300))]) - 1.5).abs() < 1e-9);
+        // 显式小 sync=50ms → 5×0.05=0.25 < 0.5 下限 → 0.5。
+        assert!((flow_warmup_offset_s(&[t(Some(50))]) - 0.5).abs() < 1e-9);
+        // 取全体 max：None(125) 与 200 混 → 200 主导 → 1.0s。
+        assert!((flow_warmup_offset_s(&[t(None), t(Some(200))]) - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn flow_ini_applies_warmup_offset_and_extends_sim_time() {
+        // Covers AE1：默认 sync → W=0.625s，T=flow_sim_time_s(ST count1万×250us)=2.5s → limit=3.125s。
+        let (nodes, links, timing) = sample();
+        let r = crate::flow_route::build_route_from_link_seqs(&[0, 1], "1", "2", &links).unwrap();
+        let routes = vec![(0i64, r.clone()), (1i64, r)];
+        let b = build_flow_tas_sim_bundle(
+            &nodes,
+            &links,
+            "1",
+            &timing,
+            &SimOverrides::default(),
+            &flow_streams(),
+            FlowTasSchedule::Pin(&[], &routes),
+            "s1",
+            7,
+        )
+        .unwrap();
+        let ini = &b.bundle.omnetpp_ini;
+        // 产包窗 T=2.5s + W=0.625s。
+        assert!(ini.contains("sim-time-limit = 3.125s"), "{ini}");
+        // ST(app1) 与 BE(app0) 两源统一 initialProductionOffset = W（AE3 三类混合见 warmup_applies_to_all_classes_in_rc_session）。
+        assert!(
+            ini.contains("*.es01.app[0].source.initialProductionOffset = 0.625s"),
+            "{ini}"
+        );
+        assert!(
+            ini.contains("*.es01.app[1].source.initialProductionOffset = 0.625s"),
+            "{ini}"
+        );
+        // Covers R5：判定层实发按产包窗 T（不含 W）反推——limit 加了 W，但 expected 仍用 T=2.5s。
+        // ST period=250us → floor(2.5/250us)+1=10001；用 limit(3.125s) 反推会多算，故须解耦。
+        assert!((flow_sim_time_s(&flow_streams()) - 2.5).abs() < 1e-9);
+        assert_eq!(
+            flow_expected_sent(flow_sim_time_s(&flow_streams()), 250),
+            10001
+        );
+    }
+
+    #[test]
+    fn warmup_is_gate_cycle_multiple() {
+        // 承重相位不变量：W 必须是门控周期（1ms）整数倍，否则稳态 ST 产包错相位踩空门。
+        // 覆盖默认与各生效 syncInterval——任一改成非整数毫秒 W 即红。
+        use super::flow_warmup_offset_s;
+        let t = |sync: Option<i64>| SimNodeTiming {
+            mid: "x".into(),
+            master_port: vec![],
+            slave_port: vec![],
+            sync_period_ms: sync,
+            measure_period_ms: None,
+            offset_threshold_ns: None,
+        };
+        for timing in [
+            vec![],
+            vec![t(None)],
+            vec![t(Some(50))],
+            vec![t(Some(125))],
+            vec![t(Some(200))],
+            vec![t(Some(333))],
+        ] {
+            let w_ns = (flow_warmup_offset_s(&timing) * 1e9) as u64;
+            assert_eq!(
+                w_ns % GATE_CYCLE_NS,
+                0,
+                "W={w_ns}ns 非门控周期 {GATE_CYCLE_NS}ns 整数倍 → 稳态 ST 相位错位"
+            );
+        }
+    }
+
+    #[test]
+    fn warmup_applies_to_all_classes_in_rc_session() {
+        // Covers AE3 / R1：ST+RC+BE 三类源统一 initialProductionOffset = W（dual_plane 默认 sync → 0.625s）。
+        let b = build_rc_session();
+        let ini = &b.bundle.omnetpp_ini;
+        // rc_session_streams：ST(seq0)/RC(seq1)/BE(seq2) 同 talker es01 → app[0..2] 三源全带 W。
+        let n = ini
+            .matches(".source.initialProductionOffset = 0.625s")
+            .count();
+        assert_eq!(n, 3, "三类源均应带统一 W，实得 {n}：{ini}");
+    }
+
+    #[test]
+    fn warmup_not_leaked_to_timesync_bundle() {
+        // 作用域边界：W 只在 flow-tas 路径注入，timesync bundle 不含 initialProductionOffset、
+        // sim-time-limit 不被 +W（回归现状：默认 60s）。锁死「W 不泄漏到 timesync」。
+        let (nodes, links, timing) = sample();
+        let b = build_timesync_sim_bundle(
+            &nodes,
+            &links,
+            "1",
+            &timing,
+            &SimOverrides::default(),
+            "s1",
+            1,
+        )
+        .unwrap();
+        let ini = &b.bundle.omnetpp_ini;
+        assert!(
+            !ini.contains("initialProductionOffset"),
+            "timesync 不应含暖机偏移：{ini}"
+        );
+        assert!(ini.contains("sim-time-limit = 60s"), "{ini}");
     }
 
     // ---------- U2（KTD13）：ini 发射转发钉死段 ----------
@@ -3432,10 +3602,11 @@ mod tests {
         );
         assert!(!ned.contains("hasStatus"), "押注④ hasStatus 不需要：{ned}");
         // es01(mid1) 是 RC talker 且双宿 → 拆分：库端口 0 锚在 esb01 → src-module=esb01、eth0。
+        // 断链时刻随暖机平移：W(默认 sync=125ms → 5×125=625ms=625_000_000ns) + t_break(400_000_000) = 1_025_000_000ns。
         let ini = &b.bundle.omnetpp_ini;
         assert!(
             ini.contains(
-                "*.scenarioManager.script = xml(\"<script><at t='400000000ns'><disconnect src-module='esb01' src-gate='ethg$o[0]'/></at></script>\")"
+                "*.scenarioManager.script = xml(\"<script><at t='1025000000ns'><disconnect src-module='esb01' src-gate='ethg$o[0]'/></at></script>\")"
             ),
             "{ini}"
         );

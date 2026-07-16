@@ -1639,11 +1639,12 @@ mod tests {
             // 健康轮零变化。
             assert!(!inis[0].contains("scenarioManager"), "{}", inis[0]);
             assert!(!neds[0].contains("ScenarioManager"), "{}", neds[0]);
-            // 断A轮：t=0.4×(2000×500us)=400ms；断点=链路 0（es01→sw01 有向），上游 es01 拆分
+            // 断A轮：t_break=0.4×(2000×500us)=400ms；随暖机平移 W(默认 sync=125ms→625ms) →
+            // 绝对时刻 625M+400M=1025000000ns。断点=链路 0（es01→sw01 有向），上游 es01 拆分
             // → esb01，库端口 0 → ethg$o[0]。
             assert!(
                 inis[1].contains(
-                    "*.scenarioManager.script = xml(\"<script><at t='400000000ns'><disconnect src-module='esb01' src-gate='ethg$o[0]'/></at></script>\")"
+                    "*.scenarioManager.script = xml(\"<script><at t='1025000000ns'><disconnect src-module='esb01' src-gate='ethg$o[0]'/></at></script>\")"
                 ),
                 "{}",
                 inis[1]
