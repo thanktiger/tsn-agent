@@ -2311,7 +2311,10 @@ mod tests {
         );
         // fs 精度 simtime 上限 ≈9223.37s：agingTime 须 ≤ 之，否则 INET init 溢出（真机实证）。
         assert!(ini.contains("**.macTable.agingTime = 9000s"), "{ini}");
-        assert!(!ini.contains("agingTime = 1000000s"), "agingTime 不得越 fs simtime 上限：{ini}");
+        assert!(
+            !ini.contains("agingTime = 1000000s"),
+            "agingTime 不得越 fs simtime 上限：{ini}"
+        );
         // P2：发射转发表时 destAddress 也带 %ethN（与转发键同源）——单宿端系统恒 %eth0。
         assert!(
             ini.contains("io.destAddress = \"es02%eth0\""),
