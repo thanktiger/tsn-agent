@@ -93,6 +93,10 @@ pub struct FlowStreamSpec {
     pub frer_trees: Option<Vec<Vec<String>>>,
     /// 无 RC 双平面会话的平面 A 路径 link_seqs（U4 转发钉死用，spike 押注⑤）。None → 不参与钉死。
     pub pin_links: Option<Vec<i64>>,
+    /// Z3 协同算的源发送偏移（ns，来自 .par `initialProductionOffset`）：verify pin 重放时叠加到
+    /// 暖机偏移上，让该流包恰在极窄 ST 门开时到达（否则各源相位错、包踩空门等一周期）。
+    /// None（plan/synth——Z3 现算自设；无 ST 门会话）→ 只用暖机偏移。
+    pub production_offset_ns: Option<u64>,
 }
 
 /// 门控排程来源：Synth=跑 Z3 配置器综合（U7）；Pin=写死已综合 GCL（U8）。
@@ -1470,9 +1474,11 @@ fn build_flow_tas_ini(
                 "*.{tned}.app[{a}].source.productionInterval = {}us\n",
                 s.period_us
             ));
-            // 暖机延迟：收敛后再发首包（ST/RC/BE 统一 W），暖机丢包不产生。
+            // 暖机延迟（收敛后再发首包，ST/RC/BE 统一 W）+ Z3 协同源偏移（让包恰在极窄 ST 门开时
+            // 到达）。W 是 1ms 门控周期整数倍，不扰 z3 偏移的相位。z3 偏移 None → 只用 W。
+            let prod_offset_s = warmup_s + s.production_offset_ns.unwrap_or(0) as f64 / 1e9;
             ini.push_str(&format!(
-                "*.{tned}.app[{a}].source.initialProductionOffset = {warmup_s}s\n"
+                "*.{tned}.app[{a}].source.initialProductionOffset = {prod_offset_s}s\n"
             ));
             ini.push_str(&format!(
                 "*.{tned}.app[{a}].source.packetNameFormat = \"%M-%m-%c\"\n"
@@ -2241,6 +2247,7 @@ mod tests {
             path_fragments: None,
             frer_trees: None,
             pin_links: None,
+            production_offset_ns: None,
         }
     }
 
@@ -2372,6 +2379,40 @@ mod tests {
         assert_eq!(
             flow_expected_sent(flow_sim_time_s(&flow_streams()), 250),
             10001
+        );
+    }
+
+    #[test]
+    fn production_offset_stacks_on_warmup() {
+        // Z3 源偏移重放：ST 流带 production_offset_ns=Some → 源 initialProductionOffset = W + z3偏移；
+        // 无偏移的流仍只用 W。
+        let (nodes, links, timing) = sample();
+        let r = crate::flow_route::build_route_from_link_seqs(&[0, 1], "1", "2", &links).unwrap();
+        let routes = vec![(0i64, r.clone()), (1i64, r)];
+        let mut streams = flow_streams(); // seq0=BE(app0), seq1=ST(app1)
+        streams[1].production_offset_ns = Some(896_440); // 896.44us（如 es02）
+        let b = build_flow_tas_sim_bundle(
+            &nodes,
+            &links,
+            "1",
+            &timing,
+            &SimOverrides::default(),
+            &streams,
+            FlowTasSchedule::Pin(&[], &routes),
+            "s1",
+            7,
+        )
+        .unwrap();
+        let ini = &b.bundle.omnetpp_ini;
+        // ST(app1)：W(0.625) + 896440ns(=0.00089644s) = 0.62589644s。
+        assert!(
+            ini.contains("*.es01.app[1].source.initialProductionOffset = 0.62589644s"),
+            "{ini}"
+        );
+        // BE(app0) 无偏移：仍只用 W。
+        assert!(
+            ini.contains("*.es01.app[0].source.initialProductionOffset = 0.625s"),
+            "{ini}"
         );
     }
 
