@@ -7,13 +7,13 @@ origin: docs/brainstorms/2026-07-16-flow-softsim-warmup-exclusion-requirements.m
 
 # fix: flow-tas 软仿暖机排除（延迟发流）
 
-## Summary
+## 摘要
 
 flow-tas 软仿改「先让 gPTP 收敛、再发流」：在生成 bundle 时给所有流量源加统一启动延迟 W，`sim-time-limit` 与 RC 故障断链时刻同步加 W，评估窗天然落在时钟收敛之后，暖机丢包从源头不再产生。判定层与故障尾量守卫维持「相对产包起点」语义、零逻辑改动。W 随同步参数缩放，仅作用于软仿 bundle，真机 pin 部署包不动。
 
 ---
 
-## Problem Frame
+## 问题框架
 
 flow-tas 软仿是一次 INET 运行：gPTP 从 t=0 收敛，流量源也从 t=0（INET 默认 `startTime=0`）产包。默认 `RandomDriftOscillator` 开局 `initialDriftRate` 在 ±100ppm 随机取，各节点时钟一上来就有偏差；gPTP 要经过若干 `syncInterval`（首次 pdelay 还要等 `pdelayInterval`）才拉齐。这段收敛期发出的头 ~3 个 ST 包踩空 TAS 门或晚到一个门周期被丢。
 
@@ -23,7 +23,7 @@ flow-tas 软仿是一次 INET 运行：gPTP 从 t=0 收敛，流量源也从 t=0
 
 ---
 
-## Key Technical Decisions
+## 关键技术决策
 
 **W 只在 bundle 内注入，verify 侧全程「产包窗相对」。** `flow_sim_time_s`（产包窗 T）语义不变——判定层反推实发、故障尾量守卫都继续用它，天然正确。W 是单一来源，只在 `build_flow_tas_sim_bundle` 内叠加到三个写点：源 `startTime=W`、`sim-time-limit=W+T`、RC 断链 `t=W+t_break_ns`。判定层与故障编排零改动（`t_break_ns` 在 verify 侧仍表示「从产包起点的偏移」，只在写进绝对时间断链脚本那一处加 W）。
 
@@ -35,7 +35,7 @@ flow-tas 软仿是一次 INET 运行：gPTP 从 t=0 收敛，流量源也从 t=0
 
 ---
 
-## High-Level Technical Design
+## 高层技术设计
 
 延迟前后时间线（单次 INET 运行，绝对仿真时间）：
 
@@ -58,7 +58,7 @@ verify 侧（判定/尾量守卫）看到的仍是产包窗 [0, T]：
 
 ---
 
-## Requirements Trace
+## 需求追溯
 
 - R1（源统一延迟 W，ST/RC/BE 一致）→ U2
 - R2（W=N×max(sync,pdelay)+下限；真机标定 N/下限）→ U1（标定）、U2（公式）
@@ -69,7 +69,7 @@ verify 侧（判定/尾量守卫）看到的仍是产包窗 [0, T]：
 
 ---
 
-## Implementation Units
+## 实施单元
 
 ### U1. 真机 gPTP 收敛 spike，标定 N 与下限 ✅ 已完成
 
@@ -108,7 +108,7 @@ verify 侧（判定/尾量守卫）看到的仍是产包窗 [0, T]：
 - Covers AE2. timing 的 sync 均 None：W 用 INET 默认 sync=125ms 算得 max(5×125ms,500ms)=625ms，而非当 0 得 500ms 下限。
 - Covers AE3. 混合 ST+RC+BE：三类源 `initialProductionOffset` 全等 W，无分类差异。
 - RC 故障轮：`fault.t_break_ns` 给定值，断链脚本 `t` = W_ns + t_break_ns（断言平移）。
-- 作用域：timesync bundle、`SimOverrides.sim_time_s=Some(..)` 显式覆盖路径不含 `initialProductionOffset`、时长不被 +W（回归现状位级）。
+- 作用域：W 只在 flow-tas 路径注入，timesync bundle 不含 `initialProductionOffset`、时长不被 +W（回归现状 60s）。flow 路径统一加 W——`sim_time_s=Some` 覆盖的是产包窗（W 仍叠加、单路径不特判）；flow 验证恒不传 override，故语义偏差潜伏不触发。
 - 更新既有 flow bundle golden/断言（凡断言 `sim-time-limit`、源参数、断链 `t` 的用例随之改）。
 
 **Verification**：新增单测全绿；既有 flow bundle 快照按预期更新；timesync 路径 golden 不变。
@@ -138,19 +138,19 @@ verify 侧（判定/尾量守卫）看到的仍是产包窗 [0, T]：
 
 ---
 
-## Scope Boundaries
+## 范围边界
 
 - 判定层按时间窗剔暖机样本（原路线 A：`parse_vec_csv` 补 vectime、剔样本、扣 expected）——被延迟发流取代，不做。
 - 真机 pin 部署包的延迟发流——真实硬件是否 hold ST 至时钟锁定是更大的独立系统行为决策，本期不碰。
 - 动态收敛检测（跑一趟测收敛再设延迟）——需两趟运行，用固定预设 W 即可，不做。
 
-### Deferred to Follow-Up Work
+### 延后到后续工作
 
 - 若 U1 真机数据显示不同场景收敛时刻差异大到默认 W 不合适，再考虑把 N/下限做成可配置（当前定为模块常量）。
 
 ---
 
-## Risks & Dependencies
+## 风险与依赖
 
 - **W 偏小漏排风险**：W < 实际收敛时刻则仍有暖机丢包，ST 仍误判。缓解：U1 真机标定 + 默认取保守（2×max+500ms，默认场景 2.5s 远超首个 sync 125ms）。
 - **`initialProductionOffset` 语义核对**：需确认 INET ActivePacketSource 的 `initialProductionOffset` 是「首包延迟到 W 后再按 interval 产」而非其它含义。缓解：U2 真机跑一轮看首包时刻，与 U1 spike 合并验证。
