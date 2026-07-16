@@ -1602,8 +1602,10 @@ fn build_flow_tas_ini(
 
     // --- 静态 L2 转发钉死（KTD13，is_pin && !frer）---
     // 关自动配置器（否则整体覆盖 forwardingTable）+ 显式 GlobalArp + 逐交换机 forwardingTable +
-    // 拉大 agingTime（默认 120s 会淘汰静态条目，RC 守卫加大 count 时理论越界）。行序由 BTreeMap
-    // 保证确定性。与 pin_kit（L3 出口平面选择）互补：那锚 talker L3 出口平面，这钉每跳 L2 转发。
+    // 拉大 agingTime（默认 120s 会淘汰静态条目）——但 fs 精度（simtime-scale -15）下 simtime 上限
+    // ≈9223.37s，不能取任意大值（1e6s 会在 MacForwardingTable 初始化解析时溢出报错）；9000s 远超任何
+    // TAS 软仿时长、静态条目全程不淘汰，且留余量不越界。行序由 BTreeMap 保证确定性。与 pin_kit
+    // （L3 出口平面选择）互补：那锚 talker L3 出口平面，这钉每跳 L2 转发。
     if is_pin && !frer && !forwarding.is_empty() {
         ini.push_str("*.macForwardingTableConfigurator.typename = \"\"\n");
         // GlobalArp：全网 init 解析 IP→MAC、零 ARP 帧上线 → forward-only 只钉 dest=listener，纯
@@ -1617,7 +1619,7 @@ fn build_flow_tas_ini(
                 .join(", ");
             ini.push_str(&format!("*.{sw}.macTable.forwardingTable = [{items}]\n"));
         }
-        ini.push_str("**.macTable.agingTime = 1000000s\n");
+        ini.push_str("**.macTable.agingTime = 9000s\n");
     }
 
     // --- 门控段 ---
@@ -2307,7 +2309,9 @@ mod tests {
             ),
             "{ini}"
         );
-        assert!(ini.contains("**.macTable.agingTime = 1000000s"), "{ini}");
+        // fs 精度 simtime 上限 ≈9223.37s：agingTime 须 ≤ 之，否则 INET init 溢出（真机实证）。
+        assert!(ini.contains("**.macTable.agingTime = 9000s"), "{ini}");
+        assert!(!ini.contains("agingTime = 1000000s"), "agingTime 不得越 fs simtime 上限：{ini}");
         // P2：发射转发表时 destAddress 也带 %ethN（与转发键同源）——单宿端系统恒 %eth0。
         assert!(
             ini.contains("io.destAddress = \"es02%eth0\""),
