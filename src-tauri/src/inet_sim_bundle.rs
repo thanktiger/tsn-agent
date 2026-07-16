@@ -83,7 +83,8 @@ pub struct FlowStreamSpec {
     /// 对账用作期望发送数（真机确认是否需据此界定发送上限）。
     #[allow(dead_code)]
     pub count: i64,
-    /// synth 约束面 maxLatency；None → U6 回退取 period_us（U7 会先从 docx 窗口预算填好）。
+    /// synth 约束面 maxLatency；录入已把 ST 默认沉淀进列（`resolve_max_latency_us`），
+    /// None 只出现在历史空值行 → synth 兜底取 `DEFAULT_ST_MAX_LATENCY_US`（非周期）。
     pub max_latency_us: Option<i64>,
     /// 显式路径（mid 序列，含 talker/listener）；synth 时喂 configurator pathFragments 绕开
     /// 最短路歧义。None → 省略走最短路。
@@ -1801,7 +1802,11 @@ fn build_flow_tas_ini(
                 .map(|&i| {
                     let s = &streams[i];
                     let p = &placements[i];
-                    let max_latency = s.max_latency_us.unwrap_or(s.period_us);
+                    // 录入已把 ST 默认沉淀进列（resolve_max_latency_us）；此兜底只兜历史空值行，
+                    // 取固定默认（非周期——周期太宽，Z3 可把门放周期内任意处，对账系统性 mismatch）。
+                    let max_latency = s
+                        .max_latency_us
+                        .unwrap_or(crate::flow_query_command::DEFAULT_ST_MAX_LATENCY_US);
                     let mut e = format!(
                         "{{pcp: {}, gateIndex: {}, application: \"app[{}]\", source: \"{}\", destination: \"{}\", packetLength: {}B + {}B, packetInterval: {}us, maxLatency: {}us",
                         s.pcp,
@@ -2449,6 +2454,24 @@ mod tests {
         assert_eq!(specs[1].production_offset_ns, None);
         let d2 = specs[2].production_offset_ns.expect("BE2 应避开 BE1");
         assert!(d2 >= 14_464, "d2={d2}");
+    }
+
+    /// stagger：RC 源（pcp6，与 BE 同为非 ST）也被错开——RC 走 talker 同一条无门 FIFO，
+    /// 与 ST 齐射同样顶帧；且 RC 不进 Z3 综合、无专属门窗，错开安全。has_rc=true → 帧含 +4B R-TAG。
+    #[test]
+    fn stagger_moves_colliding_rc_off_st_window() {
+        let links = stagger_links();
+        let mut specs = vec![
+            spec(0, "ST", 7, "1", "2", 500, 512, 10000),
+            spec(1, "RC", 6, "1", "3", 1000, 300, 10000),
+        ];
+        stagger_non_st_offsets(&mut specs, &links, true);
+        assert_eq!(specs[0].production_offset_ns, None, "ST 偏移不得改动");
+        let delta = specs[1]
+            .production_offset_ns
+            .expect("同瞬间碰撞的 RC 应被错开");
+        // ST 窗 [0, 4592ns]（(512+62)B@1Gbps 含 R-TAG）+2us 边距 → δ ≥ 6592ns。
+        assert!(delta >= 6_592, "delta={delta}");
     }
 
     /// stagger：纯 BE talker（无 ST 同宿）不动；ST 周期不整除门控周期 → 该 talker 整体回退。
