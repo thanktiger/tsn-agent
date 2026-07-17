@@ -1944,9 +1944,71 @@ textarea:focus-visible {
 }
 
 .topology-canvas .react-flow__edge.flow-highlighted .react-flow__edge-path {
-  stroke: var(--accent);
-  stroke-width: 2.6px;
-  filter: drop-shadow(0 0 4px rgba(250, 84, 28, 0.3));
+  stroke-width: 2.8px;
+  stroke-linecap: round;
+  stroke-dasharray: 10 8;
+}
+
+/* 选中流的主路径 / 冗余路径分色，不被拓扑平面底色混淆。 */
+.topology-canvas .react-flow__edge.flow-highlighted.flow-primary .react-flow__edge-path {
+  stroke: var(--plane-b);
+  filter: drop-shadow(0 0 4px rgba(192, 57, 43, 0.34));
+}
+
+.topology-canvas .react-flow__edge.flow-highlighted.flow-redundant .react-flow__edge-path {
+  stroke: var(--plane-a);
+  filter: drop-shadow(0 0 4px rgba(29, 95, 168, 0.34));
+}
+
+.topology-canvas .react-flow__edge.flow-highlighted.flow-forward .react-flow__edge-path {
+  animation: flowDashForward 0.8s linear infinite;
+}
+
+.topology-canvas .react-flow__edge.flow-highlighted.flow-reverse .react-flow__edge-path {
+  animation: flowDashReverse 0.8s linear infinite;
+}
+
+/* 加粗的点击热区不应出现虚线或动画。 */
+.topology-canvas .react-flow__edge.flow-highlighted .react-flow__edge-interaction {
+  stroke-dasharray: none;
+  animation: none;
+}
+
+.flow-path-legend {
+  position: absolute;
+  z-index: 5;
+  top: 12px;
+  right: 14px;
+  display: flex;
+  gap: 12px;
+  padding: 6px 9px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.06);
+  pointer-events: none;
+}
+
+.flow-path-legend span {
+  display: inline-flex;
+  gap: 5px;
+  align-items: center;
+}
+
+.flow-path-legend-line {
+  width: 24px;
+  height: 0;
+  border-top: 3px dashed currentColor;
+}
+
+.flow-path-legend-line.primary {
+  color: var(--plane-b);
+}
+
+.flow-path-legend-line.redundant {
+  color: var(--plane-a);
 }
 
 .topology-canvas .react-flow__edge.flow-muted .react-flow__edge-path {
@@ -3907,6 +3969,18 @@ button.gcl-overview-card:disabled {
   }
 }
 
+@keyframes flowDashForward {
+  to {
+    stroke-dashoffset: -18;
+  }
+}
+
+@keyframes flowDashReverse {
+  to {
+    stroke-dashoffset: 18;
+  }
+}
+
 @keyframes slideIn {
   from {
     transform: translateX(-100%);
@@ -4660,7 +4734,6 @@ button.gcl-overview-card:disabled {
   font-weight: 700;
   color: #fff;
   flex-shrink: 0;
-  margin-right: 6px;
   vertical-align: middle;
 }
 .flow-stream-seq {
@@ -4672,7 +4745,8 @@ button.gcl-overview-card:disabled {
 .flow-stream-table td {
   vertical-align: middle;
 }
-.flow-stream-table td:first-child {
+.flow-stream-table td:first-child,
+.flow-stream-table td:nth-child(2) {
   white-space: nowrap;
 }
 .flow-stream-route {

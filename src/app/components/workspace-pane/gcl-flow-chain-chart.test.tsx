@@ -117,11 +117,12 @@ describe("buildChainOption（U7 option 构建纯函数）", () => {
     expect(series.type).toBe("custom");
     expect(series.data.length).toBe(4);
     expect(series.data[0]).toEqual([0, 4.56, 0]);
-    const x = option.xAxis as { max?: number };
+    const x = option.xAxis as { max?: number; position?: string };
     expect(x.max).toBe(1000);
-    // dataZoom inside + slider（weakFilter）。
+    expect(x.position).toBe("top");
+    // 仅保留画布内缩放，不渲染底部 slider。
     const zooms = option.dataZoom as Array<{ type: string; filterMode: string }>;
-    expect(zooms.map((z) => z.type)).toEqual(["inside", "slider"]);
+    expect(zooms.map((z) => z.type)).toEqual(["inside"]);
     expect(zooms.every((z) => z.filterMode === "weakFilter")).toBe(true);
   });
 

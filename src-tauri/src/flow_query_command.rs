@@ -372,15 +372,26 @@ pub async fn list_flow_streams(
     list_flow_streams_inner(pool, &request.session_id).await
 }
 
+/// 链路在拓扑存储方向上的流向；前端用它让虚线动画与 talker→listener 一致。
+#[derive(Debug, Clone, Copy, Serialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum FlowLinkDirection {
+    Forward,
+    Reverse,
+}
+
 /// 单流路由条目（U5，流面板路由可视化）。`link_ids` 为 A 平面（或单平面）链路 id 列表，
-/// 格式 `"link-{seq}"`（对齐前端 `linkRowId`）；`plane_b_link_ids` 仅 RC 流的 B 平面路径，
+/// 格式 `"link-{seq}"`（对齐前端 `linkRowId`）；`link_directions` 与之逐项对齐。
+/// `plane_b_link_ids` / `plane_b_link_directions` 仅 RC 流的 B 平面路径有值，
 /// ST/BE 及单平面场景为 `None`。路由失败的流不计入结果（无 entry，无 panic）。
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct FlowRouteEntry {
     pub stream_seq: i64,
     pub link_ids: Vec<String>,
+    pub link_directions: Vec<FlowLinkDirection>,
     pub plane_b_link_ids: Option<Vec<String>>,
+    pub plane_b_link_directions: Option<Vec<FlowLinkDirection>>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -393,6 +404,33 @@ pub struct GetFlowRouteMapRequest {
 #[serde(rename_all = "camelCase")]
 pub struct GetFlowRouteMapResult {
     pub routes: Vec<FlowRouteEntry>,
+}
+
+/// Route 已由 flow_route 校验为连续路径；这里只把每跳相对于库内
+/// src_node→dst_node 的方向投影为展示 DTO。异常脱节时保守回退 forward，
+/// 不让尽力展示的路由图因单条脏数据失败。
+fn route_link_directions(
+    route: &crate::flow_route::Route,
+    links: &[crate::topology_verify::VerifyLink],
+) -> Vec<FlowLinkDirection> {
+    route
+        .link_seqs
+        .iter()
+        .enumerate()
+        .map(|(index, link_seq)| {
+            let from = route.node_path.get(index);
+            let to = route.node_path.get(index + 1);
+            let link = links.iter().find(|link| link.link_seq == *link_seq);
+            match (from, to, link) {
+                (Some(from), Some(to), Some(link))
+                    if link.dst_node == *from && link.src_node == *to =>
+                {
+                    FlowLinkDirection::Reverse
+                }
+                _ => FlowLinkDirection::Forward,
+            }
+        })
+        .collect()
 }
 
 /// 只读内核：为 session 内所有流推导路由，双平面感知。
@@ -434,12 +472,16 @@ pub async fn get_flow_route_map_inner(
                 crate::flow_route::derive_redundant_routes(&talker, &listener, &nodes, &links)
             {
                 let link_ids = a.link_seqs.iter().map(|s| format!("link-{s}")).collect();
+                let link_directions = route_link_directions(&a, &links);
                 let plane_b_link_ids =
                     Some(b.link_seqs.iter().map(|s| format!("link-{s}")).collect());
+                let plane_b_link_directions = Some(route_link_directions(&b, &links));
                 routes.push(FlowRouteEntry {
                     stream_seq,
                     link_ids,
+                    link_directions,
                     plane_b_link_ids,
+                    plane_b_link_directions,
                 });
             }
         } else {
@@ -463,10 +505,13 @@ pub async fn get_flow_route_map_inner(
                     .iter()
                     .map(|s| format!("link-{s}"))
                     .collect();
+                let link_directions = route_link_directions(&route, &links);
                 routes.push(FlowRouteEntry {
                     stream_seq,
                     link_ids,
+                    link_directions,
                     plane_b_link_ids: None,
+                    plane_b_link_directions: None,
                 });
             }
         }
@@ -1295,7 +1340,12 @@ mod tests {
             let entry = &r.routes[0];
             assert_eq!(entry.stream_seq, 0);
             assert!(!entry.link_ids.is_empty(), "ST 路径应非空");
+            assert_eq!(
+                entry.link_directions,
+                vec![FlowLinkDirection::Forward, FlowLinkDirection::Forward]
+            );
             assert!(entry.plane_b_link_ids.is_none());
+            assert!(entry.plane_b_link_directions.is_none());
             // 链路 id 格式为 "link-{seq}"。
             for id in &entry.link_ids {
                 assert!(id.starts_with("link-"), "格式应为 link-{{seq}}：{id}");
@@ -1336,8 +1386,35 @@ mod tests {
             assert_eq!(r.routes.len(), 1);
             let entry = &r.routes[0];
             assert_eq!(entry.link_ids, vec!["link-0", "link-1"]); // A 平面
+            assert_eq!(
+                entry.link_directions,
+                vec![FlowLinkDirection::Forward, FlowLinkDirection::Forward]
+            );
             let b = entry.plane_b_link_ids.as_ref().expect("RC 应有 B 平面路径");
             assert_eq!(b, &vec!["link-2", "link-3"]); // B 平面
+            assert_eq!(
+                entry.plane_b_link_directions.as_ref().unwrap(),
+                &vec![FlowLinkDirection::Forward, FlowLinkDirection::Forward]
+            );
+        });
+    }
+
+    /// 存储方向与 talker→listener 相反时，动画方向为 reverse。
+    #[test]
+    fn route_map_marks_reverse_link_direction() {
+        tauri::async_runtime::block_on(async {
+            let pool = fresh_pool().await;
+            for mid in ["0", "1"] {
+                add_node_r(&pool, mid).await;
+            }
+            add_link_r(&pool, 0, "1", 0, "0", 0, None).await;
+            add_stream_r(&pool, 0, "ST", 7, "0", "1").await;
+
+            let result = get_flow_route_map_inner(&pool, "s1").await.unwrap();
+            assert_eq!(
+                result.routes[0].link_directions,
+                vec![FlowLinkDirection::Reverse]
+            );
         });
     }
 
@@ -1361,12 +1438,16 @@ mod tests {
         let entry = FlowRouteEntry {
             stream_seq: 3,
             link_ids: vec!["link-0".to_string()],
+            link_directions: vec![FlowLinkDirection::Forward],
             plane_b_link_ids: Some(vec!["link-2".to_string()]),
+            plane_b_link_directions: Some(vec![FlowLinkDirection::Reverse]),
         };
         let v = serde_json::to_value(&entry).unwrap();
         assert_eq!(v["streamSeq"], 3);
         assert_eq!(v["linkIds"][0], "link-0");
+        assert_eq!(v["linkDirections"][0], "forward");
         assert_eq!(v["planeBLinkIds"][0], "link-2");
+        assert_eq!(v["planeBLinkDirections"][0], "reverse");
     }
 
     /// U5⑦：plane_b_link_ids=None 序列化为 null（前端 null 判断）。
@@ -1375,10 +1456,13 @@ mod tests {
         let entry = FlowRouteEntry {
             stream_seq: 0,
             link_ids: vec!["link-0".to_string()],
+            link_directions: vec![FlowLinkDirection::Forward],
             plane_b_link_ids: None,
+            plane_b_link_directions: None,
         };
         let v = serde_json::to_value(&entry).unwrap();
         assert!(v["planeBLinkIds"].is_null());
+        assert!(v["planeBLinkDirections"].is_null());
     }
 
     // ── update_flow_stream 测试 ──────────────────────────────────────────────

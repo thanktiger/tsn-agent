@@ -721,6 +721,11 @@ export function WorkspacePane({
   const switchCount = topologySnapshot ? countSwitches(topologySnapshot) : 0;
   const endSystemCount = topologySnapshot ? countEndSystems(topologySnapshot) : 0;
   const linkCount = topologySnapshot?.links.length ?? 0;
+  const selectedFlowRoute =
+    activeConfigTab === "flow" && selectedFlowSeq !== null && previewLinkSeqs === null
+      ? flowRouteMap.get(selectedFlowSeq)
+      : undefined;
+  const hasRedundantFlowRoute = Boolean(selectedFlowRoute?.planeBLinkIds?.length);
   const selectedNodeRow = selectedNodeId
     ? topologySnapshot?.nodes.find((node) => node.mid === selectedNodeId)
     : undefined;
@@ -806,6 +811,18 @@ export function WorkspacePane({
             >
               查看同步树
             </button>
+          )}
+          {hasRedundantFlowRoute && (
+            <div className="flow-path-legend" role="status" aria-label="冗余流量路径颜色说明">
+              <span>
+                <i className="flow-path-legend-line primary" aria-hidden="true" />
+                主路径
+              </span>
+              <span>
+                <i className="flow-path-legend-line redundant" aria-hidden="true" />
+                冗余路径
+              </span>
+            </div>
           )}
           {flowTopology ? (
             <ReactFlow
@@ -1059,7 +1076,9 @@ export function applyFlowEdgeDecoration(
     const entry: FlowRouteEntry = {
       streamSeq: PREVIEW_FLOW_SEQ,
       linkIds: previewLinkSeqs.map((seq) => `link-${seq}`),
+      linkDirections: previewLinkSeqs.map(() => "forward"),
       planeBLinkIds: null,
+      planeBLinkDirections: null,
     };
     return decorateFlowHighlightEdges(
       edges,
@@ -1070,7 +1089,7 @@ export function applyFlowEdgeDecoration(
   return decorateFlowHighlightEdges(edges, selectedFlowSeq, flowRouteMap);
 }
 
-/** U6：按选中流量序号装饰画布边——命中边加 flow-highlighted，其余边加 flow-dimmed。
+/** U6：按选中流量序号装饰画布边——命中边加主/冗余路径和流向 class，其余边加 flow-dimmed。
  * selectedFlowSeq 为 null 或 flowRouteMap 无对应条目时原样返回（无装饰）。 */
 export function decorateFlowHighlightEdges(
   edges: Edge[],
@@ -1080,17 +1099,26 @@ export function decorateFlowHighlightEdges(
   if (selectedFlowSeq === null) return edges;
   const entry = flowRouteMap.get(selectedFlowSeq);
   if (!entry) return edges;
-  const highlightIds = new Set<string>([...entry.linkIds, ...(entry.planeBLinkIds ?? [])]);
+  const primaryDirections = new Map(
+    entry.linkIds.map((id, index) => [id, entry.linkDirections[index] ?? "forward"]),
+  );
+  const redundantDirections = new Map(
+    (entry.planeBLinkIds ?? []).map((id, index) => [
+      id,
+      entry.planeBLinkDirections?.[index] ?? "forward",
+    ]),
+  );
   return edges.map((e) => {
-    const isHighlighted = highlightIds.has(e.id);
+    const primaryDirection = primaryDirections.get(e.id);
+    const redundantDirection = redundantDirections.get(e.id);
+    const direction = redundantDirection ?? primaryDirection;
     const classes = (e.className ?? "")
-      .replace(/\bflow-highlighted\b/g, "")
-      .replace(/\bflow-dimmed\b/g, "")
+      .replace(/\bflow-(?:highlighted|dimmed|primary|redundant|forward|reverse)\b/g, "")
       .trim();
     return {
       ...e,
-      className: isHighlighted
-        ? `${classes} flow-highlighted`.trim()
+      className: direction
+        ? `${classes} flow-highlighted ${redundantDirection ? "flow-redundant" : "flow-primary"} flow-${direction}`.trim()
         : `${classes} flow-dimmed`.trim(),
     };
   });

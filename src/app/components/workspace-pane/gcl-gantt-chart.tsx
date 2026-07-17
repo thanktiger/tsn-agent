@@ -11,9 +11,9 @@ const EMPTY_WINDOW_COLOR = "#e5e7eb";
 /** 徽章可读的最小块宽（px），更窄的块只画色块不画字。 */
 const BADGE_MIN_WIDTH_PX = 30;
 
-/** 每行高度与图表固定开销（grid 上边距 + x 轴标签 + slider 缩放条）。 */
+/** 每行高度与图表固定开销（顶部 x 轴标签 + 上下留白）。 */
 const GANTT_ROW_PX = 36;
-const GANTT_CHROME_PX = 96;
+const GANTT_CHROME_PX = 56;
 
 /** 容器高度按行数线性自适应（组件容器与 option grid 同源）。 */
 export function ganttHeightPx(rowCount: number): number {
@@ -91,7 +91,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * option 构建纯函数（KTD7，测试主体）：Y=category「节点名.G{ethN}」（倒序使 model 第一组
  * 在顶部）、X=0..cycleNs/1000（μs）；custom series renderItem 画圆角窗口块 + 徽章文本；
  * 颜色=首个关联流 seq 对 CHART_COLORS 取模（类级降级中性灰、空窗浅灰）；
- * tooltip 悬浮卡多字段；dataZoom inside+slider(weakFilter)。
+ * tooltip 悬浮卡多字段；dataZoom 仅保留 inside（无底部 slider）。
  * renderItem / tooltip 经 params.dataIndex（raw index，weakFilter 过滤下仍稳定）回读闭包
  * data，避免 api.value 对字符串维度解析成 NaN。
  */
@@ -195,12 +195,12 @@ export function buildGanttOption(
 
   return {
     animation: false,
-    // 容器高度 = ganttHeightPx(rowCount)；上下留白（含 x 轴标签 + slider）合计 GANTT_CHROME_PX，
+    // 容器高度 = ganttHeightPx(rowCount)；上下留白（含顶部 x 轴标签）合计 GANTT_CHROME_PX，
     // 网格区正好 rowCount * GANTT_ROW_PX，每行 ~36px。
     grid: {
-      top: 8,
+      top: GANTT_CHROME_PX - 8,
       right: 24,
-      bottom: GANTT_CHROME_PX - 8,
+      bottom: 8,
       left: 8,
       containLabel: true,
     },
@@ -216,17 +216,10 @@ export function buildGanttOption(
         xAxisIndex: 0,
         filterMode: "weakFilter",
       },
-      {
-        type: "slider",
-        xAxisIndex: 0,
-        filterMode: "weakFilter",
-        height: 22,
-        bottom: 10,
-        brushSelect: false,
-      },
     ],
     xAxis: {
       type: "value",
+      position: "top",
       min: 0,
       max: cycleNs / 1000,
       name: "μs",

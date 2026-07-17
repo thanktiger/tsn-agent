@@ -289,13 +289,18 @@ export async function invokeListFlowStreams(sessionId: string): Promise<ListFlow
   return await invoke<ListFlowStreamsResult>("list_flow_streams", { request: { sessionId } });
 }
 
+export type FlowLinkDirection = "forward" | "reverse";
+
 /** 单流路由条目（U5，对齐 flow_query_command::FlowRouteEntry）。
  * `linkIds` = A 平面（或单平面）链路 id 列表，格式 `"link-{seq}"`（对齐 linkRowId）；
- * `planeBLinkIds` 仅 RC 双平面 B 路径，ST/BE 及单平面为 null。 */
+ * `linkDirections` 与之逐项对齐，用于让虚线动画按 talker→listener 流动；
+ * `planeBLinkIds` / `planeBLinkDirections` 仅 RC 双平面 B 路径有值。 */
 export interface FlowRouteEntry {
   streamSeq: number;
   linkIds: string[];
+  linkDirections: FlowLinkDirection[];
   planeBLinkIds: string[] | null;
+  planeBLinkDirections: FlowLinkDirection[] | null;
 }
 
 /** 路由图查询结果（U5，对齐 flow_query_command::GetFlowRouteMapResult）。 */

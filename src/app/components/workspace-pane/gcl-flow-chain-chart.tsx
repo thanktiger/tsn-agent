@@ -235,7 +235,7 @@ export function buildChainOption(chain: FlowChain, cycleNs: number): ECharts.ECh
 
   return {
     animation: false,
-    grid: { top: 28, right: 28, bottom: 64, left: 88 },
+    grid: { top: 56, right: 28, bottom: 24, left: 88 },
     tooltip: {
       trigger: "item",
       appendToBody: true,
@@ -246,12 +246,10 @@ export function buildChainOption(chain: FlowChain, cycleNs: number): ECharts.ECh
         return it ? chainTooltipHtml(chain, it) : "";
       },
     },
-    dataZoom: [
-      { type: "inside", xAxisIndex: 0, filterMode: "weakFilter" },
-      { type: "slider", xAxisIndex: 0, filterMode: "weakFilter", height: 20, bottom: 14 },
-    ],
+    dataZoom: [{ type: "inside", xAxisIndex: 0, filterMode: "weakFilter" }],
     xAxis: {
       type: "value",
+      position: "top",
       min: 0,
       max: cycleUs,
       name: "时间(μs)",
