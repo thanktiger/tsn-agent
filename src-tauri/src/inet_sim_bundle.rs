@@ -110,7 +110,10 @@ pub enum FlowTasSchedule<'a> {
 }
 
 /// UDP app 端口基址（每流唯一端口 = 基址 + 稠密下标）。
-const FLOW_APP_PORT_BASE: i64 = 1000;
+/// 须高于 INET UDP 临时端口区上界 5000（Udp.h EPHEMERAL_PORTRANGE_END）：源 app 的 socket
+/// 不指定本地端口、自 1024 起自动分配，sink 显式端口落进 [1024,5000) 会与同节点源 socket
+/// 撞车（旧基址 1000 自第 25 条流起越界，30 条流真机首爆 bind already taken）。
+const FLOW_APP_PORT_BASE: i64 = 6000;
 /// 802.1Q 帧开销（synth 约束面 packetLength 需含：8B UDP+20B IP+4B Q-TAG+14B MAC+4B FCS+8B PHY）。
 const FLOW_FRAME_OVERHEAD_BYTES: i64 = 58;
 /// 802.1R R-TAG 开销：FRER 会话下经 streamRedundancyConfigurator 的流（含单树 ST）帧上多 4B。
@@ -2377,6 +2380,37 @@ mod tests {
         }
     }
 
+    /// 流端口须整体避开 INET UDP 临时端口区 [1024,5000)：UdpSourceApp 的 socket 不指定
+    /// 本地端口，Udp::getEphemeralPort 自 1024 起自动分配（Udp.h EPHEMERAL_PORTRANGE_*）；
+    /// sink 显式 localPort 落进该区间会与同节点先绑定的源 socket 撞车——
+    /// 「bind: local address/port <none>:1026 already taken」（30 条流真机首爆，2026-07-17）。
+    #[test]
+    fn flow_ports_avoid_inet_ephemeral_range() {
+        // 30 条流（足以越过旧基址 1000+24=1024 的悬崖）。
+        let specs: Vec<FlowStreamSpec> = (0..30)
+            .map(|i| {
+                spec(
+                    i,
+                    if i % 3 == 0 { "BE" } else { "ST" },
+                    if i % 3 == 0 { 0 } else { 7 },
+                    "1",
+                    "2",
+                    500,
+                    256,
+                    1000,
+                )
+            })
+            .collect();
+        let (_c, placements, _n) = plan_flow_traffic(&specs);
+        for p in &placements {
+            assert!(
+                !(1024..5000).contains(&p.port),
+                "端口 {} 落入 INET UDP 临时端口区 [1024,5000)，会与源 socket 自动分配撞车",
+                p.port
+            );
+        }
+    }
+
     /// stagger 测试链路：各 talker 一条 1000Mbps 链路（速率查表用）。
     fn stagger_links() -> Vec<VerifyLink> {
         ["1", "2", "3", "9"]
@@ -3328,14 +3362,14 @@ mod tests {
         // ST 单树：平面 A 路径，双宿端点展开为 设备+内嵌桥（spike 契约改型）。
         assert!(
             cfg.contains(
-                "{name: \"st0\", pcp: 7, packetFilter: expr(udp != nullptr && udp.destPort == 1000), source: \"es01\", destination: \"es02\", trees: [[[\"es01\",\"esb01\",\"sw01\",\"esb02\",\"es02\"]]]}"
+                "{name: \"st0\", pcp: 7, packetFilter: expr(udp != nullptr && udp.destPort == 6000), source: \"es01\", destination: \"es02\", trees: [[[\"es01\",\"esb01\",\"sw01\",\"esb02\",\"es02\"]]]}"
             ),
             "{cfg}"
         );
         // RC 双树：A/B 各一棵。
         assert!(
             cfg.contains(
-                "{name: \"rc1\", pcp: 6, packetFilter: expr(udp != nullptr && udp.destPort == 1001), source: \"es01\", destination: \"es02\", trees: [[[\"es01\",\"esb01\",\"sw01\",\"esb02\",\"es02\"]],[[\"es01\",\"esb01\",\"sw02\",\"esb02\",\"es02\"]]]}"
+                "{name: \"rc1\", pcp: 6, packetFilter: expr(udp != nullptr && udp.destPort == 6001), source: \"es01\", destination: \"es02\", trees: [[[\"es01\",\"esb01\",\"sw01\",\"esb02\",\"es02\"]],[[\"es01\",\"esb01\",\"sw02\",\"esb02\",\"es02\"]]]}"
             ),
             "{cfg}"
         );
