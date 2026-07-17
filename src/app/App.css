@@ -1493,11 +1493,6 @@ textarea:focus-visible {
   background: var(--bg-primary);
 }
 
-.composer label {
-  color: var(--text-muted);
-  font-size: 11px;
-}
-
 .stage-confirmation {
   display: flex;
   align-items: flex-start;

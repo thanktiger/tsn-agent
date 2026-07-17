@@ -353,9 +353,16 @@ describe("ChatPane", () => {
       { id: "u1", role: "user", content: "我需要 4 个交换机", createdAt: "2026-06-25T00:00:00Z" },
     ];
     const { container } = render(<ChatPane {...baseProps({ messages, isAgentRunning: false })} />);
-    // 发过首条需求后指引 placeholder 即闲置——不再显示「例如：…」。
+    // 发过首条需求后指引 placeholder 换常驻提示（issue #124：原悬空 label 收进 placeholder）。
     expect(screen.queryByPlaceholderText(/例如：/)).toBeNull();
-    expect(container.querySelector("#intent")?.getAttribute("placeholder")).toBe("");
+    expect(container.querySelector("#intent")?.getAttribute("placeholder")).toBe(
+      "描述你的 TSN 需求",
+    );
+  });
+
+  it("issue #124：composer 上方不再渲染悬空的「描述你的 TSN 需求」label", () => {
+    const { container } = render(<ChatPane {...baseProps({})} />);
+    expect(container.querySelector('label[for="intent"]')).toBeNull();
   });
 
   it("keeps the textarea editable while running and shows the terminate button (U3, R3)", async () => {

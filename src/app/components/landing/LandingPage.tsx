@@ -84,7 +84,7 @@ export function LandingPage(props: LandingPageProps) {
           <textarea
             className="landing-input mono"
             aria-label="描述你的 TSN 需求"
-            placeholder="例：飞控指令 1ms 一次，2ms 内必须送达，64 字节"
+            placeholder="例：我需要 4 个交换机，每个交换机连接 5 个端系统"
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => {

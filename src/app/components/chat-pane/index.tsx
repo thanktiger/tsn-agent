@@ -171,7 +171,6 @@ export function ChatPane({
       </div>
 
       <div className="composer">
-        <label htmlFor="intent">描述你的 TSN 需求</label>
         {(currentStage.status === "waiting_confirmation" || workflow.pendingStageChange) && (
           <div className="stage-confirmation" role="status">
             <div>
@@ -222,11 +221,12 @@ export function ChatPane({
             id="intent"
             aria-label="输入你的 TSN 需求"
             value={input}
-            // placeholder 两态：①本会话还没发过需求 → 显示「例如：…」指引（教首次如何描述拓扑）；
-            // ②已发过首条需求后即闲置，不再复述指引。（推理运行状态改由输入框上方的动画行承担。）
+            // placeholder 两态（issue #124：原「描述你的 TSN 需求」悬空 label 收进 placeholder）：
+            // ①本会话还没发过需求 → 显示「例如：…」指引（教首次如何描述拓扑）；
+            // ②已发过首条需求后 → 「描述你的 TSN 需求」。（推理运行状态由输入框上方动画行承担。）
             placeholder={
               messages.some((message) => message.role === "user")
-                ? ""
+                ? "描述你的 TSN 需求"
                 : `例如：${scenarioConfig.exampleIntent}`
             }
             onChange={(event) => onInputChange(event.target.value)}

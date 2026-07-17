@@ -37,7 +37,7 @@ describe("scenario config", () => {
   it("resolves the typical aerospace onboard config", () => {
     const config = getScenarioConfig("aerospace-onboard");
 
-    expect(config.displayName).toContain("箭载");
+    expect(config.displayName).toContain("航空航天");
     expect(config.exampleIntent).toContain("双平面双跳");
     expect(config.stageLabels["flow-template"]).toBe("流量规划");
     expect(config.flowTemplates[0].name).toBe("时序控制消息-1");
