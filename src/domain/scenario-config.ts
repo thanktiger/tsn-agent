@@ -76,7 +76,7 @@ export const SCENARIO_CONFIGS: Record<ScenarioConfigId, ScenarioConfig> = {
   },
   "aerospace-onboard": {
     id: "aerospace-onboard",
-    displayName: "箭载 TSN 典型场景",
+    displayName: "航空航天 TSN 典型场景",
     exampleIntent: "双平面双跳冗余拓扑，4 个端系统、4 个交换机（A/B 平面物理隔离、端系统双归属）",
     stageLabels: {
       topology: "拓扑生成",
