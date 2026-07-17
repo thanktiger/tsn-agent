@@ -1532,7 +1532,6 @@ mod tests {
                 exit_code: 0,
                 output_tail: "ok".into(),
                 sca_gcl: Some(self.sca.clone()),
-                solver: Some("Z3".into()),
             })
         }
     }
@@ -1562,6 +1561,7 @@ mod tests {
                 "s1",
                 &plan_client,
                 "http://x",
+                crate::flow_plan_command::GclSolverChoice::Z3,
             )
             .await
             .unwrap();
@@ -2559,7 +2559,6 @@ mod tests {
                     exit_code: 0,
                     output_tail: "ok".into(),
                     sca_gcl: Some(self.sca.clone()),
-                    solver: Some("Z3".into()),
                 })
             }
         }
@@ -2604,6 +2603,7 @@ mod tests {
                     "s1",
                     &plan,
                     "http://x",
+                    crate::flow_plan_command::GclSolverChoice::Z3,
                 )
                 .await
                 .unwrap();
@@ -2657,6 +2657,7 @@ mod tests {
                     "s1",
                     &plan,
                     "http://x",
+                    crate::flow_plan_command::GclSolverChoice::Z3,
                 )
                 .await
                 .unwrap();
@@ -2708,6 +2709,7 @@ mod tests {
                     "s1",
                     &plan,
                     "http://x",
+                    crate::flow_plan_command::GclSolverChoice::Z3,
                 )
                 .await
                 .unwrap();
@@ -2772,6 +2774,7 @@ mod tests {
                     "s1",
                     &plan,
                     "http://x",
+                    crate::flow_plan_command::GclSolverChoice::Z3,
                 )
                 .await
                 .unwrap();
@@ -2839,6 +2842,7 @@ mod tests {
                     "s1",
                     &plan,
                     "http://x",
+                    crate::flow_plan_command::GclSolverChoice::Z3,
                 )
                 .await
                 .unwrap();
@@ -2905,6 +2909,7 @@ mod tests {
                     "s1",
                     &plan,
                     "http://x",
+                    crate::flow_plan_command::GclSolverChoice::Z3,
                 )
                 .await
                 .unwrap();
