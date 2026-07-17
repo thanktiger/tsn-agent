@@ -967,7 +967,7 @@ describe("FlowPanel 求解器选择 + 两步重新规划 + stale 禁验证", () 
     const { unmount } = render(<FlowPanel {...baseProps()} />);
     await screen.findByRole("button", { name: "规划门控表" });
     const group = screen.getByRole("group", { name: "求解器选择" });
-    const inetZ3 = within(group).getByRole("radio", { name: "inet-z3" });
+    const inetZ3 = within(group).getByRole("radio", { name: "inet-z3（带保证）" });
     expect((inetZ3 as HTMLInputElement).checked).toBe(true);
     expect(inetZ3.hasAttribute("disabled")).toBe(false);
     const openPlanner = within(group).getByRole("radio", { name: /open-planner（预留）/ });
@@ -980,7 +980,16 @@ describe("FlowPanel 求解器选择 + 两步重新规划 + stale 禁验证", () 
     const props = baseProps();
     render(<FlowPanel {...props} />);
     fireEvent.click(await screen.findByRole("button", { name: "规划门控表" }));
-    await waitFor(() => expect(props.planTas).toHaveBeenCalledWith("s1"));
+    await waitFor(() => expect(props.planTas).toHaveBeenCalledWith("s1", "inet-z3"));
+  });
+
+  it("R8 修订：选中 inet-eager 后规划请求携带该求解器（用户显式选择穿透）", async () => {
+    const props = baseProps();
+    render(<FlowPanel {...props} />);
+    const group = await screen.findByRole("group", { name: "求解器选择" });
+    fireEvent.click(within(group).getByRole("radio", { name: "inet-eager（贪心，无保证）" }));
+    fireEvent.click(screen.getByRole("button", { name: "规划门控表" }));
+    await waitFor(() => expect(props.planTas).toHaveBeenCalledWith("s1", "inet-eager"));
   });
 
   it("U1：已有规划态不渲染选择区（结果态判定条已有求解器徽章）", async () => {

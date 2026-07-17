@@ -35,6 +35,38 @@ pub const CALIBER_FLOW_TAS_PLANNED: &str = "flow_tas_planned";
 /// 本期唯一 provider；castup 外部求解器接入时另立值。
 pub(crate) const GCL_PROVIDER: &str = "inet-z3";
 
+/// 求解器选择（R8 修订：用户显式选择、不做静默降级——Z3 unsat 时明确报错并提示可切换）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GclSolverChoice {
+    #[default]
+    Z3,
+    Eager,
+}
+
+impl GclSolverChoice {
+    /// 请求字符串 → 选择（None/缺省 = Z3，兼容旧调用方）；未知值响亮拒绝。
+    pub fn parse(raw: Option<&str>) -> Result<Self, String> {
+        match raw {
+            None | Some("inet-z3") => Ok(Self::Z3),
+            Some("inet-eager") => Ok(Self::Eager),
+            Some(other) => Err(format!(
+                "未知求解器「{other}」（可选：inet-z3 / inet-eager）。"
+            )),
+        }
+    }
+
+    /// 出处标签（落库 algorithm 列 + 结果 solver 字段，徽章据此分「带保证/无保证」）。
+    fn label(self) -> &'static str {
+        match self {
+            Self::Z3 => "Z3",
+            Self::Eager => "Eager",
+        }
+    }
+}
+
+/// Z3 约束不可满足的错误指纹（Z3GateScheduleConfigurator cRuntimeError 原文）。
+const Z3_UNSAT_MARKER: &str = "The specified constraints might not be satisfiable";
+
 /// 规划结果（前端/agent 消费）。status 区分各态；solver 记出处（R8/KTD7 诚实边界）。
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -237,6 +269,7 @@ pub async fn plan_tas_inner<P: InetSimPlanClient>(
     session_id: &str,
     plan_client: &P,
     base_url: &str,
+    solver_choice: GclSolverChoice,
 ) -> Result<PlanResult, String> {
     let streams = load_streams(pool, session_id).await?;
     if streams.is_empty() {
@@ -385,6 +418,7 @@ pub async fn plan_tas_inner<P: InetSimPlanClient>(
         &timing,
         &SimOverrides {
             has_rc,
+            eager_solver: solver_choice == GclSolverChoice::Eager,
             ..Default::default()
         },
         &specs,
@@ -419,14 +453,21 @@ pub async fn plan_tas_inner<P: InetSimPlanClient>(
     };
 
     // 不可行 / 求解器失败 / 无 GCL → FAIL，绝不落空/半截表（R10）。
+    // Z3 不可满足单独给明确文案（R8 修订：不静默降级，把切换权交给用户）。
     if plan.exit_code != 0 {
+        let message = if plan.output_tail.contains(Z3_UNSAT_MARKER) {
+            "Z3 判定约束不可满足（unsat）：当前流集在零抖动/时延上界约束下无解。             可在求解器选择中切换「INET·Eager（贪心，无保证）」重试，             或调整流参数（减少流条数 / 放宽周期 / 调整路径）。"
+        } else {
+            "门控综合失败：约束不可行或配置器出错，未产出门控表。"
+        };
         return Ok(PlanResult::simple(
             "solver_failed",
-            "门控综合失败：约束不可行或配置器出错，未产出门控表。",
+            message,
             Some(plan.output_tail),
         ));
     }
-    let solver = plan.solver.clone().unwrap_or_else(|| "Z3".to_string());
+    // 出处 = 用户选择（app 写的 ini app 知道；不再信服务端回传字段——它对 Eager 不知情）。
+    let solver = solver_choice.label().to_string();
     let ned_to_mid: BTreeMap<String, String> = sim_bundle
         .node_ned_names
         .iter()
@@ -573,6 +614,9 @@ pub async fn plan_tas_inner<P: InetSimPlanClient>(
 #[serde(rename_all = "camelCase")]
 pub struct PlanTasRequest {
     pub session_id: String,
+    /// 求解器选择："inet-z3"（缺省，SAT 带保证）/ "inet-eager"（贪心，无保证）。
+    #[serde(default)]
+    pub solver: Option<String>,
 }
 
 #[tauri::command]
@@ -590,12 +634,17 @@ pub async fn plan_tas(
         ));
     };
     let base_dir = crate::gcl_raw_store::resolve_base_dir(&app)?;
+    let solver_choice = match GclSolverChoice::parse(request.solver.as_deref()) {
+        Ok(c) => c,
+        Err(m) => return Ok(PlanResult::simple("solver_failed", &m, None)),
+    };
     plan_tas_inner(
         pool,
         &base_dir,
         &request.session_id,
         &crate::inet_sim_http::ReqwestInetSimClient,
         &base_url,
+        solver_choice,
     )
     .await
 }
@@ -621,6 +670,91 @@ mod tests {
         }
     }
 
+    /// R8 修订：求解器选择字符串解析——缺省/inet-z3 → Z3、inet-eager → Eager、未知值响亮拒绝。
+    #[test]
+    fn solver_choice_parse_maps_and_rejects() {
+        assert_eq!(GclSolverChoice::parse(None).unwrap(), GclSolverChoice::Z3);
+        assert_eq!(
+            GclSolverChoice::parse(Some("inet-z3")).unwrap(),
+            GclSolverChoice::Z3
+        );
+        assert_eq!(
+            GclSolverChoice::parse(Some("inet-eager")).unwrap(),
+            GclSolverChoice::Eager
+        );
+        assert!(GclSolverChoice::parse(Some("open-planner")).is_err());
+    }
+
+    /// R8 修订：选 Eager → synth ini 写 EagerGateScheduleConfigurator，出处/落库 algorithm 均
+    /// 标 "Eager"（来源=用户选择，不信服务端回传字段）。
+    #[test]
+    fn plan_eager_choice_writes_eager_configurator_and_label() {
+        tauri::async_runtime::block_on(async {
+            let pool = fresh_pool().await;
+            let dir = tempfile::tempdir().unwrap();
+            seed_linear(&pool).await;
+            add_stream(&pool, 0, "ST", 7).await;
+            let sca = "par N.sw01.eth[1].macLayer.queue.transmissionGate[0] initiallyOpen true\npar N.sw01.eth[1].macLayer.queue.transmissionGate[0] offset 0s\npar N.sw01.eth[1].macLayer.queue.transmissionGate[0] durations \"[300us, 700us]\"\n";
+            let client = CapturingPlanClient {
+                result: Ok(HttpPlanResult {
+                    exit_code: 0,
+                    output_tail: "ok".into(),
+                    sca_gcl: Some(sca.into()),
+                }),
+                ini: std::sync::Mutex::new(None),
+            };
+            let r = plan_tas_inner(
+                &pool,
+                dir.path(),
+                "s1",
+                &client,
+                "http://x",
+                GclSolverChoice::Eager,
+            )
+            .await
+            .unwrap();
+            assert_eq!(r.status, "ok", "{r:?}");
+            assert_eq!(r.solver.as_deref(), Some("Eager"));
+            let ini = client.ini.lock().unwrap().clone().unwrap();
+            assert!(ini.contains("\"EagerGateScheduleConfigurator\""), "{ini}");
+            assert!(!ini.contains("Z3GateScheduleConfigurator"), "{ini}");
+            let (_st, _cy, algo, _stale, _w) = read_plan_row(&pool).await.unwrap();
+            assert_eq!(algo, "Eager");
+        });
+    }
+
+    /// R8 修订：Z3 unsat 指纹 → 明确文案（说 unsat + 提示可切换 Eager），不静默降级。
+    #[test]
+    fn plan_z3_unsat_reports_explicit_message() {
+        tauri::async_runtime::block_on(async {
+            let pool = fresh_pool().await;
+            let dir = tempfile::tempdir().unwrap();
+            seed_linear(&pool).await;
+            add_stream(&pool, 0, "ST", 7).await;
+            let client = MockPlanClient {
+                result: Ok(HttpPlanResult {
+                    exit_code: 1,
+                    output_tail: "<!> Error: The specified constraints might not be satisfiable. -- in module (inet::Z3GateScheduleConfigurator)".into(),
+                    sca_gcl: None,
+                }),
+            };
+            let r = plan_tas_inner(
+                &pool,
+                dir.path(),
+                "s1",
+                &client,
+                "http://x",
+                GclSolverChoice::Z3,
+            )
+            .await
+            .unwrap();
+            assert_eq!(r.status, "solver_failed");
+            // 主文案在 overall（message 是原始 output_tail 详情）。
+            assert!(r.overall.contains("约束不可满足"), "{}", r.overall);
+            assert!(r.overall.contains("Eager"), "应提示可切换：{}", r.overall);
+        });
+    }
+
     /// 捕获送去求解的 ini（断言 synth bundle 形态；ini 为 None 即求解器未被调用）。
     struct CapturingPlanClient {
         result: Result<HttpPlanResult, String>,
@@ -644,7 +778,6 @@ mod tests {
             exit_code: 0,
             output_tail: "ok".into(),
             sca_gcl: Some(sca.into()),
-            solver: Some("Z3".into()),
         })
     }
 
@@ -731,12 +864,18 @@ mod tests {
                     exit_code: 0,
                     output_tail: "ok".into(),
                     sca_gcl: Some(sca.into()),
-                    solver: Some("Z3".into()),
                 }),
             };
-            let r = plan_tas_inner(&pool, dir.path(), "s1", &client, "http://x")
-                .await
-                .unwrap();
+            let r = plan_tas_inner(
+                &pool,
+                dir.path(),
+                "s1",
+                &client,
+                "http://x",
+                GclSolverChoice::Z3,
+            )
+            .await
+            .unwrap();
             assert_eq!(r.status, "ok", "{r:?}");
             assert_eq!(r.solver.as_deref(), Some("Z3"));
             assert_eq!(r.gate_count, 1);
@@ -810,9 +949,16 @@ mod tests {
             let client = MockPlanClient {
                 result: Err("不该被调用".into()),
             };
-            let r = plan_tas_inner(&pool, dir.path(), "s1", &client, "http://x")
-                .await
-                .unwrap();
+            let r = plan_tas_inner(
+                &pool,
+                dir.path(),
+                "s1",
+                &client,
+                "http://x",
+                GclSolverChoice::Z3,
+            )
+            .await
+            .unwrap();
             assert_eq!(r.status, "route_error", "{r:?}");
             assert!(
                 r.overall.contains("请在流详情中指定路径"),
@@ -860,9 +1006,16 @@ mod tests {
             let client = MockPlanClient {
                 result: Err("不该被调用".into()),
             };
-            let r = plan_tas_inner(&pool, dir.path(), "s1", &client, "http://x")
-                .await
-                .unwrap();
+            let r = plan_tas_inner(
+                &pool,
+                dir.path(),
+                "s1",
+                &client,
+                "http://x",
+                GclSolverChoice::Z3,
+            )
+            .await
+            .unwrap();
             assert_eq!(r.status, "route_error", "{r:?}");
             let msg = r.message.as_deref().unwrap_or_default();
             assert!(msg.contains("F0·视频流"), "应报第一条：{msg}");
@@ -882,9 +1035,16 @@ mod tests {
             let client = MockPlanClient {
                 result: ok_plan_result(),
             };
-            let r = plan_tas_inner(&pool, dir.path(), "s1", &client, "http://x")
-                .await
-                .unwrap();
+            let r = plan_tas_inner(
+                &pool,
+                dir.path(),
+                "s1",
+                &client,
+                "http://x",
+                GclSolverChoice::Z3,
+            )
+            .await
+            .unwrap();
             assert_eq!(r.status, "ok", "{r:?}");
             let rows: Vec<(i64, Option<String>)> = sqlx::query_as(
                 "SELECT stream_seq, paths FROM flow_streams WHERE session_id='s1' ORDER BY stream_seq",
@@ -921,9 +1081,16 @@ mod tests {
             let client = MockPlanClient {
                 result: ok_plan_result(),
             };
-            let r = plan_tas_inner(&pool, dir.path(), "s1", &client, "http://x")
-                .await
-                .unwrap();
+            let r = plan_tas_inner(
+                &pool,
+                dir.path(),
+                "s1",
+                &client,
+                "http://x",
+                GclSolverChoice::Z3,
+            )
+            .await
+            .unwrap();
             assert_eq!(r.status, "ok", "{r:?}");
             let paths: Option<String> = sqlx::query_scalar(
                 "SELECT paths FROM flow_streams WHERE session_id='s1' AND stream_seq=0",
@@ -969,9 +1136,16 @@ mod tests {
             let client = MockPlanClient {
                 result: ok_plan_result(),
             };
-            let r = plan_tas_inner(&pool, dir.path(), "s1", &client, "http://x")
-                .await
-                .unwrap();
+            let r = plan_tas_inner(
+                &pool,
+                dir.path(),
+                "s1",
+                &client,
+                "http://x",
+                GclSolverChoice::Z3,
+            )
+            .await
+            .unwrap();
             assert_eq!(r.status, "ok", "{r:?}");
             let paths: Option<String> = sqlx::query_scalar(
                 "SELECT paths FROM flow_streams WHERE session_id='s1' AND stream_seq=0",
@@ -1004,9 +1178,16 @@ mod tests {
             let client = MockPlanClient {
                 result: ok_plan_result(),
             };
-            let r = plan_tas_inner(&pool, dir.path(), "s1", &client, "http://x")
-                .await
-                .unwrap();
+            let r = plan_tas_inner(
+                &pool,
+                dir.path(),
+                "s1",
+                &client,
+                "http://x",
+                GclSolverChoice::Z3,
+            )
+            .await
+            .unwrap();
             assert_eq!(r.status, "ok", "凭证失效应静默重推导：{r:?}");
             let paths: Option<String> = sqlx::query_scalar(
                 "SELECT paths FROM flow_streams WHERE session_id='s1' AND stream_seq=0",
@@ -1053,9 +1234,16 @@ mod tests {
             let client = MockPlanClient {
                 result: ok_plan_result(),
             };
-            let r = plan_tas_inner(&pool, dir.path(), "s1", &client, "http://x")
-                .await
-                .unwrap();
+            let r = plan_tas_inner(
+                &pool,
+                dir.path(),
+                "s1",
+                &client,
+                "http://x",
+                GclSolverChoice::Z3,
+            )
+            .await
+            .unwrap();
             assert_eq!(r.status, "no_gating", "BE 歧义不得 fail 规划：{r:?}");
             let paths: Option<String> = sqlx::query_scalar(
                 "SELECT paths FROM flow_streams WHERE session_id='s1' AND stream_seq=0",
@@ -1080,12 +1268,18 @@ mod tests {
                     exit_code: 1,
                     output_tail: "UNSAT".into(),
                     sca_gcl: None,
-                    solver: None,
                 }),
             };
-            let r = plan_tas_inner(&pool, dir.path(), "s1", &client, "http://x")
-                .await
-                .unwrap();
+            let r = plan_tas_inner(
+                &pool,
+                dir.path(),
+                "s1",
+                &client,
+                "http://x",
+                GclSolverChoice::Z3,
+            )
+            .await
+            .unwrap();
             assert_eq!(r.status, "solver_failed", "{r:?}");
             let count: i64 =
                 sqlx::query_scalar("SELECT COUNT(*) FROM flow_gcl_plan WHERE session_id='s1'")
@@ -1119,12 +1313,18 @@ mod tests {
                     exit_code: 1,
                     output_tail: "UNSAT".into(),
                     sca_gcl: None,
-                    solver: None,
                 }),
             };
-            let r = plan_tas_inner(&pool, dir.path(), "s1", &client, "http://x")
-                .await
-                .unwrap();
+            let r = plan_tas_inner(
+                &pool,
+                dir.path(),
+                "s1",
+                &client,
+                "http://x",
+                GclSolverChoice::Z3,
+            )
+            .await
+            .unwrap();
             assert_eq!(r.status, "solver_failed", "{r:?}");
             let (status, _cycle, _algo, stale, wins) = read_plan_row(&pool).await.unwrap();
             assert_eq!(wins.len(), 1, "失败不得清上一次 windows");
@@ -1152,9 +1352,16 @@ mod tests {
             let client = MockPlanClient {
                 result: ok_plan_result(),
             };
-            let r = plan_tas_inner(&pool, dir.path(), "s1", &client, "http://x")
-                .await
-                .unwrap();
+            let r = plan_tas_inner(
+                &pool,
+                dir.path(),
+                "s1",
+                &client,
+                "http://x",
+                GclSolverChoice::Z3,
+            )
+            .await
+            .unwrap();
             assert_eq!(r.status, "ok", "{r:?}");
             let par = crate::gcl_raw_store::read_raw(dir.path(), "s1", GCL_PROVIDER)
                 .unwrap()
@@ -1189,12 +1396,18 @@ mod tests {
                     exit_code: 0,
                     output_tail: "ok".into(),
                     sca_gcl: Some(sca.into()),
-                    solver: Some("Z3".into()),
                 }),
             };
-            let r = plan_tas_inner(&pool, dir.path(), "s1", &client, "http://x")
-                .await
-                .unwrap();
+            let r = plan_tas_inner(
+                &pool,
+                dir.path(),
+                "s1",
+                &client,
+                "http://x",
+                GclSolverChoice::Z3,
+            )
+            .await
+            .unwrap();
             assert_eq!(r.status, "ok", "{r:?}");
             let (_, _, _, _, wins) = read_plan_row(&pool).await.unwrap();
             let find = |node: &str, eth: usize, idx: usize| {
@@ -1233,9 +1446,16 @@ mod tests {
             let client = MockPlanClient {
                 result: ok_plan_result(),
             };
-            let r = plan_tas_inner(&pool, dir.path(), "s1", &client, "http://x")
-                .await
-                .unwrap();
+            let r = plan_tas_inner(
+                &pool,
+                dir.path(),
+                "s1",
+                &client,
+                "http://x",
+                GclSolverChoice::Z3,
+            )
+            .await
+            .unwrap();
             assert_eq!(r.status, "ok", "{r:?}");
             let (_, _, _, _, wins) = read_plan_row(&pool).await.unwrap();
             let w = wins
@@ -1265,12 +1485,18 @@ mod tests {
                         "par N.sw01.eth[0].macLayer.queue.transmissionGate[0] durations []\n"
                             .into(),
                     ),
-                    solver: Some("Z3".into()),
                 }),
             };
-            let r = plan_tas_inner(&pool, dir.path(), "s1", &client, "http://x")
-                .await
-                .unwrap();
+            let r = plan_tas_inner(
+                &pool,
+                dir.path(),
+                "s1",
+                &client,
+                "http://x",
+                GclSolverChoice::Z3,
+            )
+            .await
+            .unwrap();
             assert_eq!(r.status, "solver_failed", "{r:?}");
         });
     }
@@ -1287,12 +1513,18 @@ mod tests {
                     exit_code: 0,
                     output_tail: String::new(),
                     sca_gcl: None,
-                    solver: None,
                 }),
             };
-            let r = plan_tas_inner(&pool, dir.path(), "s1", &client, "http://x")
-                .await
-                .unwrap();
+            let r = plan_tas_inner(
+                &pool,
+                dir.path(),
+                "s1",
+                &client,
+                "http://x",
+                GclSolverChoice::Z3,
+            )
+            .await
+            .unwrap();
             assert_eq!(r.status, "no_streams");
         });
     }
@@ -1312,9 +1544,16 @@ mod tests {
                 result: ok_plan_result(),
                 ini: std::sync::Mutex::new(None),
             };
-            let r = plan_tas_inner(&pool, dir.path(), "s1", &client, "http://x")
-                .await
-                .unwrap();
+            let r = plan_tas_inner(
+                &pool,
+                dir.path(),
+                "s1",
+                &client,
+                "http://x",
+                GclSolverChoice::Z3,
+            )
+            .await
+            .unwrap();
             assert_eq!(r.status, "ok", "{r:?}");
             let ini = client.ini.lock().unwrap().clone().expect("求解器应被调用");
             // specs 只含 ST → 稠密端口只有 1000；RC/BE 若混入会占 1001/1002。
@@ -1347,9 +1586,16 @@ mod tests {
                     result: ok_plan_result(),
                     ini: std::sync::Mutex::new(None),
                 };
-                let r = plan_tas_inner(&pool, dir.path(), "s1", &client, "http://x")
-                    .await
-                    .unwrap();
+                let r = plan_tas_inner(
+                    &pool,
+                    dir.path(),
+                    "s1",
+                    &client,
+                    "http://x",
+                    GclSolverChoice::Z3,
+                )
+                .await
+                .unwrap();
                 assert_eq!(r.status, "no_gating", "纯 {class}：{r:?}");
                 assert!(r.overall.contains("无需门控"), "{r:?}");
                 let (status, _, _, _, wins) = read_plan_row(&pool).await.unwrap();
@@ -1426,9 +1672,16 @@ mod tests {
                 result: ok_plan_result(),
                 ini: std::sync::Mutex::new(None),
             };
-            let r = plan_tas_inner(&pool, dir.path(), "s1", &client, "http://x")
-                .await
-                .unwrap();
+            let r = plan_tas_inner(
+                &pool,
+                dir.path(),
+                "s1",
+                &client,
+                "http://x",
+                GclSolverChoice::Z3,
+            )
+            .await
+            .unwrap();
             assert_eq!(r.status, "ok", "双平面不该 AMBIGUOUS_ROUTE：{r:?}");
             let ini = client.ini.lock().unwrap().clone().unwrap();
             assert!(

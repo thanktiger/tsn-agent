@@ -388,9 +388,15 @@ export function parseRedundantNodePaths(paths: string | null): [string[], string
   return [routes[0].nodePath, routes[1].nodePath];
 }
 
+/** 求解器选择（R8 修订：用户显式选择、穿透到 plan_tas，不做静默降级）。 */
+export type FlowSolverChoice = "inet-z3" | "inet-eager";
+
 /** 默认规划写通道 = plan_tas Tauri command（测试可注入替身）。 */
-export async function invokePlanTas(sessionId: string): Promise<PlanResult> {
-  return await invoke<PlanResult>("plan_tas", { request: { sessionId } });
+export async function invokePlanTas(
+  sessionId: string,
+  solver: FlowSolverChoice = "inet-z3",
+): Promise<PlanResult> {
+  return await invoke<PlanResult>("plan_tas", { request: { sessionId, solver } });
 }
 
 /** 默认验证写通道 = verify_tas Tauri command（测试可注入替身）。 */

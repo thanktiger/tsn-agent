@@ -47,9 +47,6 @@ pub struct HttpPlanResult {
     pub exit_code: i32,
     pub output_tail: String,
     pub sca_gcl: Option<String>,
-    /// 求解器出处（R8）：服务端跑 Z3 成功记 "Z3"，退 Eager 记 "Eager"。缺省视为 Z3。
-    #[serde(default)]
-    pub solver: Option<String>,
 }
 
 /// 规划路径 HTTP 客户端（KTD1：与验证路径的 `RemoteRunner` 分开——plan 回 GCL 文本不是 CSV，

@@ -368,6 +368,10 @@ pub struct SimOverrides {
     /// flow 专用（U6）：断链故障轮。Some → NED 加 scenarioManager 子模块 + ini 出 disconnect
     /// 脚本；None（健康轮/timesync/synth）→ 零输出，产物与无此字段时位级一致。
     pub fault: Option<FaultSpec>,
+    /// flow synth 专用：求解器选择（用户显式选择，不做静默降级）。false=Z3（SAT，带
+    /// maxLatency/零抖动保证）；true=Eager（贪心，无保证——Z3 unsat 时用户主动切换的出路，
+    /// 表质量由软仿验证把关）。verify/timesync 忽略。
+    pub eager_solver: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -1792,7 +1796,15 @@ fn build_flow_tas_ini(
     // --- 门控段 ---
     match schedule {
         FlowTasSchedule::Synth => {
-            ini.push_str("*.gateScheduleConfigurator.typename = \"Z3GateScheduleConfigurator\"\n");
+            // 求解器 = 用户显式选择（R8 修订：Z3 unsat 不静默降级，由用户切换 Eager）。
+            let configurator = if overrides.eager_solver {
+                "EagerGateScheduleConfigurator"
+            } else {
+                "Z3GateScheduleConfigurator"
+            };
+            ini.push_str(&format!(
+                "*.gateScheduleConfigurator.typename = \"{configurator}\"\n"
+            ));
             ini.push_str("*.gateScheduleConfigurator.gateCycleDuration = 1ms\n");
             // 帧开销：有 RC 的会话 +4B R-TAG（62B）——synth bundle 只装 ST，但会话是否有 RC
             // 由调用方经 overrides.has_rc 传入（KTD/spike：不计 R-TAG 的零余量窗必跨窗）。
@@ -2264,6 +2276,7 @@ mod tests {
             sim_time_s: Some(2.5),
             has_rc: false,
             fault: None,
+            eager_solver: false,
         };
         let b = build_timesync_sim_bundle(&nodes, &links, "1", &timing, &ov, "s1", 1).unwrap();
         let ini = &b.bundle.omnetpp_ini;
@@ -2283,6 +2296,7 @@ mod tests {
             sim_time_s: None,
             has_rc: false,
             fault: None,
+            eager_solver: false,
         };
         let b = build_timesync_sim_bundle(&nodes, &links, "1", &timing, &ov, "s1", 1).unwrap();
         let ini = &b.bundle.omnetpp_ini;

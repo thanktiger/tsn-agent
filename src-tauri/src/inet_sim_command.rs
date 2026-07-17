@@ -309,8 +309,9 @@ pub async fn run_timesync_sim(
         drift_rate_change_ppm: request.drift_rate_change_ppm,
         change_interval_ms: request.change_interval_ms,
         sim_time_s: request.sim_time_s,
-        has_rc: false, // timesync 无流量，恒 false（flow 专用）。
-        fault: None,   // 断链故障轮 flow 专用（U6），timesync 恒 None。
+        has_rc: false,       // timesync 无流量，恒 false（flow 专用）。
+        fault: None,         // 断链故障轮 flow 专用（U6），timesync 恒 None。
+        eager_solver: false, // 求解器选择 flow synth 专用，timesync 恒 false。
     };
     // 软仿走宿主机薄 HTTP 服务（单路径）。未配置地址 → 结构化提示，不弹 IPC 错。
     let Some(base_url) = crate::inet_sim_http_config::resolve_inet_sim_http_url(pool).await? else {
@@ -1140,6 +1141,7 @@ mod tests {
             sim_time_s: Some(2.5),
             has_rc: false,
             fault: None,
+            eager_solver: false,
         };
         let result = run_timesync_sim_inner(&pool, "s1", &overrides, &mock)
             .await

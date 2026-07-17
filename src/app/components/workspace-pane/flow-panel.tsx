@@ -49,7 +49,10 @@ export interface FlowPanelProps {
   selectedFlowSeq: number | null;
   onSelectFlowSeq: (seq: number | null) => void;
   /** 写通道（测试注入替身）。 */
-  planTas?: (sessionId: string) => Promise<PlanResult>;
+  planTas?: (
+    sessionId: string,
+    solver?: import("./flow-sim").FlowSolverChoice,
+  ) => Promise<PlanResult>;
   verifyTas?: (sessionId: string) => Promise<VerifyTasResult>;
   /** 流集查询读通道（U4，测试注入替身）。 */
   listFlowStreams?: (sessionId: string) => Promise<ListFlowStreamsResult>;
@@ -97,7 +100,8 @@ export function FlowPanel({
   // U5：门控详情弹窗开关（切会话重置）。
   const [gclDetailOpen, setGclDetailOpen] = useState(false);
 
-  // U1/U2（plan 2026-07-15-001）：求解器选择（KTD1 纯前端不穿透写通道；open-planner 置灰预留）
+  // U1/U2（plan 2026-07-15-001，R8 修订）：求解器选择穿透 plan_tas（inet-z3/inet-eager；
+  // open-planner 置灰预留）——Z3 unsat 明确报错，切 Eager 是用户显式动作。
   // + 重新规划两步流程 armed 快照（KTD2：挂 sessionId，切工程即失效，防跨工程残留）。
   const [solver, setSolver] = useState<GclSolverChoice>("inet-z3");
   const [replanSnapshot, setReplanSnapshot] = useState<{ sessionId: string } | null>(null);
@@ -205,7 +209,10 @@ export function FlowPanel({
     const runSessionId = sessionId;
     onPlanStateChange({ status: "running" });
     try {
-      const result = await planTas(runSessionId);
+      const result = await planTas(
+        runSessionId,
+        solver === "inet-eager" ? "inet-eager" : "inet-z3",
+      );
       if (runSessionId !== sessionIdRef.current) return;
       // 规划落地 → planState 转 done；明细刷新由 done effect 统一驱动（切 tab 重挂后完成也刷新，
       // 且刷新失败不吞——见 refreshPlanQuery）。
@@ -435,8 +442,9 @@ export function FlowPanel({
   );
 }
 
-/** 求解器选择值（CONCEPTS「求解器来源」）：inet-z3 现役；open-planner 预留（置灰不可选）。 */
-type GclSolverChoice = "inet-z3" | "open-planner";
+/** 求解器选择值（CONCEPTS「求解器来源」）：inet-z3/inet-eager 现役（R8 修订：Eager 由用户
+ * 显式选择、Z3 unsat 不静默降级）；open-planner 预留（置灰不可选）。 */
+type GclSolverChoice = "inet-z3" | "inet-eager" | "open-planner";
 
 /**
  * U1 求解器选择区（仅初始态渲染）：原生 radio 组（天然键盘可达）；open-planner disabled
@@ -460,7 +468,17 @@ function SolverPickerRegion({
           checked={solver === "inet-z3"}
           onChange={() => onSelect("inet-z3")}
         />
-        inet-z3
+        inet-z3（带保证）
+      </label>
+      <label className="solver-picker__option">
+        <input
+          type="radio"
+          name="gcl-solver"
+          value="inet-eager"
+          checked={solver === "inet-eager"}
+          onChange={() => onSelect("inet-eager")}
+        />
+        inet-eager（贪心，无保证）
       </label>
       <label
         className="solver-picker__option solver-picker__option--reserved"
