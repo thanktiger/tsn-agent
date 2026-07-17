@@ -61,10 +61,9 @@ pub(crate) fn parse_vec_csv(csv: &str) -> Vec<VecRow> {
         if f.len() <= need {
             continue;
         }
-        let values: Vec<f64> = f[vi]
-            .split_whitespace()
-            .filter_map(|x| x.parse::<f64>().ok())
-            .collect();
+        // 复用 timesync 的 parse_num_array（剥双引号单一实现）：scavetool 的 vecvalue 带引号，
+        // 裸切分后引号粘在首尾 token 上，直接 parse 会静默丢首尾样本 → 收包计数恒 -2 误判丢包。
+        let values = crate::inet_sim_command::parse_num_array(&f[vi]);
         out.push(VecRow {
             module: f[mi].clone(),
             name: f[ni].clone(),
@@ -296,4 +295,25 @@ pub(crate) fn gptp_diag_from_csv(
         worst_node,
         worst_offset_ns,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// scavetool CSV-R 的 vectime/vecvalue 字段带双引号（真机 CSV 实证）。裸逗号切分后引号
+    /// 粘在首尾 token 上，parse 失败被 filter_map 静默丢弃 → 每条向量首尾各丢 1 个样本、
+    /// 收包计数恒 -2 → 健康流「丢包 3 超在途容差 2」全体误判（2026-07-17 真机 ce-debug）。
+    /// 锁定：带引号的 vecvalue 必须全量解析（首尾样本在、计数不缩水）。
+    #[test]
+    fn parse_vec_csv_strips_field_quotes() {
+        let csv = "Environment for 'omnetpp' ready.\n\
+                   run,type,module,name,attrname,attrvalue,vectime,vecvalue\n\
+                   r1,vector,Net.es08.app[1].sink,packetLifeTime:vector,,,\"0.625 0.6255 0.626\",\"1.02e-05 1.03e-05 1.04e-05\"\n";
+        let rows = parse_vec_csv(csv);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].values.len(), 3, "首尾样本不得因引号被静默丢弃");
+        assert!((rows[0].values[0] - 1.02e-05).abs() < 1e-12, "首样本在");
+        assert!((rows[0].values[2] - 1.04e-05).abs() < 1e-12, "尾样本在");
+    }
 }
