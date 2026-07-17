@@ -685,6 +685,31 @@ describe("FlowPanel", () => {
     expect(await screen.findByText(/门控综合失败/)).toBeTruthy();
     // 旧 GCL 的图表展示在门控详情弹窗，面板不再画图。
     expect(screen.queryByRole("img", { name: "门控时序图" })).toBeNull();
+    // boss 真机反馈：失败横幅下不得再渲染上一次规划的门控概览八卡（像本次出的表，误导）。
+    // 旧表仍在库与「门控详情」弹窗，不丢数据。
+    expect(screen.queryByText("门控概览")).toBeNull();
+  });
+
+  it("失败态：message（INET 原始输出）收进折叠区，不裸渲染", async () => {
+    const solverFailed = planOk({
+      status: "solver_failed",
+      solver: undefined,
+      gateCount: 0,
+      overall: "Z3 判定约束不可满足（unsat）…",
+      message: "Loading NED files…\n<!> Error: The specified constraints might not be satisfiable.",
+    });
+    const getGclDetail = vi.fn(async () => gclDetailPlanned());
+    render(
+      <FlowPanel
+        {...baseProps({ getGclDetail, planState: { status: "done", result: solverFailed } })}
+      />,
+    );
+    await screen.findByText(/约束不可满足/);
+    const toggle = screen.getByText("查看详细输出");
+    // 折叠区默认收起：details 无 open 属性。
+    const details = toggle.closest("details");
+    expect(details).toBeTruthy();
+    expect(details?.hasAttribute("open")).toBe(false);
   });
 
   it("会话切换后迟到结果被丢弃", async () => {

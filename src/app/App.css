@@ -4889,3 +4889,14 @@ button.gcl-overview-card:disabled {
   font-size: 12px;
   color: var(--text-muted);
 }
+
+/* 规划失败态：INET 原始输出折叠区（横幅是主信息，日志按需展开）。 */
+.flow-plan-log summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text-secondary, #666);
+  user-select: none;
+}
+.flow-plan-log[open] summary {
+  margin-bottom: 4px;
+}

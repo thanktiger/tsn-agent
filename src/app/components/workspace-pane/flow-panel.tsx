@@ -201,6 +201,13 @@ export function FlowPanel({
   const gclStale = gclQuery.status === "loaded" && (gclQuery.detail.meta?.stale ?? false);
 
   const planDisabled = !inFlowStage || planning;
+  // 本次规划尝试失败（solver_failed/bundle_error/unreachable/route_error… 或命令抛错）：
+  // no_gating 不算失败（蓝色信息态）。仅本会话运行记忆生效，切会话/重启回库态呈现。
+  const planAttemptFailed =
+    planState.status === "error" ||
+    (planState.status === "done" &&
+      !planSucceeded(planState.result) &&
+      planState.result.status !== "no_gating");
   const verifyDisabled = !inFlowStage || verifying || planning || !havePlan || gclStale;
 
   async function handlePlan() {
@@ -351,11 +358,16 @@ export function FlowPanel({
           )}
 
           {/* U9/R15：门控概览八卡（仅已规划态渲染；数据源=get_gcl_detail，与详情弹窗同源 KTD8）。
-              U2：渲染条件不含 fresh，Armed 须单独收口，否则八卡与初始 CTA 同屏。 */}
+              U2：渲染条件不含 fresh，Armed 须单独收口，否则八卡与初始 CTA 同屏。
+              boss 真机反馈（unsat 案）：本次规划失败时不渲染——失败横幅下挂上一次成功规划的
+              概览像"本次出的表"，误导；旧表数据仍在库与「门控详情」弹窗，不丢。 */}
           {queryPresentation === "planned" &&
             gclQuery.status === "loaded" &&
             !replanArmed &&
-            !planning && <GclOverviewSection overview={buildGclOverview(gclQuery.detail)} />}
+            !planning &&
+            !planAttemptFailed && (
+              <GclOverviewSection overview={buildGclOverview(gclQuery.detail)} />
+            )}
 
           {/*
             R4：RC 流的 redundant/paths 字段「仅 RC 才显」是**录入表单**规则；本面板是规划/软仿
@@ -530,7 +542,13 @@ function PlanResultArea({
           <div className="sim-overall warn flow-overall" role="status" aria-label="规划总判定">
             {result.overall}
           </div>
-          {result.message && <p className="flow-message mono">{result.message}</p>}
+          {/* INET 原始输出收进折叠区（boss 真机反馈：整段日志裸渲染压过横幅）。 */}
+          {result.message && (
+            <details className="flow-plan-log">
+              <summary>查看详细输出</summary>
+              <p className="flow-message mono">{result.message}</p>
+            </details>
+          )}
         </>
       );
     }
