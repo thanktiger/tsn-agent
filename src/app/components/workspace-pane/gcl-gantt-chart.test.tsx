@@ -104,10 +104,11 @@ describe("buildGanttOption", () => {
     expect(yAxis.data).toEqual(["sw2.G2", "sw1.G1"]);
   });
 
-  it("X 轴 value 0..cycleNs/1000（μs）", () => {
+  it("X 轴位于顶部，value 0..cycleNs/1000（μs）", () => {
     const option = buildGanttOption(makeModel(), CYCLE_NS);
-    const xAxis = option.xAxis as { type: string; min: number; max: number };
+    const xAxis = option.xAxis as { type: string; position: string; min: number; max: number };
     expect(xAxis.type).toBe("value");
+    expect(xAxis.position).toBe("top");
     expect(xAxis.min).toBe(0);
     expect(xAxis.max).toBe(1000);
   });
@@ -186,14 +187,12 @@ describe("buildGanttOption", () => {
     expect(formatter({ dataIndex: 99 })).toBe("");
   });
 
-  it("dataZoom = inside + slider，均 weakFilter 挂 x 轴", () => {
+  it("dataZoom 仅保留 inside，不渲染底部 slider", () => {
     const option = buildGanttOption(makeModel(), CYCLE_NS);
     const zooms = option.dataZoom as DataZoomComponentOption[];
-    expect(zooms.map((z) => z.type)).toEqual(["inside", "slider"]);
-    for (const z of zooms) {
-      expect(z.filterMode).toBe("weakFilter");
-      expect(z.xAxisIndex).toBe(0);
-    }
+    expect(zooms.map((z) => z.type)).toEqual(["inside"]);
+    expect(zooms[0].filterMode).toBe("weakFilter");
+    expect(zooms[0].xAxisIndex).toBe(0);
   });
 
   it("renderItem 输出 group：圆角 rect 着窗色 + 居中徽章 text", () => {

@@ -122,6 +122,20 @@ describe("GclDetailModal", () => {
     expect(screen.getByRole("table")).toBeInTheDocument();
   });
 
+  it("三页签位于流量和节点筛选下拉上方", async () => {
+    renderModal(makeDetail());
+    const tablist = await screen.findByRole("tablist", { name: "门控详情页签" });
+    const flowFilter = screen.getByRole("combobox", { name: "流量" });
+    const nodeFilter = screen.getByRole("combobox", { name: "节点" });
+
+    expect(tablist.compareDocumentPosition(flowFilter) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(
+      0,
+    );
+    expect(tablist.compareDocumentPosition(nodeFilter) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(
+      0,
+    );
+  });
+
   it("ESC 键关闭弹窗", async () => {
     const user = userEvent.setup();
     const { onClose } = renderModal(makeDetail());

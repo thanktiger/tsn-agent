@@ -46,13 +46,18 @@ function baseProps(overrides: Partial<FlowStreamListProps> = {}): FlowStreamList
 }
 
 describe("FlowStreamList", () => {
-  it("每条流渲染一行，显示类别徽章和主要信息", () => {
+  it("类型和流量ID分列展示", () => {
     const streams = [
       makeStream({ streamSeq: 0, class: "ST", talker: "es1", listener: "es2" }),
       makeStream({ streamSeq: 1, class: "RC", talker: "es2", listener: "es3" }),
       makeStream({ streamSeq: 2, class: "BE", talker: "es3", listener: "es4" }),
     ];
     render(<FlowStreamList {...baseProps({ streams })} />);
+    expect(screen.getByRole("columnheader", { name: "类型" })).toBeTruthy();
+    expect(screen.getByRole("columnheader", { name: "流量ID" })).toBeTruthy();
+    const firstRowCells = screen.getAllByRole("row")[1].querySelectorAll("td");
+    expect(firstRowCells[0].textContent).toBe("ST");
+    expect(firstRowCells[1].textContent).toBe("F0");
     // 每行带 F{streamSeq}
     expect(screen.getByText("F0")).toBeTruthy();
     expect(screen.getByText("F1")).toBeTruthy();

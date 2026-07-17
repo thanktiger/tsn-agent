@@ -4,7 +4,7 @@ import { PanelCta } from "./panel-cta";
 
 /**
  * 流量列表组件（U4 → 表格化重构，对齐参考规范图）：
- * 列 = 流id（class 徽章 + F{seq}）/ 节点路径 / 流名称 / PCP / 周期 / 最大帧长 / 抖动 / 最大延迟 / 操作。
+ * 列 = 类型（class 徽章）/ 流量ID（F{seq}）/ 节点路径 / 流名称 / PCP / 周期 / 最大帧长 / 抖动 / 最大延迟 / 操作。
  * - ST=CHART_COLORS[0]（#0072B2），BE=CHART_COLORS[1]（#E69F00），RC=CHART_COLORS[2]（#009E73）。
  * - 行单击切换 selectedFlowSeq（已选再点→null）；「详情」按钮触发 onOpenDetail。
  * - isLoading=true 且无数据 → 不出 PanelCta；isLoading=false 且无数据 → 出 PanelCta。
@@ -54,7 +54,8 @@ export function FlowStreamList({
         <table className="eng-table flow-stream-table">
           <thead>
             <tr>
-              <th>流id</th>
+              <th>类型</th>
+              <th>流量ID</th>
               <th>节点路径</th>
               <th>流名称</th>
               <th>PCP优先级</th>
@@ -92,8 +93,8 @@ export function FlowStreamList({
                     >
                       {s.class}
                     </span>
-                    <span className="flow-stream-seq mono">F{s.streamSeq}</span>
                   </td>
+                  <td className="flow-stream-seq mono">F{s.streamSeq}</td>
                   <td className="flow-stream-route mono">{nodePathText(s)}</td>
                   <td>{s.name ?? "—"}</td>
                   <td className="mono">{s.pcp}</td>

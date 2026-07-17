@@ -1791,7 +1791,16 @@ describe("decorateFlowHighlightEdges（U6 纯函数）", () => {
   it("flowRouteMap 中无对应条目时原样返回", () => {
     const edges = makeEdges(["link-0"]);
     const map = new Map<number, FlowRouteEntry>([
-      [2, { streamSeq: 2, linkIds: ["link-0"], planeBLinkIds: null }],
+      [
+        2,
+        {
+          streamSeq: 2,
+          linkIds: ["link-0"],
+          linkDirections: ["forward"],
+          planeBLinkIds: null,
+          planeBLinkDirections: null,
+        },
+      ],
     ]);
     const result = decorateFlowHighlightEdges(edges, 99, map);
     expect(result).toBe(edges);
@@ -1800,10 +1809,21 @@ describe("decorateFlowHighlightEdges（U6 纯函数）", () => {
   it("ST 单平面：命中边加 flow-highlighted，其余边加 flow-dimmed", () => {
     const edges = makeEdges(["link-0", "link-1", "link-2"]);
     const map = new Map<number, FlowRouteEntry>([
-      [1, { streamSeq: 1, linkIds: ["link-0"], planeBLinkIds: null }],
+      [
+        1,
+        {
+          streamSeq: 1,
+          linkIds: ["link-0"],
+          linkDirections: ["forward"],
+          planeBLinkIds: null,
+          planeBLinkDirections: null,
+        },
+      ],
     ]);
     const result = decorateFlowHighlightEdges(edges, 1, map);
     expect(result[0].className).toContain("flow-highlighted");
+    expect(result[0].className).toContain("flow-primary");
+    expect(result[0].className).toContain("flow-forward");
     expect(result[1].className).toContain("flow-dimmed");
     expect(result[2].className).toContain("flow-dimmed");
     expect(result[0].className).not.toContain("flow-dimmed");
@@ -1812,18 +1832,40 @@ describe("decorateFlowHighlightEdges（U6 纯函数）", () => {
   it("RC 双平面：planeBLinkIds 中的边也加 flow-highlighted", () => {
     const edges = makeEdges(["link-0", "link-1", "link-2"]);
     const map = new Map<number, FlowRouteEntry>([
-      [3, { streamSeq: 3, linkIds: ["link-0"], planeBLinkIds: ["link-1"] }],
+      [
+        3,
+        {
+          streamSeq: 3,
+          linkIds: ["link-0"],
+          linkDirections: ["forward"],
+          planeBLinkIds: ["link-1"],
+          planeBLinkDirections: ["reverse"],
+        },
+      ],
     ]);
     const result = decorateFlowHighlightEdges(edges, 3, map);
     expect(result[0].className).toContain("flow-highlighted");
     expect(result[1].className).toContain("flow-highlighted");
+    expect(result[0].className).toContain("flow-primary");
+    expect(result[0].className).toContain("flow-forward");
+    expect(result[1].className).toContain("flow-redundant");
+    expect(result[1].className).toContain("flow-reverse");
     expect(result[2].className).toContain("flow-dimmed");
   });
 
   it("planeBLinkIds 为 null 时不抛（视为空数组）", () => {
     const edges = makeEdges(["link-0"]);
     const map = new Map<number, FlowRouteEntry>([
-      [5, { streamSeq: 5, linkIds: ["link-0"], planeBLinkIds: null }],
+      [
+        5,
+        {
+          streamSeq: 5,
+          linkIds: ["link-0"],
+          linkDirections: ["forward"],
+          planeBLinkIds: null,
+          planeBLinkDirections: null,
+        },
+      ],
     ]);
     expect(() => decorateFlowHighlightEdges(edges, 5, map)).not.toThrow();
   });
@@ -1834,7 +1876,16 @@ describe("applyFlowEdgeDecoration（R16 路径预览优先级）", () => {
     return ids.map((id) => ({ id, source: "a", target: "b" }));
   }
   const map = new Map<number, FlowRouteEntry>([
-    [1, { streamSeq: 1, linkIds: ["link-0"], planeBLinkIds: null }],
+    [
+      1,
+      {
+        streamSeq: 1,
+        linkIds: ["link-0"],
+        linkDirections: ["forward"],
+        planeBLinkIds: null,
+        planeBLinkDirections: null,
+      },
+    ],
   ]);
 
   it("previewLinkSeqs 非 null 时覆盖 selectedFlowSeq 高亮", () => {

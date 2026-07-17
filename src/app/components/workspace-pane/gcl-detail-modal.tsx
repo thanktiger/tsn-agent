@@ -142,7 +142,7 @@ function FlowRefCell({
 
 /**
  * 全屏「门控详情」弹窗（U5，R7/R10/R13）：三页签（门控可视化 / 流量维度 / 门控表）+
- * 头部元信息 + 双筛选下拉（三页签联动同一 state）+ 数据三态。open=true 挂载即拉数据、
+ * 头部元信息 + 页签 + 双筛选下拉（三页签联动同一 state）+ 数据三态。open=true 挂载即拉数据、
  * 打开时筛选器重置「全部」（R7）。结构照 flow-detail-modal 先例（layer / backdrop button /
  * section role=dialog / ESC 关闭），尺寸全屏（92vw × 88vh）。
  */
@@ -253,6 +253,24 @@ export function GclDetailModal({
               · {overview.gatedPortCount} 个门控端口 · {overview.openWindowCount} 个打开窗口
             </p>
 
+            {/* 三页签分段开关：置于流量/节点筛选之上。 */}
+            <div className="flow-subtabs gcl-detail-tabs" role="tablist" aria-label="门控详情页签">
+              {GCL_DETAIL_TABS.map((tab) => (
+                <button
+                  key={tab.id}
+                  type="button"
+                  role="tab"
+                  id={`gcl-detail-tab-${tab.id}`}
+                  aria-selected={activeTab === tab.id}
+                  aria-controls={`gcl-detail-tabpanel-${tab.id}`}
+                  className={activeTab === tab.id ? "flow-subtab active" : "flow-subtab"}
+                  onClick={() => setActiveTab(tab.id)}
+                >
+                  {tab.label}
+                </button>
+              ))}
+            </div>
+
             {/* 双筛选下拉（单选默认「全部」，三页签联动同一 state）。 */}
             <div className="gcl-detail-filters">
               <label htmlFor="gcl-filter-flow">流量</label>
@@ -288,24 +306,6 @@ export function GclDetailModal({
                   </option>
                 ))}
               </select>
-            </div>
-
-            {/* 三页签分段开关（照 flow-subtabs 先例）。 */}
-            <div className="flow-subtabs gcl-detail-tabs" role="tablist" aria-label="门控详情页签">
-              {GCL_DETAIL_TABS.map((tab) => (
-                <button
-                  key={tab.id}
-                  type="button"
-                  role="tab"
-                  id={`gcl-detail-tab-${tab.id}`}
-                  aria-selected={activeTab === tab.id}
-                  aria-controls={`gcl-detail-tabpanel-${tab.id}`}
-                  className={activeTab === tab.id ? "flow-subtab active" : "flow-subtab"}
-                  onClick={() => setActiveTab(tab.id)}
-                >
-                  {tab.label}
-                </button>
-              ))}
             </div>
 
             <div className="gcl-detail-body">
