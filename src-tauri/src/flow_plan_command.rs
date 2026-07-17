@@ -1318,9 +1318,9 @@ mod tests {
             assert_eq!(r.status, "ok", "{r:?}");
             let ini = client.ini.lock().unwrap().clone().expect("求解器应被调用");
             // specs 只含 ST → 稠密端口只有 1000；RC/BE 若混入会占 1001/1002。
-            assert!(ini.contains("destPort = 1000"), "{ini}");
-            assert!(!ini.contains("destPort = 1001"), "RC 不得进 bundle：{ini}");
-            assert!(!ini.contains("destPort = 1002"), "BE 不得进 bundle：{ini}");
+            assert!(ini.contains("destPort = 6000"), "{ini}");
+            assert!(!ini.contains("destPort = 6001"), "RC 不得进 bundle：{ini}");
+            assert!(!ini.contains("destPort = 6002"), "BE 不得进 bundle：{ini}");
             // 只 1 个源 app；识别/编码/配置器均无 RC(pcp6)/BE(pcp0) 条目。
             assert_eq!(ini.matches("UdpSourceApp").count(), 1, "{ini}");
             assert!(ini.contains("pcp: 7"), "{ini}");
