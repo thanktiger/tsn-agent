@@ -187,7 +187,9 @@ fn split_csv_row(line: &str) -> Vec<&str> {
     line.split(',').collect()
 }
 
-fn parse_num_array(s: &str) -> Vec<f64> {
+/// pub(crate)：flow 判定的 parse_vec_csv 复用（KTD3 绝不各算一份——scavetool 的
+/// vectime/vecvalue 带双引号，剥引号必须单一实现，漏剥会静默丢首尾样本）。
+pub(crate) fn parse_num_array(s: &str) -> Vec<f64> {
     s.trim()
         .trim_matches('"')
         .split_whitespace()
