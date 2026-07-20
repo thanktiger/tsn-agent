@@ -199,7 +199,7 @@ export function parallelFloatingEdgeAnchors(
 }
 
 /**
- * 端口标签锚点：吸附点沿出射方向外推。
+ * 自环端口标签锚点：无有效连线方向可用时，仍沿节点边框外推。
  * 同节点同方位的多条边交点相邻，标签按序数 ord 分层外推防重叠。
  */
 export function portLabelPoint(
@@ -222,6 +222,33 @@ export function portLabelPoint(
     default:
       return { x: x + h, y };
   }
+}
+
+/**
+ * 普通连线的端口标签锚点：从端点沿实际直线边向内缩，使水平、垂直、斜线的标签都落在连线上。
+ * ord 仍用于错开同侧多条线的标签；距离限制为线长的 1/3，避免短连线的源、目标端标签挤到同一位置。
+ */
+export function portLabelPointOnLine(
+  from: { x: number; y: number },
+  to: { x: number; y: number },
+  ord = 0,
+  avoidMarker = false,
+): { x: number; y: number } {
+  const dx = to.x - from.x;
+  const dy = to.y - from.y;
+  const length = Math.hypot(dx, dy);
+  if (!Number.isFinite(length) || length < 1) {
+    return from;
+  }
+
+  const safeOrd = Math.max(0, Math.floor(ord));
+  const requestedInset = 18 + (avoidMarker ? 10 : 0) + safeOrd * 18;
+  const inset = Math.min(requestedInset, length / 3);
+  const ratio = inset / length;
+  return {
+    x: from.x + dx * ratio,
+    y: from.y + dy * ratio,
+  };
 }
 
 function PortLabel({
@@ -329,27 +356,35 @@ export function TsnFloatingEdge(props: EdgeProps) {
     ty: anchors.sy,
   });
   // U8/KTD1：src_port 标在 source 端、dst_port 标在 target 端（几何无关，跟节点不跟屏幕）。
-  // 自环（src===dst）端点重合：两标签各自反向小偏移（src 上、dst 下）防叠压。
+  // 普通边的标签沿实际连线向内缩；自环（src===dst）端点重合，仍用 src 上、dst 下的反向小偏移防叠压。
   const selfLoop = data.selfLoop === true;
   const hasSrc = typeof data.srcPort === "number";
   const hasDst = typeof data.dstPort === "number";
   const src = hasSrc
-    ? portLabelPoint(
-        anchors.sx,
-        anchors.sy,
-        selfLoop ? Position.Top : anchors.sourcePosition,
-        data.srcOrd ?? 0,
-        Boolean(markerStart),
-      )
+    ? selfLoop
+      ? portLabelPoint(anchors.sx, anchors.sy, Position.Top, data.srcOrd ?? 0, Boolean(markerStart))
+      : portLabelPointOnLine(
+          { x: anchors.sx, y: anchors.sy },
+          { x: anchors.tx, y: anchors.ty },
+          data.srcOrd ?? 0,
+          Boolean(markerStart),
+        )
     : undefined;
   const dst = hasDst
-    ? portLabelPoint(
-        anchors.tx,
-        anchors.ty,
-        selfLoop ? Position.Bottom : anchors.targetPosition,
-        data.dstOrd ?? 0,
-        Boolean(markerEnd),
-      )
+    ? selfLoop
+      ? portLabelPoint(
+          anchors.tx,
+          anchors.ty,
+          Position.Bottom,
+          data.dstOrd ?? 0,
+          Boolean(markerEnd),
+        )
+      : portLabelPointOnLine(
+          { x: anchors.tx, y: anchors.ty },
+          { x: anchors.sx, y: anchors.sy },
+          data.dstOrd ?? 0,
+          Boolean(markerEnd),
+        )
     : undefined;
 
   return (

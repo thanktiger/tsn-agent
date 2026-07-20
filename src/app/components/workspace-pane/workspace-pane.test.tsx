@@ -182,6 +182,7 @@ import {
   floatingEdgeAnchors,
   parallelFloatingEdgeAnchors,
   portLabelPoint,
+  portLabelPointOnLine,
   straightFloatingEdgePath,
   TsnFloatingEdge,
 } from "./tsn-floating-edge";
@@ -1001,6 +1002,20 @@ describe("floatingEdgeAnchors（U3 交点纯函数）", () => {
     expect(portLabelPoint(100, 50, "top" as never, 1)).toEqual({ x: 100, y: 23 });
     expect(portLabelPoint(100, 50, "bottom" as never, 2)).toEqual({ x: 100, y: 90 });
     expect(portLabelPoint(100, 50, "right" as never, 1)).toEqual({ x: 136, y: 50 });
+  });
+
+  it("斜连线的端口标签沿实际路径向内缩，不回退到水平/垂直外推", () => {
+    const source = portLabelPointOnLine({ x: 100, y: 50 }, { x: 200, y: 150 });
+    const target = portLabelPointOnLine({ x: 200, y: 150 }, { x: 100, y: 50 });
+    const nextLevel = portLabelPointOnLine({ x: 100, y: 50 }, { x: 200, y: 150 }, 1);
+
+    expect(source.x).toBeCloseTo(112.73, 2);
+    expect(source.y).toBeCloseTo(62.73, 2);
+    expect(target.x).toBeCloseTo(187.27, 2);
+    expect(target.y).toBeCloseTo(137.27, 2);
+    // ord 递增仍向线中心错开，且三点始终共线（斜率=1）。
+    expect(nextLevel.x).toBeCloseTo(125.46, 2);
+    expect(nextLevel.y - 50).toBeCloseTo(nextLevel.x - 100, 6);
   });
 });
 
