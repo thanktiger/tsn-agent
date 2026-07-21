@@ -4505,28 +4505,6 @@ button.gcl-overview-card:disabled {
   cursor: not-allowed;
 }
 
-.landing-examples {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  justify-content: center;
-}
-
-.landing-example-chip {
-  padding: 5px 12px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  background: var(--bg-secondary);
-  color: var(--text-secondary);
-  font-size: 12px;
-  cursor: pointer;
-}
-
-.landing-example-chip:hover {
-  border-color: var(--accent);
-  color: var(--text-primary);
-}
-
 .landing-gallery {
   display: flex;
   flex-direction: column;
@@ -4572,6 +4550,16 @@ button.gcl-overview-card:disabled {
   gap: 12px;
 }
 
+.landing-template-cards {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.landing-template-cards .landing-card {
+  width: 100%;
+  max-width: none;
+}
+
 .landing-card {
   position: relative;
   flex: 1 1 260px;
@@ -4599,6 +4587,91 @@ button.gcl-overview-card:disabled {
   cursor: pointer;
 }
 
+.landing-topology-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+  margin-top: 4px;
+}
+
+.landing-topology-preview svg {
+  width: 100%;
+  height: 104px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-primary);
+}
+
+.landing-topology-preview .grid-dot {
+  fill: #d8dce3;
+}
+
+.landing-topology-preview line {
+  stroke: #a8b0c0;
+  stroke-width: 1.25;
+}
+
+.landing-topology-preview line.plane-a {
+  stroke: var(--plane-a);
+}
+
+.landing-topology-preview line.plane-b {
+  stroke: var(--plane-b);
+}
+
+.landing-topology-preview .preview-node .node-surface {
+  fill: rgba(255, 255, 255, 0.96);
+  stroke-width: 0.65;
+}
+
+.landing-topology-preview .preview-node.switch .node-surface {
+  fill: #f3f6fa;
+  stroke: rgba(51, 65, 85, 0.65);
+}
+
+.landing-topology-preview .preview-node.end-system .node-surface {
+  fill: rgba(255, 255, 255, 0.96);
+  stroke: rgba(250, 84, 28, 0.65);
+}
+
+.landing-topology-preview .preview-node.switch .node-type {
+  fill: #334155;
+}
+
+.landing-topology-preview .preview-node.end-system .node-type {
+  fill: var(--accent);
+}
+
+.landing-topology-counts i.switch {
+  background: #334155;
+}
+
+.landing-topology-counts i.end-system {
+  background: var(--accent);
+}
+
+.landing-topology-counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.landing-topology-counts span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.landing-topology-counts i {
+  display: block;
+  width: 7px;
+  height: 7px;
+  border-radius: 2px;
+}
+
 .landing-card-main:disabled {
   opacity: 0.55;
   cursor: not-allowed;
@@ -4613,11 +4686,6 @@ button.gcl-overview-card:disabled {
   border-radius: 999px;
   font-size: 11px;
   font-weight: 600;
-}
-
-.landing-card-badge.spark {
-  background: color-mix(in srgb, var(--accent) 16%, transparent);
-  color: var(--accent);
 }
 
 .landing-card-badge.zap {

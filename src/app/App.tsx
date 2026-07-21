@@ -5,7 +5,7 @@ import "@xyflow/react/dist/style.css";
 import { createRunId, runTsnAgent } from "../agent/agent-adapter";
 import type { ToolCallRecord } from "../agent/tool-call-record";
 import tsnAgentMark from "../assets/tsn-agent-mark.png";
-import { getScenarioConfig, SCENARIO_CONFIGS } from "../domain/scenario-config";
+import { getScenarioConfig } from "../domain/scenario-config";
 import { recordStageResult } from "../project/project-state";
 import { appVersion } from "../release/release-info";
 import {
@@ -48,11 +48,6 @@ import {
 
 const repository: SessionRepository = createSessionRepository();
 const templateService = createTemplateService();
-const LANDING_EXAMPLES = Object.values(SCENARIO_CONFIGS).map((config) => ({
-  id: config.id,
-  label: config.displayName,
-  intent: config.exampleIntent,
-}));
 const ASSISTANT_CONNECTING_MESSAGE = "正在连接智能助手，并结合当前工程上下文生成下一步规划...";
 const SESSION_TITLE_MAX_CHARS = 24;
 
@@ -699,7 +694,6 @@ export function App() {
         {showLanding ? (
           <LandingPage
             templates={templates}
-            examples={LANDING_EXAMPLES}
             busy={landingBusy || isAgentRunning}
             onSubmitIntent={(text) => void submitIntent(text)}
             onUsePrompt={handleUsePromptTemplate}
